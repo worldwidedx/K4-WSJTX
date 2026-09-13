@@ -584,7 +584,7 @@ private slots:
   void on_outAttenuation_valueChanged (int);
   void rigOpen ();
   void handle_transceiver_update (Transceiver::TransceiverState const&);
-  void handle_transceiver_closing (bool failed);
+  void handle_k4_rf_power_setting (double, bool);
   void handle_transceiver_failure (QString const& reason);
   void handle_leavingSettings();
   void on_actionAstronomical_data_toggled (bool);
@@ -1459,6 +1459,8 @@ private:
 #endif
   bool m_block_pwr_tooltip;
   bool m_PwrBandSetOK;
+  double m_k4_rf_power {-1.};
+  bool m_k4_power_milliwatts {false};
   bool m_bDisplayedOnce;
   double m_toneSpacing;
   QTimer m_heartbeat;

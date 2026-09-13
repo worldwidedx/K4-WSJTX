@@ -231,6 +231,11 @@ public:
     Q_SLOT virtual void enqueue_jtty_pcm (QByteArray const&, TxAudioQueueEpoch, qint64) noexcept {}
     Q_SLOT virtual void clear_jtty_pcm (TxAudioQueueEpoch) noexcept {}
 
+  // Optional remote-radio input calibration. Concrete network-audio rigs can
+  // override these; ordinary CAT implementations retain the no-op default.
+  Q_SLOT virtual void calibrate_remote_input () {}
+  Q_SLOT virtual void cancel_remote_input_calibration () {}
+
   //
   // asynchronous status updates
   //
@@ -249,14 +254,14 @@ public:
   // rig audio data transfer  w3sz tci
   Q_SIGNAL void tci_mod_active (bool);
 
-  // Diagnostics only: source commitment and TCI protocol-send progress.
-  Q_SIGNAL void txSourceCommitted (TxEvidence::TxStartSnapshot);
-  Q_SIGNAL void rawTxPlayoutSnapshot (TxEvidence::TxRawPlayoutSnapshot);
-
-  Q_SIGNAL void jtty_drained (TxAudioQueueDrainState drain);
-  Q_SIGNAL void jtty_enqueue_accepted (qint64 enqueueId, qint64 sampleCount,
-                                       TxAudioQueueProgress progress);
-    Q_SIGNAL void jtty_enqueue_failed (TxAudioQueueEpoch epoch, qint64 enqueueId);
+  Q_SIGNAL void remote_input_calibration_progress (QString const& message,
+                                                   float gain) const;
+  Q_SIGNAL void remote_input_calibration_finished (bool success,
+                                                   QString const& message,
+                                                   float gain,
+                                                   QString const& radio_context) const;
+  Q_SIGNAL void remote_tx_error (QString const& message) const;
+  Q_SIGNAL void rf_power_setting (double value, bool milliwatts) const;
 
   // rig state changed
   Q_SIGNAL void update (Transceiver::TransceiverState const&,

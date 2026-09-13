@@ -18,6 +18,10 @@ jnq*
 __pycache__
 cmake-build-debug
 cmake-build-release
+/build-*/
+/.tools/
+/stage-main/
+/K4-WSJT-X-*-win64*.exe
 CMakeFiles
 fnd
 lib/77bit/tmp

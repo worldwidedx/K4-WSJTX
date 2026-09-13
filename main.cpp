@@ -318,7 +318,9 @@ int main(int argc, char *argv[])
       std::locale::global (std::locale::classic ());
 
       // Override programs executable basename as application name.
-      a.setApplicationName ("WSJT-X");
+      // Keep this fork's settings, lock files, and writable data separate from
+      // an upstream WSJT-X installation on the same desktop.
+      a.setApplicationName ("K4 WSJT-X");
       a.setApplicationVersion (version ());
 
       QCommandLineParser parser;

@@ -1238,10 +1238,13 @@
          <item row="1" column="7" rowspan="2">
           <widget class="TxDriveSlider" name="outAttenuation">
            <property name="toolTip">
-            <string>Adjust transmit drive level</string>
-           </property>
-           <property name="maximum">
-            <number>450</number>
+             <string>Set K4 RF output power</string>
+            </property>
+            <property name="minimum">
+             <number>0</number>
+            </property>
+            <property name="maximum">
+             <number>199</number>
            </property>
            <property name="value">
             <number>0</number>
@@ -1249,11 +1252,17 @@
            <property name="orientation">
             <enum>Qt::Vertical</enum>
            </property>
-           <property name="invertedAppearance">
-            <bool>true</bool>
+            <property name="invertedAppearance">
+             <bool>false</bool>
+            </property>
+            <property name="invertedControls">
+             <bool>false</bool>
            </property>
-           <property name="invertedControls">
-            <bool>true</bool>
+           <property name="tickPosition">
+            <enum>QSlider::TicksBelow</enum>
+           </property>
+            <property name="tickInterval">
+             <number>10</number>
            </property>
           </widget>
          </item>

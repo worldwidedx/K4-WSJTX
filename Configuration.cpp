@@ -157,7 +157,10 @@
 #include <QDir>
 #include <QTemporaryFile>
 #include <QFormLayout>
-#include <QItemSelectionModel>
+#include <QGroupBox>
+#include <QLabel>
+#include <QPushButton>
+#include <QSpinBox>
 #include <QString>
 #include <QStringList>
 #include <QStringListModel>
@@ -171,7 +174,7 @@
 #include <QFont>
 #include <QFontDialog>
 #include <QComboBox>
-#include <QScopedValueRollback>
+#include <QCheckBox>
 #include <QScopedPointer>
 #include <QNetworkInterface>
 #include <QHostInfo>
@@ -205,6 +208,8 @@
 #include "item_delegates/MessageItemDelegate.hpp"
 #include "Transceiver/TransceiverFactory.hpp"
 #include "Transceiver/Transceiver.hpp"
+#include "Transceiver/K4RemoteProtocol.hpp"
+#include "Transceiver/K4RemoteTxGuard.hpp"
 #include "models/Bands.hpp"
 #include "models/IARURegions.hpp"
 #include "models/Modes.hpp"
@@ -299,24 +304,24 @@ namespace
   constexpr quint32 qrg_version {101}; // M.mm
   constexpr quint32 qrg_version_100 {100};
 
-  QString cloudlog_connection_check_style (Cloudlog::ConnectionCheckStatus status)
-  {
-    switch (status)
-      {
-      case Cloudlog::ConnectionCheckStatus::Success:
-        return QStringLiteral ("QPushButton {background-color: green;}");
-      case Cloudlog::ConnectionCheckStatus::ReadOnlyKey:
-        return QStringLiteral ("QPushButton {background-color: orange;}");
-      case Cloudlog::ConnectionCheckStatus::InvalidKey:
-      case Cloudlog::ConnectionCheckStatus::StationProfileUnavailable:
-      case Cloudlog::ConnectionCheckStatus::EndpointUnavailable:
-      case Cloudlog::ConnectionCheckStatus::UploadShapeRejected:
-      case Cloudlog::ConnectionCheckStatus::NetworkError:
-      case Cloudlog::ConnectionCheckStatus::UnexpectedResponse:
-        return QStringLiteral ("QPushButton {background-color: red;}");
-      }
+  QByteArray const k4_password_obfuscation_key {"K4RemoteObfuscation"};
 
-    return {};
+  QString obfuscate_k4_password (QString const& password)
+  {
+    if (password.isEmpty ()) return {};
+    auto bytes = password.toUtf8 ();
+    for (int i = 0; i != bytes.size (); ++i)
+      bytes[i] = bytes[i] ^ k4_password_obfuscation_key[i % k4_password_obfuscation_key.size ()];
+    return QStringLiteral ("obf:") + QString::fromLatin1 (bytes.toBase64 ());
+  }
+
+  QString deobfuscate_k4_password (QString const& stored)
+  {
+    if (!stored.startsWith (QStringLiteral ("obf:"))) return stored;
+    auto bytes = QByteArray::fromBase64 (stored.mid (4).toLatin1 ());
+    for (int i = 0; i != bytes.size (); ++i)
+      bytes[i] = bytes[i] ^ k4_password_obfuscation_key[i % k4_password_obfuscation_key.size ()];
+    return QString::fromUtf8 (bytes);
   }
 }
 
@@ -606,6 +611,7 @@ private:
   void find_tab (QWidget *);
 
   void initialize_models ();
+  void initialize_k4_remote_ui ();
   bool split_mode () const
   {
     return
@@ -686,10 +692,13 @@ private:
   Q_SLOT void handle_transceiver_tci_mod_active (bool);
   Q_SLOT void handle_transceiver_update (TransceiverState const&, unsigned sequence_number);
   Q_SLOT void handle_transceiver_failure (QString const& reason);
-  Q_SLOT void on_DXCC_check_box_toggled (bool);
-  void update_DXCC_control_availability ();
-  Q_SLOT void on_PWR_and_SWR_check_box_toggled (bool);
-  void update_PWR_and_SWR_control_availability ();
+  Q_SLOT void handle_k4_calibration_progress (QString const&, float);
+  Q_SLOT void handle_k4_calibration_finished (bool, QString const&, float, QString const&);
+  Q_SLOT void handle_k4_tx_error (QString const&);
+  Q_SLOT void handle_k4_rf_power_setting (double, bool);
+  Q_SLOT void on_DXCC_check_box_clicked(bool checked);
+  Q_SLOT void on_PWR_and_SWR_check_box_clicked(bool checked);
+  Q_SLOT void on_cbHighDPI_clicked(bool checked);
   Q_SLOT void on_reset_highlighting_to_defaults_push_button_clicked (bool);
   Q_SLOT void on_reset_highlighting_to_defaults2_push_button_clicked (bool);
   Q_SLOT void on_move_highlighting_up_push_button_clicked (bool = false);
@@ -706,11 +715,13 @@ private:
   void display_file_information();
   void check_visibility();
 
-  Q_SLOT void on_cbx2ToneSpacing_toggled (bool);
-  Q_SLOT void on_cbx4ToneSpacing_toggled (bool);
-  Q_SLOT void on_prompt_to_log_check_box_toggled (bool);
-  Q_SLOT void on_cbAutoLog_toggled (bool);
-  void update_logging_control_availability ();
+  Q_SIGNAL void calibrate_k4_remote_input ();
+  Q_SIGNAL void cancel_k4_remote_input_calibration ();
+
+  Q_SLOT void on_cbx2ToneSpacing_clicked(bool);
+  Q_SLOT void on_cbx4ToneSpacing_clicked(bool);
+  Q_SLOT void on_prompt_to_log_check_box_clicked(bool);
+  Q_SLOT void on_cbAutoLog_clicked(bool);
   Q_SLOT void on_Field_Day_Exchange_editingFinished ();
   Q_SLOT void on_RTTY_Exchange_editingFinished ();
   Q_SLOT void on_OTPUrl_textEdited (QString const&);
@@ -855,6 +866,14 @@ private:
 
   TransceiverFactory::ParameterPack rig_params_;
   TransceiverFactory::ParameterPack saved_rig_params_;
+  QSpinBox * k4_port_spin_ {nullptr};
+  QLineEdit * k4_password_edit_ {nullptr};
+  QCheckBox * k4_tls_check_ {nullptr};
+  QLineEdit * k4_identity_edit_ {nullptr};
+  QComboBox * k4_encoding_combo_ {nullptr};
+  QSpinBox * k4_latency_spin_ {nullptr};
+  QPushButton * k4_calibrate_button_ {nullptr};
+  QLabel * k4_calibration_status_ {nullptr};
   TransceiverFactory::Capabilities::PortType last_port_type_;
   bool rig_is_dummy_;
   bool is_tci_;
@@ -2085,446 +2104,8 @@ Configuration::impl::impl (Configuration * self, QNetworkAccessManager * network
   , default_audio_input_device_selected_ {false}
   , default_audio_output_device_selected_ {false}
 {
-  {
-    PerformanceTrace::Phase ui_setup {"configuration.ui_setup"};
-    ui_->setupUi (this);
-  }
-
-  SettingsDialogLayout::install (*ui_);
-
-  installEventFilter (this);
-  ui_->configuration_tabs->setFocusPolicy (Qt::StrongFocus);
-  ui_->configuration_tabs->installEventFilter (this);
-  ui_->configuration_tabs->tabBar ()->installEventFilter (this);
-  ui_->configuration_dialog_button_box->installEventFilter (this);
-  for (auto button : settings_dialog_buttons ())
-    {
-      button->setFocusPolicy (Qt::StrongFocus);
-      button->installEventFilter (this);
-    }
-
-  auto update_rig_invariants_when_checked = [this] (QButtonGroup *button_group) {
-#if QT_VERSION < QT_VERSION_CHECK(5, 15, 0)
-    connect (button_group, QOverload<int, bool>::of (&QButtonGroup::buttonToggled),
-#else
-    connect (button_group, &QButtonGroup::idToggled,
-#endif
-             this, [this] (int, bool checked) {
-               if (checked && !initializing_models_)
-                 {
-                   set_rig_invariants ();
-                 }
-             });
-  };
-  update_rig_invariants_when_checked (ui_->CAT_data_bits_button_group);
-  update_rig_invariants_when_checked (ui_->CAT_stop_bits_button_group);
-  update_rig_invariants_when_checked (ui_->CAT_handshake_button_group);
-  update_rig_invariants_when_checked (ui_->PTT_method_button_group);
-  update_rig_invariants_when_checked (ui_->split_mode_button_group);
-
-  auto set_accessible_line_edit_names = [] (QList<QLineEdit *> const& line_edits,
-                                            QString const& name_template) {
-    for (int index = 0; index < line_edits.size (); ++index)
-      {
-        line_edits.at (index)->setAccessibleName (name_template.arg (index + 1));
-      }
-  };
-  set_accessible_line_edit_names ({
-    ui_->Territory1,
-    ui_->Territory2,
-    ui_->Territory3,
-    ui_->Territory4,
-  }, tr ("Wanted territory %1"));
-  set_accessible_line_edit_names ({
-    ui_->Blacklist1,
-    ui_->Blacklist2,
-    ui_->Blacklist3,
-    ui_->Blacklist4,
-    ui_->Blacklist5,
-    ui_->Blacklist6,
-    ui_->Blacklist7,
-    ui_->Blacklist8,
-    ui_->Blacklist9,
-    ui_->Blacklist10,
-    ui_->Blacklist11,
-    ui_->Blacklist12,
-  }, tr ("Blacklist keyword %1"));
-  set_accessible_line_edit_names ({
-    ui_->Whitelist1,
-    ui_->Whitelist2,
-    ui_->Whitelist3,
-    ui_->Whitelist4,
-    ui_->Whitelist5,
-    ui_->Whitelist6,
-    ui_->Whitelist7,
-    ui_->Whitelist8,
-    ui_->Whitelist9,
-    ui_->Whitelist10,
-    ui_->Whitelist11,
-    ui_->Whitelist12,
-  }, tr ("Whitelist keyword %1"));
-  set_accessible_line_edit_names ({
-    ui_->Pass1,
-    ui_->Pass2,
-    ui_->Pass3,
-    ui_->Pass4,
-    ui_->Pass5,
-    ui_->Pass6,
-    ui_->Pass7,
-    ui_->Pass8,
-    ui_->Pass9,
-    ui_->Pass10,
-    ui_->Pass11,
-    ui_->Pass12,
-  }, tr ("Always pass keyword %1"));
-
-  ui_->CAT_port_combo_box->setAccessibleName (tr ("CAT control port"));
-  ui_->CAT_serial_baud_combo_box->setAccessibleName (tr ("CAT baud rate"));
-  ui_->CAT_default_bit_radio_button->setAccessibleName (tr ("Default CAT data bits"));
-  ui_->CAT_7_bit_radio_button->setAccessibleName (tr ("Seven CAT data bits"));
-  ui_->CAT_8_bit_radio_button->setAccessibleName (tr ("Eight CAT data bits"));
-  ui_->CAT_default_stop_bit_radio_button->setAccessibleName (tr ("Default CAT stop bits"));
-  ui_->CAT_one_stop_bit_radio_button->setAccessibleName (tr ("One CAT stop bit"));
-  ui_->CAT_two_stop_bit_radio_button->setAccessibleName (tr ("Two CAT stop bits"));
-  ui_->CAT_handshake_default_radio_button->setAccessibleName (tr ("Default CAT handshake"));
-  ui_->CAT_handshake_none_radio_button->setAccessibleName (tr ("No CAT handshake"));
-  ui_->CAT_handshake_xon_radio_button->setAccessibleName (tr ("XON/XOFF CAT handshake"));
-  ui_->CAT_handshake_hardware_radio_button->setAccessibleName (tr ("Hardware CAT handshake"));
-  ui_->force_DTR_combo_box->setAccessibleName (tr ("Force DTR control line"));
-  ui_->force_RTS_combo_box->setAccessibleName (tr ("Force RTS control line"));
-  ui_->PTT_VOX_radio_button->setAccessibleName (tr ("VOX PTT method"));
-  ui_->PTT_DTR_radio_button->setAccessibleName (tr ("DTR PTT method"));
-  ui_->PTT_CAT_radio_button->setAccessibleName (tr ("CAT PTT method"));
-  ui_->PTT_RTS_radio_button->setAccessibleName (tr ("RTS PTT method"));
-  ui_->PTT_port_combo_box->setAccessibleName (tr ("PTT control port"));
-  ui_->TX_source_data_radio_button->setAccessibleName (tr ("Rear or data transmit audio source"));
-  ui_->TX_source_mic_radio_button->setAccessibleName (tr ("Front or mic transmit audio source"));
-  ui_->mode_none_radio_button->setAccessibleName (tr ("No radio mode control"));
-  ui_->mode_USB_radio_button->setAccessibleName (tr ("USB radio mode"));
-  ui_->mode_data_radio_button->setAccessibleName (tr ("Data or packet radio mode"));
-  ui_->split_none_radio_button->setAccessibleName (tr ("No split operation"));
-  ui_->split_rig_radio_button->setAccessibleName (tr ("Rig split operation"));
-  ui_->split_emulate_radio_button->setAccessibleName (tr ("Fake It split operation"));
-  ui_->CAT_poll_interval_spin_box->setAccessibleName (tr ("CAT poll interval"));
-  ui_->calibration_slope_ppm_spin_box->setAccessibleName (tr ("Frequency calibration slope"));
-  ui_->calibration_intercept_spin_box->setAccessibleName (tr ("Frequency calibration intercept"));
-  ui_->frequencies_table_view->setAccessibleName (tr ("Working frequencies table"));
-  ui_->stations_table_view->setAccessibleName (tr ("Station information table"));
-  ui_->highlighting_list_view->setAccessibleName (tr ("Decode highlighting rules"));
-  ui_->highlighting_list_view->setAccessibleDescription (tr ("Highlighting rules and priorities for decoded messages."));
-  ui_->highlighting_actions_tool_button->setAccessibleName (tr ("Decode highlighting actions"));
-  ui_->highlighting_actions_tool_button->setAccessibleDescription (tr ("Change or reset colors for the selected highlighting rule."));
-  ui_->move_highlighting_up_push_button->setAccessibleName (tr ("Move selected highlighting rule up"));
-  ui_->move_highlighting_up_push_button->setAccessibleDescription (tr ("Move the selected highlighting rule earlier in priority order."));
-  ui_->move_highlighting_down_push_button->setAccessibleName (tr ("Move selected highlighting rule down"));
-  ui_->move_highlighting_down_push_button->setAccessibleDescription (tr ("Move the selected highlighting rule later in priority order."));
-  ui_->highlight_orange_callsigns->setAccessibleName (tr ("Orange highlight callsigns and grids"));
-  ui_->highlight_blue_callsigns->setAccessibleName (tr ("Blue highlight callsigns and grids"));
-
-  register_settings_focus_page (ui_->general_tab, {
-    ui_->callsign_line_edit,
-    ui_->grid_line_edit,
-    ui_->use_dynamic_grid,
-    ui_->region_combo_box,
-    ui_->type_2_msg_gen_combo_box,
-    ui_->decodes_from_top_check_box,
-    ui_->insert_blank_check_box,
-    ui_->cb_detailed_blank_line,
-    ui_->miles_check_box,
-    ui_->cbHighlightDXcall,
-    ui_->font_push_button,
-    ui_->TX_messages_check_box,
-    ui_->cbHighlightDXgrid,
-    ui_->decoded_text_font_push_button,
-    ui_->DXCC_check_box,
-    ui_->ppfx_check_box,
-    ui_->show_country_names_check_box,
-    ui_->monitor_off_check_box,
-    ui_->enable_VHF_features_check_box,
-    ui_->repeat_Tx_check_box,
-    ui_->monitor_last_used_check_box,
-    ui_->tx_frequency_corrections_check_box,
-    ui_->auto_astro_check_box,
-    ui_->quick_call_check_box,
-    ui_->decode_at_52s_check_box,
-    ui_->kHz_without_k_check_box,
-    ui_->disable_TX_on_73_check_box,
-    ui_->single_decode_check_box,
-    ui_->progress_bar_check_box,
-    ui_->force_call_1st_check_box,
-    ui_->CW_id_after_73_check_box,
-    ui_->CW_id_interval_spin_box,
-    ui_->alternate_bindings_check_box,
-    ui_->tune_watchdog_check_box,
-    ui_->tune_watchdog_spin_box,
-    ui_->tx_watchdog_spin_box,
-    ui_->Map_Grid_to_State,
-    ui_->cbEraseBandActivity,
-    ui_->alternate_erase_button_check_box,
-    ui_->Map_All_Messages,
-    ui_->cbRxToTxAfterQSO,
-    ui_->enable_Wait_features_check_box,
-    ui_->cbClearDXcall,
-    ui_->cbClearDXgrid,
-    ui_->disable_button_coloring_check_box,
-    ui_->cb_showDistance,
-    ui_->cb_showAzimuth,
-    ui_->cb_Align,
-    ui_->align_spin_box,
-    ui_->align_spin_box2,
-  });
-
-  register_settings_focus_page (ui_->radio_tab, {
-    ui_->rig_combo_box,
-    ui_->CAT_poll_interval_spin_box,
-    ui_->CAT_port_combo_box,
-    ui_->CAT_serial_baud_combo_box,
-    ui_->CAT_default_bit_radio_button,
-    ui_->CAT_7_bit_radio_button,
-    ui_->CAT_8_bit_radio_button,
-    ui_->CAT_default_stop_bit_radio_button,
-    ui_->CAT_one_stop_bit_radio_button,
-    ui_->CAT_two_stop_bit_radio_button,
-    ui_->CAT_handshake_default_radio_button,
-    ui_->CAT_handshake_none_radio_button,
-    ui_->CAT_handshake_xon_radio_button,
-    ui_->CAT_handshake_hardware_radio_button,
-    ui_->force_DTR_combo_box,
-    ui_->force_RTS_combo_box,
-    ui_->PTT_VOX_radio_button,
-    ui_->PTT_DTR_radio_button,
-    ui_->PTT_CAT_radio_button,
-    ui_->PTT_RTS_radio_button,
-    ui_->PTT_port_combo_box,
-    ui_->TX_source_data_radio_button,
-    ui_->TX_source_mic_radio_button,
-    ui_->mode_none_radio_button,
-    ui_->mode_USB_radio_button,
-    ui_->mode_data_radio_button,
-    ui_->split_none_radio_button,
-    ui_->split_rig_radio_button,
-    ui_->split_emulate_radio_button,
-    ui_->test_CAT_push_button,
-    ui_->test_PTT_push_button,
-    ui_->rbHamlib64,
-    ui_->rbHamlib32,
-    ui_->hamlib_download_button,
-    ui_->revert_update_button,
-    ui_->PWR_and_SWR_check_box,
-    ui_->check_SWR_check_box,
-  });
-
-  register_settings_focus_page (ui_->audio_tab, {
-    ui_->sound_input_combo_box,
-    ui_->sound_input_channel_combo_box,
-    ui_->sound_output_combo_box,
-    ui_->sound_output_channel_combo_box,
-    ui_->refresh_push_button,
-    ui_->tci_audio_check_box,
-    ui_->TCI_spin_box,
-    ui_->cbSortAlphabetically,
-    ui_->cbHideCARD,
-    ui_->save_path_select_push_button,
-    ui_->azel_path_select_push_button,
-    ui_->checkBoxAzElExtraLines,
-    ui_->checkBoxPwrBandTxMemory,
-    ui_->checkBoxPwrBandTuneMemory,
-  });
-
-  register_settings_focus_page (ui_->tx_macros_tab, {
-    ui_->add_macro_line_edit,
-    ui_->add_macro_push_button,
-    ui_->delete_macro_push_button,
-    ui_->move_macro_up_push_button,
-    ui_->move_macro_down_push_button,
-    ui_->macros_list_view,
-  });
-
-  register_settings_focus_page (ui_->reporting_tab, {
-    ui_->prompt_to_log_check_box,
-    ui_->opCallEntry,
-    ui_->cbAutoLog,
-    ui_->cbContestingOnly,
-    ui_->cbZZ00,
-    ui_->cbLog4digitGrids,
-    ui_->log_as_RTTY_check_box,
-    ui_->report_in_comments_check_box,
-    ui_->specOp_in_comments_check_box,
-    ui_->psk_reporter_check_box,
-    ui_->psk_reporter_tcpip_check_box,
-    ui_->udp_server_line_edit,
-    ui_->udp_server_port_spin_box,
-    ui_->udp_interfaces_combo_box,
-    ui_->udp_TTL_spin_box,
-    ui_->accept_udp_requests_check_box,
-    ui_->udpWindowToFront,
-    ui_->udpWindowRestore,
-    ui_->enable_n1mm_broadcast_check_box,
-    ui_->n1mm_server_name_line_edit,
-    ui_->n1mm_server_port_spin_box,
-  });
-
-  register_settings_focus_page (ui_->frequencies_tab, {
-    ui_->calibration_slope_ppm_spin_box,
-    ui_->calibration_intercept_spin_box,
-    ui_->frequencies_actions_tool_button,
-    ui_->frequencies_table_view,
-    ui_->stations_actions_tool_button,
-    ui_->stations_table_view,
-  });
-
-  register_settings_focus_page (ui_->colors_tab, {
-    ui_->highlighting_list_view,
-    ui_->highlighting_actions_tool_button,
-    ui_->move_highlighting_up_push_button,
-    ui_->move_highlighting_down_push_button,
-    ui_->reset_highlighting_to_defaults_push_button,
-    ui_->reset_highlighting_to_defaults2_push_button,
-    ui_->rescan_log_push_button,
-    ui_->highlight_by_mode_check_box,
-    ui_->highlight_orange_check_box,
-    ui_->highlight_orange_callsigns,
-    ui_->only_fields_check_box,
-    ui_->include_WAE_check_box,
-    ui_->highlight_blue_check_box,
-    ui_->highlight_blue_callsigns,
-    ui_->highlight_73_check_box,
-    ui_->LotW_CSV_URL_line_edit,
-    ui_->LotW_CSV_fetch_push_button,
-    ui_->LotW_days_since_upload_spin_box,
-    ui_->CTY_download_button,
-    ui_->CALL3_download_button,
-    ui_->CALL3_EME_download_button,
-  });
-
-  register_settings_focus_page (ui_->advanced_tab, {
-    ui_->sbNtrials,
-    ui_->sbAggressive,
-    ui_->cbTwoPass,
-    ui_->sbDegrade,
-    ui_->sbBandwidth,
-    ui_->sbTxDelay,
-    ui_->cbx2ToneSpacing,
-    ui_->cbx4ToneSpacing,
-    ui_->rbLowSidelobes,
-    ui_->rbMaxSensitivity,
-    ui_->cbSpecialOpActivity,
-    ui_->rbFox,
-    ui_->cbSuperFox,
-    ui_->rbHound,
-    ui_->cbOTP,
-    ui_->OTPSeed,
-    ui_->sbOTPinterval,
-    ui_->cbShowOTP,
-    ui_->OTPUrl,
-    ui_->rbNA_VHF_Contest,
-    ui_->cb_NCCC_Sprint,
-    ui_->rbField_Day,
-    ui_->Field_Day_Exchange,
-    ui_->rbEU_VHF_Contest,
-    ui_->rbRTTY_Roundup,
-    ui_->RTTY_Exchange,
-    ui_->rbWW_DIGI,
-    ui_->rbARRL_Digi,
-    ui_->rbQ65pileup,
-    ui_->cbContestName,
-    ui_->Contest_Name,
-    ui_->cbCloudlog,
-    ui_->leCloudlogApiUrl,
-    ui_->leCloudlogApiKey,
-    ui_->cbCloudlogStationProfile,
-    ui_->pbTestCloudlog,
-    ui_->cbEQSL,
-    ui_->eqsluser_edit,
-    ui_->eqslpasswd_edit,
-    ui_->eqslnick_edit,
-  });
-
-  register_settings_focus_page (ui_->alerts_tab, {
-    ui_->voices_combo_box,
-    ui_->pb_test_alerts,
-    ui_->cbContinent,
-    ui_->cbContinentOB,
-    ui_->cbDXCC,
-    ui_->cbDXCCOB,
-    ui_->cbCQZ,
-    ui_->cbCQZOB,
-    ui_->cbITUZ,
-    ui_->cbITUZOB,
-    ui_->cbGrid,
-    ui_->cbGridOB,
-    ui_->cbMyCall,
-    ui_->cbWanted,
-    ui_->cbDXcall,
-    ui_->cbQSYmessage,
-    ui_->cbCQ,
-    ui_->pbAlerts,
-  });
-
-  register_settings_focus_page (ui_->filters_tab, {
-    ui_->Territory1,
-    ui_->Territory2,
-    ui_->Territory3,
-    ui_->Territory4,
-    ui_->cbBlacklist,
-    ui_->Blacklist1,
-    ui_->Blacklist2,
-    ui_->Blacklist3,
-    ui_->Blacklist4,
-    ui_->Blacklist5,
-    ui_->Blacklist6,
-    ui_->Blacklist7,
-    ui_->Blacklist8,
-    ui_->Blacklist9,
-    ui_->Blacklist10,
-    ui_->Blacklist11,
-    ui_->Blacklist12,
-    ui_->cbWhitelist,
-    ui_->Whitelist1,
-    ui_->Whitelist2,
-    ui_->Whitelist3,
-    ui_->Whitelist4,
-    ui_->Whitelist5,
-    ui_->Whitelist6,
-    ui_->Whitelist7,
-    ui_->Whitelist8,
-    ui_->Whitelist9,
-    ui_->Whitelist10,
-    ui_->Whitelist11,
-    ui_->Whitelist12,
-    ui_->cbPass,
-    ui_->Pass1,
-    ui_->Pass2,
-    ui_->Pass3,
-    ui_->Pass4,
-    ui_->Pass5,
-    ui_->Pass6,
-    ui_->Pass7,
-    ui_->Pass8,
-    ui_->Pass9,
-    ui_->Pass10,
-    ui_->Pass11,
-    ui_->Pass12,
-    ui_->cb_filters_for_word2,
-    ui_->cb_filters_for_Wait_and_Pounce_only,
-    ui_->cb_twoDays,
-  });
-
-  auto update_visibility_when_toggled = [this] (QAbstractButton *button) {
-    connect (button, &QAbstractButton::toggled, this, &Configuration::impl::check_visibility);
-  };
-  update_visibility_when_toggled (ui_->cbSpecialOpActivity);
-  update_visibility_when_toggled (ui_->rbFox);
-  update_visibility_when_toggled (ui_->rbHound);
-  update_visibility_when_toggled (ui_->rbNA_VHF_Contest);
-  update_visibility_when_toggled (ui_->rbEU_VHF_Contest);
-  update_visibility_when_toggled (ui_->rbField_Day);
-  update_visibility_when_toggled (ui_->rbRTTY_Roundup);
-  update_visibility_when_toggled (ui_->rbWW_DIGI);
-  update_visibility_when_toggled (ui_->rbARRL_Digi);
-  update_visibility_when_toggled (ui_->rbQ65pileup);
-  update_visibility_when_toggled (ui_->cbOTP);
-  update_visibility_when_toggled (ui_->cbContestName);
+  ui_->setupUi (this);
+  initialize_k4_remote_ui ();
 
   {
     PerformanceTrace::Phase data_directories {"configuration.data_directories"};
@@ -2855,6 +2436,79 @@ Configuration::impl::~impl ()
   }
 }
 
+void Configuration::impl::initialize_k4_remote_ui ()
+{
+  ui_->CAT_control_group_box->setTitle (tr ("Elecraft K4 Remote"));
+  ui_->CAT_port_label->setText (tr ("Host:"));
+  ui_->CAT_port_combo_box->setToolTip (
+    tr ("K4 remote host name, IPv4 address, or .local name."));
+  ui_->CAT_serial_port_parameters_group_box->hide ();
+
+  k4_port_spin_ = new QSpinBox {ui_->CAT_control_group_box};
+  k4_port_spin_->setRange (1, 65535);
+  k4_password_edit_ = new QLineEdit {ui_->CAT_control_group_box};
+  k4_password_edit_->setEchoMode (QLineEdit::Password);
+  k4_password_edit_->setPlaceholderText (tr ("K4 remote password"));
+  k4_tls_check_ = new QCheckBox {tr ("TLS 1.2+ with password as PSK"), ui_->CAT_control_group_box};
+  k4_tls_check_->setToolTip (tr ("Encrypt and authenticate the K4 connection with TLS-PSK."));
+  k4_identity_edit_ = new QLineEdit {ui_->CAT_control_group_box};
+  k4_identity_edit_->setPlaceholderText (tr ("Optional PSK identity"));
+  k4_encoding_combo_ = new QComboBox {ui_->CAT_control_group_box};
+  k4_encoding_combo_->addItems ({tr ("EM0 - raw 32-bit"), tr ("EM1 - raw 16-bit"),
+                                  tr ("EM2 - Opus integer"), tr ("EM3 - Opus float")});
+  k4_latency_spin_ = new QSpinBox {ui_->CAT_control_group_box};
+  k4_latency_spin_->setRange (0, 7);
+  k4_latency_spin_->setToolTip (tr ("K4 SL streaming latency tier (0-7)."));
+  k4_calibrate_button_ = new QPushButton {tr ("Calibrate Remote Input"), ui_->CAT_control_group_box};
+  k4_calibrate_button_->setToolTip (
+    tr ("Use a protected 1500 Hz tone in K4 TEST mode to establish safe FT8/FT4 input drive."));
+  k4_calibration_status_ = new QLabel {tr ("Calibration is required before transmitting."),
+                                       ui_->CAT_control_group_box};
+  k4_calibration_status_->setWordWrap (true);
+
+  ui_->formLayout->addRow (tr ("Port:"), k4_port_spin_);
+  ui_->formLayout->addRow (tr ("Password:"), k4_password_edit_);
+  ui_->formLayout->addRow (QString {}, k4_tls_check_);
+  ui_->formLayout->addRow (tr ("TLS identity:"), k4_identity_edit_);
+  ui_->formLayout->addRow (tr ("Audio encoding:"), k4_encoding_combo_);
+  ui_->formLayout->addRow (tr ("Streaming latency:"), k4_latency_spin_);
+  ui_->formLayout->addRow (k4_calibrate_button_);
+  ui_->formLayout->addRow (k4_calibration_status_);
+
+  // K4 CAT PTT, DATA-A, rig split, and remote audio are invariants in this
+  // fork. Keep the old controls alive for the upstream settings machinery but
+  // remove choices that cannot apply to this product.
+  for (auto * widget : QList<QWidget *> {ui_->PTT_method_group_box,
+                        ui_->TX_audio_source_group_box, ui_->mode_group_box,
+                        ui_->split_operation_group_box, ui_->hamlib_groupBox,
+                        ui_->rig_data_group_box, ui_->test_PTT_push_button})
+    widget->hide ();
+  ui_->rig_combo_box->setEnabled (false);
+  ui_->CAT_poll_interval_spin_box->setValue (1);
+  ui_->PTT_CAT_radio_button->setChecked (true);
+  ui_->mode_data_radio_button->setChecked (true);
+  ui_->split_none_radio_button->setChecked (true);
+  ui_->tci_audio_check_box->setChecked (true);
+
+  auto const audio_tab = ui_->configuration_tabs->indexOf (ui_->audio_tab);
+  if (audio_tab >= 0) ui_->configuration_tabs->removeTab (audio_tab);
+
+  connect (k4_tls_check_, &QCheckBox::toggled, this, [this] (bool enabled) {
+    k4_identity_edit_->setEnabled (enabled);
+    auto const old_default = enabled ? int (K4RemoteProtocol::default_port)
+                                     : int (K4RemoteProtocol::tls_port);
+    if (k4_port_spin_->value () == old_default)
+      k4_port_spin_->setValue (enabled ? K4RemoteProtocol::tls_port
+                                      : K4RemoteProtocol::default_port);
+  });
+  connect (k4_calibrate_button_, &QPushButton::clicked, this, [this] {
+    if (!open_rig ()) return;
+    k4_calibrate_button_->setEnabled (false);
+    k4_calibration_status_->setText (tr ("Starting protected K4 TEST-mode calibration..."));
+    Q_EMIT calibrate_k4_remote_input ();
+  });
+}
+
 void Configuration::impl::initialize_models ()
 {
   QScopedValueRollback<bool> initializing_models {initializing_models_, true};
@@ -2895,6 +2549,18 @@ void Configuration::impl::initialize_models ()
   ui_->sbDegrade->setValue (degrade_);
   ui_->sbBandwidth->setValue (RxBandwidth_);
   ui_->tci_audio_check_box->setChecked (tci_audio_);
+  ui_->CAT_port_combo_box->setCurrentText (rig_params_.k4_host);
+  k4_port_spin_->setValue (rig_params_.k4_port);
+  k4_password_edit_->setText (rig_params_.k4_password);
+  k4_tls_check_->setChecked (rig_params_.k4_tls);
+  k4_identity_edit_->setText (rig_params_.k4_tls_identity);
+  k4_identity_edit_->setEnabled (rig_params_.k4_tls);
+  k4_encoding_combo_->setCurrentIndex (rig_params_.k4_encode_mode);
+  k4_latency_spin_->setValue (rig_params_.k4_streaming_latency);
+  k4_calibration_status_->setText (
+    rig_params_.k4_has_calibration && !rig_params_.k4_calibration_radio_context.isEmpty ()
+      ? tr ("Saved remote input gain: %1 dB").arg (20. * std::log10 (rig_params_.k4_calibrated_gain), 0, 'f', 1)
+      : tr ("Calibration is required before transmitting."));
   ui_->PTT_method_button_group->button (rig_params_.ptt_type)->setChecked (true);
   ui_->PWR_and_SWR_check_box->setChecked (PWR_and_SWR_);
   ui_->check_SWR_check_box->setChecked (check_SWR_);
@@ -3344,9 +3010,23 @@ void Configuration::impl::read_settings ()
   log_as_RTTY_ = settings_->value ("toRTTY", false).toBool ();
   report_in_comments_ = settings_->value("dBtoComments", false).toBool ();
   specOp_in_comments_ = settings_->value("specOptoComments", false).toBool ();
-  rig_params_.rig_name = settings_->value ("Rig", TransceiverFactory::basic_transceiver_name_).toString ();
-  rig_is_dummy_ = TransceiverFactory::basic_transceiver_name_ == rig_params_.rig_name;
-  is_tci_ = rig_params_.rig_name.startsWith("TCI Cli");
+  rig_params_.rig_name = QStringLiteral ("Elecraft K4 Remote");
+  rig_is_dummy_ = false;
+  is_tci_ = true;               // K4 remote audio uses the network-audio path.
+  tci_audio_ = true;
+  rig_params_.k4_tls = settings_->value ("K4Remote/TLS", false).toBool ();
+  rig_params_.k4_host = settings_->value ("K4Remote/Host", QStringLiteral ("K4.local")).toString ();
+  rig_params_.k4_port = static_cast<quint16> (settings_->value (
+    "K4Remote/Port", rig_params_.k4_tls ? K4RemoteProtocol::tls_port
+                                        : K4RemoteProtocol::default_port).toUInt ());
+  rig_params_.k4_password = deobfuscate_k4_password (settings_->value ("K4Remote/Password").toString ());
+  rig_params_.k4_tls_identity = settings_->value ("K4Remote/TLSIdentity").toString ();
+  rig_params_.k4_encode_mode = qBound (0, settings_->value ("K4Remote/EncodeMode", 3).toInt (), 3);
+  rig_params_.k4_streaming_latency = qBound (0, settings_->value ("K4Remote/StreamingLatency", 3).toInt (), 7);
+  rig_params_.k4_calibrated_gain = settings_->value (
+    "K4Remote/CalibratedGain", K4RemoteTxGuard::calibration_start_gain).toFloat ();
+  rig_params_.k4_has_calibration = settings_->value ("K4Remote/HasCalibration", false).toBool ();
+  rig_params_.k4_calibration_radio_context = settings_->value ("K4Remote/CalibrationRadioContext").toString ();
   rig_params_.tci_port = settings_->value ("CATTCIPort","").toString ();
   rig_params_.network_port = settings_->value ("CATNetworkPort").toString ();
   rig_params_.usb_port = settings_->value ("CATUSBPort").toString ();
@@ -3359,10 +3039,10 @@ void Configuration::impl::read_settings ()
   rig_params_.dtr_high = settings_->value ("DTR", false).toBool ();
   rig_params_.force_rts = settings_->value ("CATForceRTS", false).toBool ();
   rig_params_.rts_high = settings_->value ("RTS", false).toBool ();
-  rig_params_.ptt_type = settings_->value ("PTTMethod", QVariant::fromValue (TransceiverFactory::PTT_method_VOX)).value<TransceiverFactory::PTTMethod> ();
+  rig_params_.ptt_type = TransceiverFactory::PTT_method_CAT;
   rig_params_.audio_source = settings_->value ("TXAudioSource", QVariant::fromValue (TransceiverFactory::TX_audio_source_front)).value<TransceiverFactory::TXAudioSource> ();
   rig_params_.ptt_port = settings_->value ("PTTport").toString ();
-  data_mode_ = settings_->value ("DataMode", QVariant::fromValue (data_mode_none)).value<Configuration::DataMode> ();
+  data_mode_ = data_mode_data;
   bLowSidelobes_ = settings_->value("LowSidelobes",true).toBool();
   prompt_to_log_ = settings_->value ("PromptToLog", false).toBool ();
   autoLog_ = settings_->value ("AutoLog", true).toBool ();
@@ -3415,9 +3095,8 @@ void Configuration::impl::read_settings ()
   SelectedActivity_ = settings_->value("SelectedActivity",1).toInt ();
   x2ToneSpacing_ = settings_->value("x2ToneSpacing",false).toBool ();
   x4ToneSpacing_ = settings_->value("x4ToneSpacing",false).toBool ();
-  if (x4ToneSpacing_) x2ToneSpacing_ = false;
-  rig_params_.poll_interval = settings_->value ("Polling", 0).toInt ();
-  rig_params_.split_mode = settings_->value ("SplitMode", QVariant::fromValue (TransceiverFactory::split_mode_none)).value<TransceiverFactory::SplitMode> ();
+  rig_params_.poll_interval = 1;
+  rig_params_.split_mode = TransceiverFactory::split_mode_none;
   opCall_ = settings_->value ("OpCall", "").toString ();
   udp_server_name_ = settings_->value ("UDPServer", "127.0.0.1").toString ();
   udp_interface_names_ = settings_->value ("UDPInterface").toStringList ();
@@ -3460,11 +3139,9 @@ void Configuration::impl::read_settings ()
   alert_Enabled_ = settings_->value("alert_Enabled",false).toBool ();
   voice_ = settings_->value ("Voice", 0).toInt ();
   read_voices();
-  // Reset Rig to None if TCI was selected but no IP address was specified
-  if (is_tci_ && settings_->value("CATTCIPort")=="") {
-    rig_params_.rig_name = "None";
-    if (rig_params_.ptt_type == TransceiverFactory::PTT_method_CAT) rig_params_.ptt_type = TransceiverFactory::PTT_method_VOX;
-  }
+  // K4 network audio intentionally uses WSJT-X's existing TCI-audio plumbing,
+  // but its endpoint comes from K4Remote/Host and K4Remote/Port.  Do not apply
+  // the legacy TCI "missing CATTCIPort" fallback to this sole radio.
 #ifdef WIN32
   QTimer::singleShot (2500, [=] {display_file_information ();});
 #else
@@ -3573,6 +3250,16 @@ void Configuration::impl::write_settings ()
   settings_->setValue ("RxBandwidth", RxBandwidth_);
   settings_->setValue ("TCIAudio", tci_audio_);
   settings_->setValue ("CATTCIPort", rig_params_.tci_port);
+  settings_->setValue ("K4Remote/Host", rig_params_.k4_host);
+  settings_->setValue ("K4Remote/Port", rig_params_.k4_port);
+  settings_->setValue ("K4Remote/Password", obfuscate_k4_password (rig_params_.k4_password));
+  settings_->setValue ("K4Remote/TLS", rig_params_.k4_tls);
+  settings_->setValue ("K4Remote/TLSIdentity", rig_params_.k4_tls_identity);
+  settings_->setValue ("K4Remote/EncodeMode", rig_params_.k4_encode_mode);
+  settings_->setValue ("K4Remote/StreamingLatency", rig_params_.k4_streaming_latency);
+  settings_->setValue ("K4Remote/CalibratedGain", rig_params_.k4_calibrated_gain);
+  settings_->setValue ("K4Remote/HasCalibration", rig_params_.k4_has_calibration);
+  settings_->setValue ("K4Remote/CalibrationRadioContext", rig_params_.k4_calibration_radio_context);
   settings_->setValue ("PTTMethod", QVariant::fromValue (rig_params_.ptt_type));
   settings_->setValue ("PTTport", rig_params_.ptt_port);
   settings_->setValue ("SaveDir", save_directory_.absolutePath ());
@@ -3748,7 +3435,8 @@ void Configuration::impl::set_rig_invariants ()
   auto asynchronous_CAT = transceiver_factory_.has_asynchronous_CAT (rig);
   auto is_hw_handshake = ui_->CAT_handshake_group_box->isEnabled ()
     && TransceiverFactory::handshake_hardware == static_cast<TransceiverFactory::Handshake> (ui_->CAT_handshake_button_group->checkedId ());
-  is_tci_ = ui_->rig_combo_box->currentText().startsWith("TCI Cli");
+  is_tci_ = ui_->rig_combo_box->currentText ().startsWith ("TCI Cli")
+    || ui_->rig_combo_box->currentText () == QStringLiteral ("Elecraft K4 Remote");
   ui_->tci_audio_check_box->setVisible(is_tci_);
   ui_->TCI_spin_box->setVisible(is_tci_);
 //  ui_->refresh_push_button->setVisible(is_tci_);
@@ -3791,7 +3479,7 @@ void Configuration::impl::set_rig_invariants ()
     }
   ui_->PTT_RTS_radio_button->setEnabled (!((is_serial_CAT && ptt_port == cat_port && is_hw_handshake) || is_tci_));
 
-  if (TransceiverFactory::basic_transceiver_name_ == rig)
+  if (QStringLiteral ("None") == rig)
     {
       // makes no sense with rig as "None"
       ui_->monitor_last_used_check_box->setEnabled (false);
@@ -3849,6 +3537,15 @@ void Configuration::impl::set_rig_invariants ()
               ui_->CAT_port_combo_box->setEnabled (true);
               break;
 
+            case TransceiverFactory::Capabilities::k4_remote:
+              ui_->CAT_port_combo_box->clear ();
+              ui_->CAT_port_combo_box->setCurrentText (rig_params_.k4_host);
+              ui_->CAT_port_label->setText (tr ("Host:"));
+              ui_->CAT_port_combo_box->setToolTip (
+                tr ("K4 remote host name, IPv4 address, or .local name."));
+              ui_->CAT_port_combo_box->setEnabled (true);
+              break;
+
             case TransceiverFactory::Capabilities::network:
               ui_->CAT_port_combo_box->clear ();
               ui_->CAT_port_combo_box->setCurrentText (rig_params_.network_port);
@@ -3898,6 +3595,18 @@ void Configuration::impl::set_rig_invariants ()
 
 bool Configuration::impl::validate ()
 {
+  if (ui_->CAT_port_combo_box->currentText ().trimmed ().isEmpty ())
+    {
+      find_tab (ui_->CAT_port_combo_box);
+      MessageBox::critical_message (this, tr ("Enter the K4 remote host name or IP address."));
+      return false;
+    }
+  if (k4_password_edit_->text ().isEmpty ())
+    {
+      find_tab (k4_password_edit_);
+      MessageBox::critical_message (this, tr ("Enter the K4 remote password."));
+      return false;
+    }
   if (ui_->sound_input_combo_box->currentIndex () < 0
       && next_audio_input_device_.isNull ())
     {
@@ -4000,6 +3709,27 @@ TransceiverFactory::ParameterPack Configuration::impl::gather_rig_data ()
       result.serial_port = rig_params_.serial_port;
       break;
 
+    case TransceiverFactory::Capabilities::k4_remote:
+      result.k4_host = ui_->CAT_port_combo_box->currentText ().trimmed ();
+      result.k4_port = static_cast<quint16> (k4_port_spin_->value ());
+      result.k4_password = k4_password_edit_->text ();
+      result.k4_tls = k4_tls_check_->isChecked ();
+      result.k4_tls_identity = k4_identity_edit_->text ();
+      result.k4_encode_mode = k4_encoding_combo_->currentIndex ();
+      result.k4_streaming_latency = k4_latency_spin_->value ();
+      result.k4_calibrated_gain = rig_params_.k4_calibrated_gain;
+      result.k4_has_calibration = rig_params_.k4_has_calibration;
+      result.k4_calibration_radio_context = rig_params_.k4_calibration_radio_context;
+      if (result.k4_host.compare (rig_params_.k4_host, Qt::CaseInsensitive)
+          || result.k4_port != rig_params_.k4_port
+          || result.k4_encode_mode != rig_params_.k4_encode_mode)
+        result.k4_has_calibration = false;
+      result.tci_port = rig_params_.tci_port;
+      result.network_port = rig_params_.network_port;
+      result.usb_port = rig_params_.usb_port;
+      result.serial_port = rig_params_.serial_port;
+      break;
+
     case TransceiverFactory::Capabilities::network:
       result.network_port = ui_->CAT_port_combo_box->currentText ();
       result.tci_port = rig_params_.tci_port;
@@ -4032,11 +3762,11 @@ TransceiverFactory::ParameterPack Configuration::impl::gather_rig_data ()
   result.rts_high = ui_->force_RTS_combo_box->isEnabled () && 1 == ui_->force_RTS_combo_box->currentIndex ();
   result.poll_interval = ui_->CAT_poll_interval_spin_box->value ();
   if (ui_->PWR_and_SWR_check_box->isChecked ()) result.poll_interval |= do__pwr;
-  if (is_tci_ && ui_->tci_audio_check_box->isChecked ()) result.poll_interval |= tci__audio;
-  result.ptt_type = static_cast<TransceiverFactory::PTTMethod> (ui_->PTT_method_button_group->checkedId ());
+  if (is_tci_) result.poll_interval |= tci__audio;
+  result.ptt_type = TransceiverFactory::PTT_method_CAT;
   result.ptt_port = ui_->PTT_port_combo_box->currentText ();
   result.audio_source = static_cast<TransceiverFactory::TXAudioSource> (ui_->TX_audio_source_button_group->checkedId ());
-  result.split_mode = static_cast<TransceiverFactory::SplitMode> (ui_->split_mode_button_group->checkedId ());
+  result.split_mode = TransceiverFactory::split_mode_none;
   return result;
 }
 
@@ -4095,8 +3825,10 @@ void Configuration::impl::accept ()
 
   rig_params_ = temp_rig_params; // now we can go live with the rig
                                  // related configuration parameters
-  rig_is_dummy_ = TransceiverFactory::basic_transceiver_name_ == rig_params_.rig_name;
-  is_tci_ = rig_params_.rig_name.startsWith("TCI Cli");
+  rig_is_dummy_ = false;
+  is_tci_ = true;
+  tci_audio_ = true;
+  data_mode_ = data_mode_data;
   // Check to see whether SoundInThread must be restarted,
   // and save user parameters.
   {
@@ -6039,11 +5771,14 @@ bool Configuration::impl::open_rig (bool force)
           rig_connections_ << connect (rig.get (), &Transceiver::tciframeswritten, this, &Configuration::impl::handle_transceiver_tciframeswritten);
           rig_connections_ << connect (rig.get (), &Transceiver::receiveAudio, self_, &Configuration::transceiverReceiveAudio);
           rig_connections_ << connect (rig.get (), &Transceiver::tci_mod_active, this, &Configuration::impl::handle_transceiver_tci_mod_active);
-          rig_connections_ << connect (rig.get (), &Transceiver::txSourceCommitted, self_, &Configuration::txSourceCommitted);
-          rig_connections_ << connect (rig.get (), &Transceiver::rawTxPlayoutSnapshot, self_, &Configuration::rawTxPlayoutSnapshot);
-          rig_connections_ << connect (rig.get (), &Transceiver::jtty_drained, self_, &Configuration::transceiver_jtty_drained);
-          rig_connections_ << connect (rig.get (), &Transceiver::jtty_enqueue_accepted, self_, &Configuration::transceiver_jtty_enqueue_accepted);
-          rig_connections_ << connect (rig.get (), &Transceiver::jtty_enqueue_failed, self_, &Configuration::transceiver_jtty_enqueue_failed);
+          rig_connections_ << connect (rig.get (), &Transceiver::remote_input_calibration_progress,
+                                       this, &Configuration::impl::handle_k4_calibration_progress);
+          rig_connections_ << connect (rig.get (), &Transceiver::remote_input_calibration_finished,
+                                       this, &Configuration::impl::handle_k4_calibration_finished);
+          rig_connections_ << connect (rig.get (), &Transceiver::remote_tx_error,
+                                       this, &Configuration::impl::handle_k4_tx_error);
+          rig_connections_ << connect (rig.get (), &Transceiver::rf_power_setting,
+                                       this, &Configuration::impl::handle_k4_rf_power_setting);
           rig_connections_ << connect (rig.get (), &Transceiver::update, this, &Configuration::impl::handle_transceiver_update);
           rig_connections_ << connect (rig.get (), &Transceiver::failure, this, &Configuration::impl::handle_transceiver_failure);
           if (auto inhibit = qobject_cast<TxInhibitTransceiver *> (rig.get ()))
@@ -6075,6 +5810,10 @@ bool Configuration::impl::open_rig (bool force)
           // setup thread safe startup and close down semantics
           rig_connections_ << connect (this, &Configuration::impl::start_transceiver, rig.get (), &Transceiver::start);
           rig_connections_ << connect (this, &Configuration::impl::stop_transceiver, rig.get (), &Transceiver::stop);
+          rig_connections_ << connect (this, &Configuration::impl::calibrate_k4_remote_input,
+                                       rig.get (), &Transceiver::calibrate_remote_input);
+          rig_connections_ << connect (this, &Configuration::impl::cancel_k4_remote_input_calibration,
+                                       rig.get (), &Transceiver::cancel_remote_input_calibration);
 
           auto p = rig.release ();	// take ownership
 
@@ -6411,7 +6150,7 @@ void Configuration::impl::handle_transceiver_update (TransceiverState const& sta
   // only follow rig on some information, ignore other stuff
   cached_rig_state_.online (state.online ());
   cached_rig_state_.frequency (state.frequency ());
-  if(!is_tci_) cached_rig_state_.mode (state.mode ());  //was not present in jtdx
+  cached_rig_state_.mode (state.mode ());
   cached_rig_state_.split (state.split ());
 
   if (state.online ())
@@ -6461,6 +6200,8 @@ void Configuration::impl::handle_transceiver_failure (QString const& reason)
   LOG_ERROR ("handle_transceiver_failure: " << summarize_transceiver_failure (reason));
   close_rig (true);
   ui_->test_PTT_push_button->setChecked (false);
+  k4_calibrate_button_->setEnabled (true);
+  k4_calibration_status_->setText (tr ("K4 connection stopped: %1").arg (reason));
 
   if (isVisible ())
     {
@@ -6473,7 +6214,69 @@ void Configuration::impl::handle_transceiver_failure (QString const& reason)
     }
 }
 
-void Configuration::impl::close_rig (bool failed)
+void Configuration::impl::handle_k4_calibration_progress (QString const& message, float gain)
+{
+  k4_calibration_status_->setText (
+    tr ("%1 Current drive: %2 dB").arg (message).arg (20. * std::log10 (gain), 0, 'f', 1));
+}
+
+void Configuration::impl::handle_k4_calibration_finished (bool success,
+                                                           QString const& message,
+                                                           float gain,
+                                                           QString const& radio_context)
+{
+  k4_calibrate_button_->setEnabled (true);
+  if (success)
+    {
+      rig_params_.k4_host = ui_->CAT_port_combo_box->currentText ().trimmed ();
+      rig_params_.k4_port = static_cast<quint16> (k4_port_spin_->value ());
+      rig_params_.k4_password = k4_password_edit_->text ();
+      rig_params_.k4_tls = k4_tls_check_->isChecked ();
+      rig_params_.k4_tls_identity = k4_identity_edit_->text ();
+      rig_params_.k4_encode_mode = k4_encoding_combo_->currentIndex ();
+      rig_params_.k4_streaming_latency = k4_latency_spin_->value ();
+      rig_params_.k4_calibrated_gain = gain;
+      rig_params_.k4_has_calibration = true;
+      rig_params_.k4_calibration_radio_context = radio_context;
+      saved_rig_params_ = rig_params_;
+      settings_->setValue ("K4Remote/CalibratedGain", gain);
+      settings_->setValue ("K4Remote/HasCalibration", true);
+      settings_->setValue ("K4Remote/CalibrationRadioContext", radio_context);
+      settings_->setValue ("K4Remote/Host", rig_params_.k4_host);
+      settings_->setValue ("K4Remote/Port", rig_params_.k4_port);
+      settings_->setValue ("K4Remote/Password", obfuscate_k4_password (rig_params_.k4_password));
+      settings_->setValue ("K4Remote/TLS", rig_params_.k4_tls);
+      settings_->setValue ("K4Remote/TLSIdentity", rig_params_.k4_tls_identity);
+      settings_->setValue ("K4Remote/EncodeMode", rig_params_.k4_encode_mode);
+      settings_->setValue ("K4Remote/StreamingLatency", rig_params_.k4_streaming_latency);
+      settings_->sync ();
+      k4_calibration_status_->setText (
+        tr ("%1 Saved drive: %2 dB").arg (message).arg (20. * std::log10 (gain), 0, 'f', 1));
+    }
+  else
+    {
+      k4_calibration_status_->setText (message);
+      MessageBox::warning_message (this, tr ("K4 remote input calibration"), message);
+    }
+}
+
+void Configuration::impl::handle_k4_tx_error (QString const& reason)
+{
+  LOG_ERROR ("K4 digital TX protection: " << reason);
+  if (isVisible ()) MessageBox::critical_message (this, tr ("K4 TX stopped"), reason);
+  else Q_EMIT self_->remote_tx_error (reason);
+}
+
+void Configuration::impl::handle_k4_rf_power_setting (double value, bool milliwatts)
+{
+  // Later state requests must carry the radio's confirmed watts value, but an
+  // X-range response is expressed in milliwatts and must never be resent as L/H.
+  if (!milliwatts)
+    cached_rig_state_.txvolume (value);
+  Q_EMIT self_->transceiver_rf_power_setting (value, milliwatts);
+}
+
+void Configuration::impl::close_rig ()
 {
   ui_->test_PTT_push_button->setEnabled (false);
 

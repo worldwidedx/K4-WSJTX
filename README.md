@@ -2,6 +2,16 @@
 
 # Weak Signal Communication Software
 
+> **K4 WSJT-X fork.** This tree is based on the official WSJT-X 3.0.2
+> development line and replaces its selectable radio and sound-card interfaces
+> with one Elecraft K4 Remote connection. CAT, receive audio, and transmit audio
+> share the K4 framed TCP stream used by QK4 Mobile. Both password-authenticated
+> TCP and TLS 1.2+ with the K4 password as a pre-shared key are supported.
+>
+> FT8/FT4 transmission uses conservative network-audio drive until the optional
+> protected K4 TEST-mode calibration is completed. Live ALC protection remains
+> active on every transmission. See [K4 Remote architecture and operation](doc/K4_REMOTE.md).
+
 ## Programs
 
 *WSJT-X*, *MAP65*, and *QMAP* are open-source, multi-platform programs designed for weak-signal digital communication by amateur radio. *WSJT-X* works with a standard SSB transceiver, while *MAP65* and *QMAP* use wideband SDR-style hardware. The programs are open source, free of charge, and licensed under the GNU General Public License. These program names are trademarks of the WSJT Development Team; see [TRADEMARK.md](TRADEMARK.md) for our policy on their use.
@@ -21,37 +31,3 @@ They can be built and used on Windows, macOS, and Linux.
 **FT4** and **FT8** use T/R cycles of only 7.5 and 15 s, respectively. They have become extremely popular for world-wide DXing on the HF bands. **MSK144** is designed for Meteor Scatter on the VHF bands. **Q65** offers submodes with T/R sequence lengths from 15 seconds to 5 minutes, and a wide range of tone spacings. Particular Q65 submodes are highly recommended for EME, ionospheric scatter, and other weak signal work on VHF, UHF, and microwave bands. These modes include message formats explicitly supporting nonstandard callsigns and some popular radio contests.
 
 **FST4** and **FST4W** are designed particularly for the LF and MF bands. On these bands their fundamental sensitivities are better than other *WSJT-X* modes with the same sequence lengths, approaching the theoretical limits for their rates of information throughput. **FST4** is optimized for two-way QSOs, while **FST4W** is for quasi-beacon transmissions of **WSPR**-style messages. **FST4** and **FST4W** do not require the strict, independent time synchronization and phase locking of modes like EbNaut.
-
-The [WSJT-X User Guide](https://wsjtx.github.io/wsjtx/guide-full.html) documents operating procedures, mode details, configuration, and platform installation.
-
-## Building from source
-
-The [source-build guide](doc/user_guide/en/install-from-source.adoc) is the
-maintained reference for developer builds, including the supported Windows
-MSYS2 environment, required dependencies, tests, installation, and common
-failures. Contributors should also read [CONTRIBUTING.md](CONTRIBUTING.md) for
-the public and private repository workflow.
-
-## Support and contributing
-
-The [project website](https://wsjtx.github.io/wsjtx/) provides release downloads
-and documentation. The User Guide is the first place to look for operating and
-setup help. Questions and general discussion can go to
-the [WSJT-X user group](https://wsjtx.groups.io/g/main) or the
-[wsjt-devel mailing list](https://sourceforge.net/p/wsjt/mailman/wsjt-devel/).
-[GitHub Discussions](https://github.com/WSJTX/wsjtx/discussions) is also
-available.
-
-Source code, bug reports, and pull requests are hosted in the public
-[WSJTX/wsjtx repository](https://github.com/WSJTX/wsjtx). See the
-[contribution guide](https://github.com/WSJTX/wsjtx/blob/master/CONTRIBUTING.md)
-for repository and development guidance.
-
-## License
-
-WSJT-X, MAP65, and QMAP are free software licensed under the GNU General Public
-License version 3. See [COPYING](COPYING) for the full license.
-
-## Code Signing Policy
-
-Windows installers for GA releases are Authenticode-signed. Free code signing is provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/). Signed installers are built from the source in this repository by GitHub Actions and signed only through that verified pipeline.
