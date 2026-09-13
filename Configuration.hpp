@@ -464,6 +464,7 @@ public:
   Q_SIGNAL void transceiver_update (Transceiver::TransceiverState const&) const;
   Q_SIGNAL void transceiver_TCIframesWritten (qint64) const;
   Q_SIGNAL void transceiver_TCImodActive (bool) const;
+  Q_SIGNAL void transceiver_rf_power_setting (double value, bool milliwatts) const;
   Q_SIGNAL void leavingSettings (bool) const;
 
   // Signals a failure of a control rig CAT or PTT connection.
@@ -473,6 +474,10 @@ public:
   // re-established with a call to transceiver_online(true) assuming
   // the fault condition has been rectified or is transient.
   Q_SIGNAL void transceiver_failure (QString const& reason) const;
+
+  // A protected K4 transmit was refused or stopped. Unlike a CAT connection
+  // failure this is recoverable and must not tear down or auto-retry the rig.
+  Q_SIGNAL void remote_tx_error (QString const& reason) const;
 
   // signal announces audio devices are being enumerated
   //

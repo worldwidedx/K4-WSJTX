@@ -48,7 +48,7 @@ project (wsjtx
   VERSION 3.0.0.0
   LANGUAGES C CXX Fortran
   )
-set (PROJECT_DESCRIPTION "WSJT-X: Digital Modes for Weak Signal Communications in Amateur Radio")
+set (PROJECT_DESCRIPTION "K4 WSJT-X: WSJT-X with Elecraft K4 remote CAT and audio")
 set (CMAKE_PROJECT_DESCRIPTION ${PROJECT_DESCRIPTION})
 set (CMAKE_AUTOUIC ON)
 
@@ -232,6 +232,10 @@ set (wsjt_qt_CXXSRCS
   Transceiver/PollingTransceiver.cpp
   Transceiver/HamlibTransceiver.cpp
   Transceiver/TCITransceiver.cpp
+  Transceiver/K4RemoteProtocol.cpp
+  Transceiver/K4RemoteAudioCodec.cpp
+  Transceiver/K4RemoteTxGuard.cpp
+  Transceiver/K4RemoteTransceiver.cpp
   Transceiver/HRDTransceiver.cpp
   Transceiver/DXLabSuiteCommanderTransceiver.cpp
   Network/NetworkMessage.cpp
@@ -352,11 +356,6 @@ if (WIN32)
   set (wsjt_CXXSRCS
     ${wsjt_CXXSRCS}
     killbyname.cpp
-    )
-
-  set (wsjt_qt_CXXSRCS
-    ${wsjt_qt_CXXSRCS}
-    Transceiver/OmniRigTransceiver.cpp
     )
 endif (WIN32)
 
@@ -930,26 +929,6 @@ set_source_files_properties (lib/filbig.f90 PROPERTIES COMPILE_FLAGS "-Wno-alias
 set_property (SOURCE ${all_C_and_CXXSRCS} APPEND_STRING PROPERTY COMPILE_FLAGS " -include wsjtx_config.h")
 set_property (SOURCE ${all_C_and_CXXSRCS} APPEND PROPERTY OBJECT_DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/wsjtx_config.h)
 
-if (WIN32)
-  # generate the OmniRig COM interface source
-  find_program (DUMPCPP dumpcpp)
-  if (DUMPCPP-NOTFOUND)
-    message (FATAL_ERROR "dumpcpp tool not found")
-  endif (DUMPCPP-NOTFOUND)
-  execute_process (
-    COMMAND ${DUMPCPP} -getfile {4FE359C5-A58F-459D-BE95-CA559FB4F270}
-    OUTPUT_VARIABLE AXSERVER
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-  string (STRIP "${AXSERVER}" AXSERVER)
-  if (NOT AXSERVER)
-    message (FATAL_ERROR "You need to install OmniRig on this computer")
-  endif (NOT AXSERVER)
-  string (REPLACE "\"" "" AXSERVER ${AXSERVER})
-  file (TO_CMAKE_PATH ${AXSERVER} AXSERVERSRCS)
-endif ()
-
-
 #
 # decide on platform specifc packing and fixing up
 #
@@ -1053,7 +1032,6 @@ find_package (Qt5 COMPONENTS Widgets SerialPort Multimedia PrintSupport Sql Ling
 
 if (WIN32)
   add_definitions (-DQT_NEEDS_QTMAIN)
-  find_package (Qt5AxContainer REQUIRED)
 endif (WIN32)
 
 #
@@ -1530,12 +1508,6 @@ qt5_add_resources (wsjtx_RESOURCES_RCC
   contrib/QDarkStyleSheet/qdarkstyle/style.qrc
   )
 
-# AX COM servers
-if (WIN32)
-  include (QtAxMacros)
-  wrap_ax_server (GENAXSRCS ${AXSERVERSRCS})
-endif (WIN32)
-
 #
 # targets dependent on Qt
 #
@@ -1550,9 +1522,6 @@ add_library (wsjt_qt STATIC ${wsjt_qt_CXXSRCS} ${wsjt_qt_GENUISRCS} ${GENAXSRCS}
 # set wsjtx_udp exports to static variants
 target_compile_definitions (wsjt_qt PUBLIC UDP_STATIC_DEFINE)
 target_link_libraries (wsjt_qt Hamlib::Hamlib Boost::log qcp Qt5::Widgets Qt5::Network Qt5::Sql Qt5::WebSockets)
-if (WIN32)
-  target_link_libraries (wsjt_qt Qt5::AxContainer Qt5::AxBase)
-endif (WIN32)
 
 # build a library of package Qt functionality used in Fortran utilities
 add_library (fort_qt STATIC ${fort_qt_CXXSRCS})
@@ -1876,6 +1845,24 @@ if (WIN32)
       "installs without OpenSSL in PATH."
     )
   endif ()
+
+  # K4 EM2/EM3 remote audio loads Xiph Opus at runtime. Accommodate both
+  # native Windows (opus.dll) and MSYS2 (libopus-0.dll) naming.
+  file (GLOB _opus_runtime_dlls
+    "${_openssl_msys_prefix}/bin/opus.dll"
+    "${_openssl_msys_prefix}/bin/libopus*.dll"
+  )
+  if (_opus_runtime_dlls)
+    install (FILES ${_opus_runtime_dlls}
+      DESTINATION ${CMAKE_INSTALL_BINDIR}
+      #COMPONENT runtime
+    )
+  else ()
+    message (WARNING
+      "Xiph Opus runtime DLL not found at ${_openssl_msys_prefix}/bin — "
+      "K4 EM2/EM3 audio will be unavailable; EM0/EM1 remain usable."
+    )
+  endif ()
 endif (WIN32)
 
 #
@@ -1972,7 +1959,7 @@ endif ()
 #
 set (CPACK_PACKAGE_DESCRIPTION_FILE "${CMAKE_SOURCE_DIR}/package_description.txt")
 set (CPACK_MONOLITHIC_INSTALL 1)
-set (CPACK_PACKAGE_NAME "${CMAKE_PROJECT_NAME}")
+set (CPACK_PACKAGE_NAME "K4-WSJT-X")
 set (CPACK_PACKAGE_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
 set (CPACK_PACKAGE_VERSION_MINOR ${PROJECT_VERSION_MINOR})
 set (CPACK_PACKAGE_VERSION_PATCH "${PROJECT_VERSION_PATCH}${BUILD_TYPE_REVISION}")

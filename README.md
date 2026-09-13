@@ -1,5 +1,15 @@
 # Weak Signal Communication Software
 
+> **K4 WSJT-X fork.** This tree is based on the official WSJT-X 3.0.2
+> development line and replaces its selectable radio and sound-card interfaces
+> with one Elecraft K4 Remote connection. CAT, receive audio, and transmit audio
+> share the K4 framed TCP stream used by QK4 Mobile. Both password-authenticated
+> TCP and TLS 1.2+ with the K4 password as a pre-shared key are supported.
+>
+> FT8/FT4 transmission uses conservative network-audio drive until the optional
+> protected K4 TEST-mode calibration is completed. Live ALC protection remains
+> active on every transmission. See [K4 Remote architecture and operation](doc/K4_REMOTE.md).
+
 ## Programs
 *WSJT-X*, *MAP65*, and *QMAP* are open-source, multi-platform programs designed for weak-signal digital communication by amateur radio. *WSJT-X* works with a standard SSB transceiver, while *MAP65* and *QMAP* use wideband SDR-style hardware. The programs are open source, free of charge, and licensed under the GNU General Public License.
 

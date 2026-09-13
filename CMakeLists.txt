@@ -64,7 +64,7 @@ project (wsjtx
   VERSION 3.0.2.0
   LANGUAGES C CXX Fortran
   )
-set (PROJECT_DESCRIPTION "WSJT-X: Digital Modes for Weak Signal Communications in Amateur Radio")
+set (PROJECT_DESCRIPTION "K4 WSJT-X: WSJT-X with Elecraft K4 remote CAT and audio")
 set (CMAKE_PROJECT_DESCRIPTION ${PROJECT_DESCRIPTION})
 set (CMAKE_AUTOUIC ON)
 
@@ -114,7 +114,7 @@ set (wsjtx_VERSION "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${PROJECT_
 #
 # project information
 #
-set (PROJECT_BUNDLE_NAME "WSJT-X")
+set (PROJECT_BUNDLE_NAME "K4 WSJT-X")
 set (PROJECT_VENDOR "WSJT Development Group")
 set (PROJECT_CONTACT "joe@princetion.edu")
 set (PROJECT_COPYRIGHT "Copyright (C) 2001-2026 by Joe Taylor, K1JT")
@@ -252,6 +252,10 @@ set (wsjt_qt_CXXSRCS
   Transceiver/PollingTransceiver.cpp
   Transceiver/HamlibTransceiver.cpp
   Transceiver/TCITransceiver.cpp
+  Transceiver/K4RemoteProtocol.cpp
+  Transceiver/K4RemoteAudioCodec.cpp
+  Transceiver/K4RemoteTxGuard.cpp
+  Transceiver/K4RemoteTransceiver.cpp
   Transceiver/HRDMessage.cpp
   Transceiver/HRDTransceiver.cpp
   Transceiver/DXLabSuiteCommanderTransceiver.cpp
@@ -375,11 +379,6 @@ if (WIN32)
   set (wsjt_CXXSRCS
     ${wsjt_CXXSRCS}
     killbyname.cpp
-    )
-
-  set (wsjt_qt_CXXSRCS
-    ${wsjt_qt_CXXSRCS}
-    Transceiver/OmniRigTransceiver.cpp
     )
 endif (WIN32)
 
@@ -953,35 +952,6 @@ set_source_files_properties (lib/filbig.f90 PROPERTIES COMPILE_FLAGS "-Wno-alias
 set_property (SOURCE ${all_C_and_CXXSRCS} APPEND_STRING PROPERTY COMPILE_FLAGS " -include wsjtx_config.h")
 set_property (SOURCE ${all_C_and_CXXSRCS} APPEND PROPERTY OBJECT_DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/wsjtx_config.h)
 
-if (WIN32)
-  # generate the OmniRig COM interface source
-  if (OMNIRIG_TYPE_LIB)
-    # CI / headless build: type library path provided directly. Bypasses
-    # COM registration which is not available in CI. Pass via
-    # -DOMNIRIG_TYPE_LIB=<path-to-OmniRig.tlb>.
-    file (TO_CMAKE_PATH "${OMNIRIG_TYPE_LIB}" AXSERVERSRCS)
-    message (STATUS "Using OmniRig type library: ${AXSERVERSRCS}")
-  else ()
-    # Normal local build: query the COM registry for the type library.
-    find_program (DUMPCPP dumpcpp)
-    if (DUMPCPP-NOTFOUND)
-      message (FATAL_ERROR "dumpcpp tool not found")
-    endif (DUMPCPP-NOTFOUND)
-    execute_process (
-      COMMAND ${DUMPCPP} -getfile {4FE359C5-A58F-459D-BE95-CA559FB4F270}
-      OUTPUT_VARIABLE AXSERVER
-      OUTPUT_STRIP_TRAILING_WHITESPACE
-      )
-    string (STRIP "${AXSERVER}" AXSERVER)
-    if (NOT AXSERVER)
-      message (FATAL_ERROR "You need to install OmniRig on this computer, or pass -DOMNIRIG_TYPE_LIB=<path>")
-    endif (NOT AXSERVER)
-    string (REPLACE "\"" "" AXSERVER ${AXSERVER})
-    file (TO_CMAKE_PATH ${AXSERVER} AXSERVERSRCS)
-  endif ()
-endif ()
-
-
 #
 # decide on platform specifc packing and fixing up
 #
@@ -1100,7 +1070,6 @@ find_package (Qt5 COMPONENTS Widgets SerialPort Multimedia PrintSupport Sql Ling
 
 if (WIN32)
   add_definitions (-DQT_NEEDS_QTMAIN)
-  find_package (Qt5AxContainer REQUIRED)
 endif (WIN32)
 
 #
@@ -1596,12 +1565,6 @@ qt5_add_resources (wsjtx_RESOURCES_RCC
   contrib/QDarkStyleSheet/qdarkstyle/style.qrc
   )
 
-# AX COM servers
-if (WIN32)
-  include (QtAxMacros)
-  wrap_ax_server (GENAXSRCS ${AXSERVERSRCS})
-endif (WIN32)
-
 #
 # targets dependent on Qt
 #
@@ -1616,9 +1579,6 @@ add_library (wsjt_qt STATIC ${wsjt_qt_CXXSRCS} ${wsjt_qt_GENUISRCS} ${GENAXSRCS}
 # set wsjtx_udp exports to static variants
 target_compile_definitions (wsjt_qt PUBLIC UDP_STATIC_DEFINE)
 target_link_libraries (wsjt_qt Hamlib::Hamlib Boost::log qcp Qt5::Widgets Qt5::Network Qt5::Sql Qt5::WebSockets)
-if (WIN32)
-  target_link_libraries (wsjt_qt Qt5::AxContainer Qt5::AxBase)
-endif (WIN32)
 
 # build a library of package Qt functionality used in Fortran utilities
 add_library (fort_qt STATIC ${fort_qt_CXXSRCS})
@@ -1975,6 +1935,24 @@ if (WIN32)
       "installs without OpenSSL in PATH."
     )
   endif ()
+
+  # EM2/EM3 K4 remote audio loads Xiph Opus at runtime. Accommodate both
+  # native Windows (opus.dll) and MSYS2 (libopus-0.dll) naming.
+  file (GLOB _opus_runtime_dlls
+    "${_openssl_msys_prefix}/bin/opus.dll"
+    "${_openssl_msys_prefix}/bin/libopus*.dll"
+  )
+  if (_opus_runtime_dlls)
+    install (FILES ${_opus_runtime_dlls}
+      DESTINATION ${CMAKE_INSTALL_BINDIR}
+      #COMPONENT runtime
+    )
+  else ()
+    message (WARNING
+      "Xiph Opus runtime DLL not found at ${_openssl_msys_prefix}/bin — "
+      "K4 EM2/EM3 audio will be unavailable; EM0/EM1 remain usable."
+    )
+  endif ()
 endif (WIN32)
 
 #
@@ -2071,7 +2049,7 @@ endif ()
 #
 set (CPACK_PACKAGE_DESCRIPTION_FILE "${CMAKE_SOURCE_DIR}/package_description.txt")
 set (CPACK_MONOLITHIC_INSTALL 1)
-set (CPACK_PACKAGE_NAME "${CMAKE_PROJECT_NAME}")
+set (CPACK_PACKAGE_NAME "K4-WSJT-X")
 set (CPACK_PACKAGE_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
 set (CPACK_PACKAGE_VERSION_MINOR ${PROJECT_VERSION_MINOR})
 set (CPACK_PACKAGE_VERSION_PATCH "${PROJECT_VERSION_PATCH}${BUILD_TYPE_REVISION}")
@@ -2108,7 +2086,7 @@ else ()
 endif ()
 
 set (CPACK_DEBIAN_PACKAGE_HOMEPAGE "${PROJECT_HOMEPAGE}")
-set (CPACK_DEBIAN_PACKAGE_DEPENDS "libgfortran5 (>=8.3) | libgfortran4 (>=7.3) | libgfortran3 (>=6.3), libfftw3-single3 (>=3.3), libgomp1 (>=6), libqt5serialport5 (>=5.7), libqt5multimedia5-plugins (>=5.7), libqt5widgets5 (>=5.7), libqt5network5 (>=5.7), libqt5printsupport5 (>=5.7), libqt5websockets5 (>=5.7),  libqt5sql5-sqlite (>=5.7), libusb-1.0-0 (>=1.0.21), libboost-log1.62.0 (>=1.62.0) | libboost-log1.65.1 (>=1.65.1) | libboost-log1.67.0 (>=1.67.0) | libboost-log1.71.0 (>=1.71.0) | libboost-log1.74.0 (>=1.74.0) | libboost-log1.81.0 (>=1.81.0) | libboost-log1.83.0 (>=1.83.0) | libboost-log1.85.0 (>=1.85.0)")
+set (CPACK_DEBIAN_PACKAGE_DEPENDS "libgfortran5 (>=8.3) | libgfortran4 (>=7.3) | libgfortran3 (>=6.3), libfftw3-single3 (>=3.3), libgomp1 (>=6), libqt5serialport5 (>=5.7), libqt5multimedia5-plugins (>=5.7), libqt5widgets5 (>=5.7), libqt5network5 (>=5.7), libqt5printsupport5 (>=5.7), libqt5websockets5 (>=5.7), libqt5sql5-sqlite (>=5.7), libusb-1.0-0 (>=1.0.21), libopus0, libboost-log1.62.0 (>=1.62.0) | libboost-log1.65.1 (>=1.65.1) | libboost-log1.67.0 (>=1.67.0) | libboost-log1.71.0 (>=1.71.0) | libboost-log1.74.0 (>=1.74.0) | libboost-log1.81.0 (>=1.81.0) | libboost-log1.83.0 (>=1.83.0) | libboost-log1.85.0 (>=1.85.0)")
 set (CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
 # Take over data files (icon, samples, docs) from the distro `wsjtx-data`,
 # `wsjtx-doc`, `wsjtx-improved-data`, and `wsjtx-improved-doc` binary packages
@@ -2119,7 +2097,7 @@ set (CPACK_DEBIAN_PACKAGE_REPLACES "wsjtx-data, wsjtx-doc, wsjtx-improved-data, 
 set (CPACK_DEBIAN_PACKAGE_CONFLICTS "wsjtx-data (<< ${wsjtx_VERSION}), wsjtx-doc (<< ${wsjtx_VERSION}), wsjtx-improved-data (<< ${wsjtx_VERSION}), wsjtx-improved-doc (<< ${wsjtx_VERSION})")
 
 set (CPACK_RPM_PACKAGE_ARCHITECTURE ${CMAKE_SYSTEM_PROCESSOR})
-set (CPACK_RPM_PACKAGE_REQUIRES "qt5-qtbase >= 5.9, qt5-qtserialport >= 5.9, qt5-qtmultimedia >= 5.9, qt5-qtwebsockets >= 5.9, qt5-qtsvg >= 5.9, libusbx >= 1.0.22, libgfortran >= 7, libgomp >= 7, fftw-libs-single >= 3.3, boost-log >= 1.62")
+set (CPACK_RPM_PACKAGE_REQUIRES "qt5-qtbase >= 5.9, qt5-qtserialport >= 5.9, qt5-qtmultimedia >= 5.9, qt5-qtwebsockets >= 5.9, qt5-qtsvg >= 5.9, libusbx >= 1.0.22, libgfortran >= 7, libgomp >= 7, fftw-libs-single >= 3.3, opus, boost-log >= 1.62")
 set (CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION /usr/share/pixmaps /usr/share/applications /usr/share/man /usr/share/man1)
 
 configure_file ("${PROJECT_SOURCE_DIR}/CMakeCPackOptions.cmake.in"

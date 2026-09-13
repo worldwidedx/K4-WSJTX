@@ -33,7 +33,7 @@ public:
   //
   struct Capabilities
   {
-    enum PortType {none, serial, network, usb, tci};
+    enum PortType {none, serial, network, usb, tci, k4_remote};
 
     explicit Capabilities (unsigned model_number = 0
                            , PortType port_type = none
@@ -111,6 +111,16 @@ public:
     QString network_port;       // hostname:port or empty
     QString usb_port;           // [vid[:pid[:vendor[:product]]]]
     QString tci_port;           // hostname:port or empty
+    QString k4_host;
+    quint16 k4_port {9205};
+    QString k4_password;
+    bool k4_tls {false};
+    QString k4_tls_identity;
+    int k4_encode_mode {3};
+    int k4_streaming_latency {3};
+    float k4_calibrated_gain {1.f / 32.f};
+    bool k4_has_calibration {false};
+    QString k4_calibration_radio_context;
     int baud;
     DataBits data_bits;
     StopBits stop_bits;
@@ -135,6 +145,16 @@ public:
         && rhs.network_port == network_port
         && rhs.usb_port == usb_port
         && rhs.tci_port == tci_port
+        && rhs.k4_host == k4_host
+        && rhs.k4_port == k4_port
+        && rhs.k4_password == k4_password
+        && rhs.k4_tls == k4_tls
+        && rhs.k4_tls_identity == k4_tls_identity
+        && rhs.k4_encode_mode == k4_encode_mode
+        && rhs.k4_streaming_latency == k4_streaming_latency
+        && rhs.k4_calibrated_gain == k4_calibrated_gain
+        && rhs.k4_has_calibration == k4_has_calibration
+        && rhs.k4_calibration_radio_context == k4_calibration_radio_context
         && rhs.baud == baud
         && rhs.data_bits == data_bits
         && rhs.stop_bits == stop_bits

@@ -43,6 +43,7 @@
 #include <QVector>
 #include <QCursor>
 #include <QToolTip>
+#include <QSignalBlocker>
 #include <QAction>
 #include <QButtonGroup>
 #include <QActionGroup>
@@ -312,6 +313,25 @@ namespace
   constexpr int default_rx_audio_buffer_frames {-1}; // lets Qt decide
   constexpr int default_tx_audio_buffer_frames {-1}; // lets Qt decide
 
+  double k4_power_from_slider (int position)
+  {
+    return position <= 99 ? (position + 1) / 10. : position - 89.;
+  }
+
+  int slider_from_k4_power (double watts)
+  {
+    return watts <= 10. ? qBound (0, qRound (watts * 10.) - 1, 99)
+                        : qBound (100, qRound (watts) + 89, 199);
+  }
+
+  QString format_k4_power (double value, bool milliwatts)
+  {
+    auto const decimals = value <= 10. ? 1 : 0;
+    return QStringLiteral ("%1 %2")
+      .arg (value, 0, 'f', decimals)
+      .arg (milliwatts ? QStringLiteral ("mW") : QStringLiteral ("W"));
+  }
+
   bool message_is_73 (int type, QStringList const& msg_parts)
   {
     return type >= 0
@@ -557,6 +577,8 @@ MainWindow::MainWindow(QDir const& temp_directory, bool multiple,
   m_useDarkStyle {false}
 {
   ui->setupUi(this);
+  ui->outAttenuation->setEnabled (false);
+  ui->label->setText (tr ("Pwr"));
   setUnifiedTitleAndToolBarOnMac (true);
   createStatusBar();
   add_child_to_event_filter (this);
@@ -961,7 +983,13 @@ MainWindow::MainWindow(QDir const& temp_directory, bool multiple,
   connect (&m_config, &Configuration::transceiver_update, this, &MainWindow::handle_transceiver_update);
   connect (&m_config, &Configuration::transceiver_TCIframesWritten, this, &MainWindow::dataSink);
   connect (&m_config, &Configuration::transceiver_TCImodActive, this, &MainWindow::tci_mod_active);
+  connect (&m_config, &Configuration::transceiver_rf_power_setting,
+           this, &MainWindow::handle_k4_rf_power_setting);
   connect (&m_config, &Configuration::transceiver_failure, this, &MainWindow::handle_transceiver_failure);
+  connect (&m_config, &Configuration::remote_tx_error, this, [this] (QString const& reason) {
+      on_stopTxButton_clicked ();
+      MessageBox::critical_message (this, tr ("K4 TX stopped"), reason);
+    });
   connect (&m_config, &Configuration::udp_server_changed, m_messageClient, &MessageClient::set_server);
   connect (&m_config, &Configuration::udp_server_port_changed, m_messageClient, &MessageClient::set_server_port);
   connect (&m_config, &Configuration::udp_TTL_changed, m_messageClient, &MessageClient::set_TTL);
@@ -1227,9 +1255,6 @@ MainWindow::MainWindow(QDir const& temp_directory, bool multiple,
   if(m_tci_audio)
   {
     QTimer::singleShot (5000, [=] {
-      int attVal = ui->outAttenuation->value();
-      ui->outAttenuation->setValue(0);
-      ui->outAttenuation->setValue(attVal);
       Q_EMIT m_config.transceiver_volume(m_config.volume());
       // set_mode() in the constructor emits transceiver_period() while the TCI
       // rig is still offline, so TransceiverBase::set() skips do_period() and
@@ -1541,7 +1566,6 @@ void MainWindow::writeSettings()
     m_settings->setValue ("DialFreq", QVariant::fromValue(m_lastMonitoredFrequency));
   }
   m_settings->setValue("SkedFreq",m_skedFreq);
-  m_settings->setValue("OutAttenuation", ui->outAttenuation->value ());
   m_settings->setValue("NoSuffix",m_noSuffix);
   m_settings->setValue("GUItab",ui->tabWidget->currentIndex());
   m_settings->setValue("OutBufSize",outBufSize);
@@ -1970,9 +1994,13 @@ void MainWindow::readSettings()
   m_uploadWSPRSpots=m_settings->value("UploadSpots",false).toBool();
   ui->cbNoOwnCall->setChecked(m_settings->value("NoOwnCall",false).toBool());
   ui->band_hopping_group_box->setChecked (m_settings->value ("BandHopping", false).toBool());
-  // setup initial value of tx attenuator
+  // K4 RF power is initialized from live PC readback, never from the legacy
+  // WSJT-X audio-attenuation setting (which could otherwise command 110 W).
   m_block_pwr_tooltip = true;
-  ui->outAttenuation->setValue (m_settings->value ("OutAttenuation", 0).toInt ());
+  {
+    QSignalBlocker blocker {ui->outAttenuation};
+    ui->outAttenuation->setValue (0);
+  }
   m_block_pwr_tooltip = false;
   ui->sbCQTxFreq->setValue (m_settings->value ("CQTxFreq", 260).toInt());
   m_noSuffix=m_settings->value("NoSuffix",false).toBool();
@@ -12075,17 +12103,6 @@ void MainWindow::band_changed (Frequency f)
   no_a7_decodes = true;
   QTimer::singleShot ((int(1500.0*m_TRperiod)), [=] {no_a7_decodes = false;});
 
-  // Set the attenuation value if options are checked
-  if (m_config.pwrBandTxMemory() && !m_tune) {
-    auto const&curBand = ui->bandComboBox->currentText();
-    if (m_pwrBandTxMemory.contains(curBand)) {
-      ui->outAttenuation->setValue(m_pwrBandTxMemory[curBand].toInt());
-    }
-    else {
-      m_pwrBandTxMemory[curBand] = ui->outAttenuation->value();
-    }
-  }
-
   if (m_bandEdited && !keep_frequency) {
     if (m_mode!="WSPR" && !ui->pbBandHopping->isChecked() && !ui->DX_Call_Button->isChecked()) { // preserves auto Tx
       if (f + m_wideGraph->nStartFreq () > m_freqNominal + ui->TxFreqSpinBox->value ()
@@ -12233,17 +12250,6 @@ void MainWindow::on_tuneButton_clicked (bool checked)
   static bool lastChecked = false;
   if (lastChecked == checked) return;
   lastChecked = checked;
-  if (checked && m_tune==false) { // we're starting tuning so remember Tx and change pwr to Tune value
-    if (m_config.pwrBandTuneMemory ()) {
-      auto const& curBand = ui->bandComboBox->currentText();
-      m_pwrBandTxMemory[curBand] = ui->outAttenuation->value(); // remember our Tx pwr
-      m_PwrBandSetOK = false;
-      if (m_pwrBandTuneMemory.contains(curBand)) {
-        ui->outAttenuation->setValue(m_pwrBandTuneMemory[curBand].toInt()); // set to Tune pwr
-      }
-      m_PwrBandSetOK = true;
-    }
-  }
   if (m_tune) {
     tuneButtonTimer.start(250);
   } else {
@@ -12261,14 +12267,6 @@ void MainWindow::end_tuning ()
 {
   tuneATU_Timer.stop ();        // stop tune watchdog when stopping Tune manually
   on_stopTxButton_clicked ();
-  // we're turning off so remember our Tune pwr setting and reset to Tx pwr
-  if (m_config.pwrBandTuneMemory() || m_config.pwrBandTxMemory()) {
-    auto const& curBand = ui->bandComboBox->currentText();
-    m_pwrBandTuneMemory[curBand] = ui->outAttenuation->value(); // remember our Tune pwr
-    m_PwrBandSetOK = false;
-    ui->outAttenuation->setValue(m_pwrBandTxMemory[curBand].toInt()); // set to Tx pwr
-    m_PwrBandSetOK = true;
-  }
 }
 
 void MainWindow::stop_tuning ()
@@ -12455,17 +12453,6 @@ void MainWindow::handle_transceiver_update (Transceiver::TransceiverState const&
       band_hopping_label.setMinimumSize (QSize  {80, 18});
       band_hopping_label.show();
     }
-    if (m_rigState.power() != s.power() && m_transmitting) {
-      ui->label->setText(QString {tr("%1 W")}.arg (round(s.power()/1000.)));
-      if (round(s.power()/1000.) >= 100) {
-        qreal pointSize = m_config.text_font().pointSizeF();
-
-        ui->label->setMinimumWidth (2.8*pointSize + 16);
-        ui->outAttenuation->setMinimumWidth (2.8*pointSize + 16);
-      }
-    } else {
-      ui->label->setText("Pwr");
-    }
     if (m_rigState.swr() != s.swr()) {
       static bool s_alreadyShowingSWRAlert = false;
       if (s.swr() > 0) {
@@ -12551,6 +12538,33 @@ void MainWindow::handle_transceiver_update (Transceiver::TransceiverState const&
   update_dynamic_property (ui->readFreq, "state", "ok");
   ui->readFreq->setEnabled (false);
   ui->readFreq->setText (s.split () ? "S" : "");
+}
+
+void MainWindow::handle_k4_rf_power_setting (double value, bool milliwatts)
+{
+  m_k4_rf_power = value;
+  m_k4_power_milliwatts = milliwatts;
+  auto const display = format_k4_power (value, milliwatts);
+  ui->label->setText (display);
+  ui->label->setToolTip (tr ("K4 RF power setting confirmed by radio: %1")
+                           .arg (display));
+
+  if (milliwatts)
+    {
+      ui->outAttenuation->setEnabled (false);
+      ui->outAttenuation->setToolTip (
+        tr ("K4 transverter power is %1. Change transverter power at the radio.")
+          .arg (display));
+      return;
+    }
+
+  {
+    QSignalBlocker blocker {ui->outAttenuation};
+    ui->outAttenuation->setValue (slider_from_k4_power (value));
+  }
+  ui->outAttenuation->setEnabled (true);
+  ui->outAttenuation->setToolTip (
+    tr ("Set K4 RF output power. Radio readback: %1").arg (display));
 }
 
 void MainWindow::handle_transceiver_failure (QString const& reason)
@@ -12878,30 +12892,16 @@ void MainWindow::transmit (double snr)
 
 void MainWindow::on_outAttenuation_valueChanged (int a)
 {
-  QString tt_str;
-  qreal dBAttn {a / 10.};       // slider interpreted as dB / 100
-  if (m_tune && m_config.pwrBandTuneMemory()) {
-    tt_str = tr ("Tune digital gain ");
-  } else {
-    tt_str = tr ("Transmit digital gain ");
-  }
-  tt_str += (a ? QString::number (-dBAttn, 'f', 1) : "0") + "dB";
+  auto const watts = k4_power_from_slider (a);
+  auto const display = format_k4_power (watts, false);
+  auto const tt_str = tr ("Set K4 RF output power to %1").arg (display);
+  m_k4_rf_power = watts;
+  m_k4_power_milliwatts = false;
+  ui->label->setText (display);
   if (ui->outAttenuation->hasFocus() && !m_block_pwr_tooltip) {
     QToolTip::showText (QCursor::pos (), tt_str, ui->outAttenuation);
   }
-  QString curBand = ui->bandComboBox->currentText();
-  if (m_PwrBandSetOK && !m_tune && m_config.pwrBandTxMemory ()) {
-    m_pwrBandTxMemory[curBand] = a; // remember our Tx pwr
-  }
-  if (m_PwrBandSetOK && m_tune && m_config.pwrBandTuneMemory()) {
-    m_pwrBandTuneMemory[curBand] = a; // remember our Tune pwr
-  }
-  // Updating attenuation for tuning is done in stop_tuning
-  if (m_tci_audio) {
-    Q_EMIT m_config.transceiver_txvolume(dBAttn);
-  } else {
-    Q_EMIT outAttenuationChanged (dBAttn);
-  }
+  Q_EMIT m_config.transceiver_txvolume (watts);
 }
 
 void MainWindow::on_actionShort_list_of_add_on_prefixes_and_suffixes_triggered()

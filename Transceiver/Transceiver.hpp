@@ -227,6 +227,11 @@ public:
   Q_SLOT virtual void start (unsigned sequence_number) noexcept = 0;
   Q_SLOT virtual void stop () noexcept = 0;
 
+  // Optional remote-radio input calibration. Concrete network-audio rigs can
+  // override these; ordinary CAT implementations retain the no-op default.
+  Q_SLOT virtual void calibrate_remote_input () {}
+  Q_SLOT virtual void cancel_remote_input_calibration () {}
+
   //
   // asynchronous status updates
   //
@@ -243,6 +248,15 @@ public:
 
   // rig audio data transfer  w3sz tci
   Q_SIGNAL void tci_mod_active (bool);
+
+  Q_SIGNAL void remote_input_calibration_progress (QString const& message,
+                                                   float gain) const;
+  Q_SIGNAL void remote_input_calibration_finished (bool success,
+                                                   QString const& message,
+                                                   float gain,
+                                                   QString const& radio_context) const;
+  Q_SIGNAL void remote_tx_error (QString const& message) const;
+  Q_SIGNAL void rf_power_setting (double value, bool milliwatts) const;
 
   // rig state changed
   Q_SIGNAL void update (Transceiver::TransceiverState const&,

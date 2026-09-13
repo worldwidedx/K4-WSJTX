@@ -373,6 +373,7 @@ private slots:
   void on_outAttenuation_valueChanged (int);
   void rigOpen ();
   void handle_transceiver_update (Transceiver::TransceiverState const&);
+  void handle_k4_rf_power_setting (double, bool);
   void handle_transceiver_failure (QString const& reason);
   void handle_leavingSettings();
   void on_actionAstronomical_data_toggled (bool);
@@ -961,6 +962,8 @@ private:
   bool m_tx_watchdog;           // true when watchdog triggered
   bool m_block_pwr_tooltip;
   bool m_PwrBandSetOK;
+  double m_k4_rf_power {-1.};
+  bool m_k4_power_milliwatts {false};
   bool m_bDisplayedOnce;
   Frequency m_lastMonitoredFrequency;
   double m_toneSpacing;
