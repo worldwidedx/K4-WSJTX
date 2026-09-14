@@ -154,6 +154,38 @@ trip behavior, and compilation of the complete K4 transceiver and factory.
 Building the complete desktop application still uses the upstream WSJT-X build
 requirements, including Qt 5, Boost, Hamlib, FFTW, and a Fortran compiler.
 
+## Continuous integration and releases
+
+GitHub Actions builds every push and pull request targeting `master` on five
+targets: Windows x86_64, Linux x86_64, Linux aarch64, macOS Intel, and macOS
+Apple Silicon. Linux jobs produce DEB, RPM, and AppImage packages. macOS jobs
+produce PKG installers, and Windows produces an NSIS installer. Artifacts use
+the `K4-WSJT-X-<version>-<platform>` name.
+
+The runtime test suite fails a build when Qt cannot load TLS or does not expose
+an OpenSSL PSK cipher. Linux AppImages bundle `libopus.so.0` explicitly. The
+macOS package follows QK4 by bundling OpenSSL 3 and `libopus.0.dylib` inside the
+application's Frameworks directory and preferring those copies at runtime.
+
+Pushing `build/vX.Y.Z` or `build/vX.Y.Z-rcN` runs the same five-platform matrix
+and publishes a GitHub Release directly to `worldwidedx/K4-WSJTX`, but only
+after every installer-grade artifact exists. The tag's numeric version must
+match `CMakeLists.txt`.
+
+Without Apple secrets, macOS CI still creates an ad-hoc-signed test package.
+Trusted distribution and notarization require these repository secrets:
+
+- `DEVELOPER_ID_CERTIFICATE_P12`
+- `DEVELOPER_ID_CERTIFICATE_PASSWORD`
+- `DEVELOPER_ID_INSTALLER_P12`
+- `DEVELOPER_ID_INSTALLER_PASSWORD`
+- `APPLE_ID`
+- `APPLE_APP_SPECIFIC_PASSWORD`
+- `APPLE_TEAM_ID`
+
+The release workflow uses only the repository-scoped GitHub token. It contains
+no upstream mirror remote, force push, or `CROSS_REPO_TOKEN` path.
+
 The socket, protocol parser, and transport timers are QObject children of the
 K4 transceiver. This is required because WSJT-X moves the transceiver to its rig
 thread after construction. Keeping any of those objects as unparented value

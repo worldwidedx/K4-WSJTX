@@ -10,6 +10,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QFileInfo>
 
 namespace {
 constexpr int opus_ok{0};
@@ -41,8 +42,28 @@ K4RemoteAudioCodec::K4RemoteAudioCodec() {
     if (library_.load())
       break;
   }
+#elif defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+  // QK4 bundles libopus in Contents/Frameworks. QLibrary's generic lookup is
+  // not guaranteed to search that directory for a library loaded at runtime,
+  // so prefer the app-local copy explicitly and keep a normal loader fallback
+  // for developer builds.
+  auto const frameworks = QDir{QCoreApplication::applicationDirPath()}
+                              .absoluteFilePath(QStringLiteral("../Frameworks"));
+  for (auto const &name : {QStringLiteral("libopus.0.dylib"),
+                           QStringLiteral("libopus.dylib")}) {
+    auto const candidate = QDir{frameworks}.absoluteFilePath(name);
+    if (QFileInfo::exists(candidate)) {
+      library_.setFileName(candidate);
+      if (library_.load())
+        break;
+    }
+  }
+  if (!library_.isLoaded()) {
+    library_.setFileName(QStringLiteral("opus"));
+    library_.load();
+  }
 #else
-  // Unix-like deployments provide libopus.so/dylib through the normal loader.
+  // Linux deployments provide libopus.so through the normal loader.
   library_.setFileName(QStringLiteral("opus"));
   if (!library_.load())
     library_.setFileNameAndVersion(QStringLiteral("opus"), 0);

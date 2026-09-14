@@ -100,6 +100,7 @@ cd "$source_dir"
 
 export MACOSX_DEPLOYMENT_TARGET="$deployment_target"
 export QMAKE_MACOSX_DEPLOYMENT_TARGET="$deployment_target"
+openssl_prefix="$(brew --prefix openssl@3)"
 
 configure_args=(
   -opensource
@@ -115,7 +116,13 @@ configure_args=(
   -qt-pcre
   -qt-harfbuzz
   -qt-sqlite
-  -securetransport
+  # K4 password authentication uses TLS-PSK. Qt only implements PSK with its
+  # OpenSSL backend, so mirror QK4 and build the runtime-loaded OpenSSL backend
+  # instead of Apple's Secure Transport backend.
+  -openssl-runtime
+  -I "${openssl_prefix}/include"
+  -L "${openssl_prefix}/lib"
+  "OPENSSL_PREFIX=${openssl_prefix}"
   -skip qt3d
   -skip qtactiveqt
   -skip qtandroidextras
@@ -166,3 +173,10 @@ make install
     printf "Expected Qt version %s, got %s\n", expected, $0 > "/dev/stderr"
     exit 1
   }'
+
+ssl_features="$("${prefix}/bin/qmake" -query QT_INSTALL_HEADERS)/QtNetwork/${QT_VERSION}/QtNetwork/private/qtnetwork-config_p.h"
+if [ ! -f "$ssl_features" ] || ! grep -q 'QT_FEATURE_openssl.*1' "$ssl_features"; then
+  echo "Qt was not built with its OpenSSL backend; K4 TLS-PSK would not work" >&2
+  [ -f "$ssl_features" ] && cat "$ssl_features" >&2
+  exit 1
+fi

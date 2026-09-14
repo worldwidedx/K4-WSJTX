@@ -24,7 +24,6 @@
 #include <QSysInfo>
 #include <QDir>
 #include <QDirIterator>
-#include <QFile>
 #include <QFileInfo>
 #include <QStandardPaths>
 #include <QStringList>
@@ -277,6 +276,41 @@ int main(int argc, char *argv[])
   PerformanceTrace::begin_run ("startup", "initial");
   PerformanceTrace::Phase process_bootstrap {"process.bootstrap"};
   init_random_seed ();
+
+#if defined (Q_OS_MACOS) || defined (Q_OS_MAC)
+  // Match QK4's macOS deployment: Qt loads its OpenSSL backend at runtime,
+  // and TLS-PSK is only available through OpenSSL. Prefer the libraries
+  // bundled beside the application, while retaining Homebrew fallbacks for
+  // developer builds.
+  QString executable_path = QString::fromLocal8Bit (argv[0]);
+  QStringList openssl_paths;
+  if (executable_path.contains (QStringLiteral (".app/Contents/MacOS/")))
+    {
+      openssl_paths << QFileInfo {executable_path}.absolutePath ()
+                       + QStringLiteral ("/../Frameworks");
+    }
+  openssl_paths << QStringLiteral ("/opt/homebrew/opt/openssl@3/lib")
+                << QStringLiteral ("/usr/local/opt/openssl@3/lib")
+                << QStringLiteral ("/opt/homebrew/opt/openssl/lib")
+                << QStringLiteral ("/usr/local/opt/openssl/lib");
+
+  auto dyld_path = QString::fromLocal8Bit (qgetenv ("DYLD_LIBRARY_PATH"));
+  for (auto const& openssl_path : openssl_paths)
+    {
+      if (QFileInfo::exists (openssl_path + QStringLiteral ("/libssl.3.dylib"))
+          || QFileInfo::exists (openssl_path + QStringLiteral ("/libssl.dylib")))
+        {
+          if (!dyld_path.split (':', Qt::SkipEmptyParts).contains (openssl_path))
+            {
+              dyld_path = dyld_path.isEmpty ()
+                            ? openssl_path
+                            : openssl_path + ':' + dyld_path;
+              qputenv ("DYLD_LIBRARY_PATH", dyld_path.toLocal8Bit ());
+            }
+          break;
+        }
+    }
+#endif
 
   // make the Qt type magic happen
   Radio::register_types ();

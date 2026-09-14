@@ -2,14 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [develop, "release/**"]
+    branches: [master]
   pull_request:
-    branches: [develop, "release/**"]
-    # `labeled` is added to the defaults (opened/synchronize/reopened) so
-    # that applying `full-ci`, `sanitizers`, or `thread-sanitizer` to an
-    # already-open PR triggers
-    # a fresh run that includes the requested opt-in jobs (see the gates below).
-    types: [opened, synchronize, reopened, labeled]
+    branches: [master]
   workflow_dispatch:
     inputs:
       recache:

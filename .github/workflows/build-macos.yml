@@ -7,7 +7,7 @@ on:
   workflow_call:
     inputs:
       version:
-        description: "WSJT-X version string"
+        description: "K4-WSJT-X version string"
         required: true
         type: string
       hamlib_branch:
@@ -216,34 +216,10 @@ jobs:
         run: echo "HOMEBREW_PREFIX=$(brew --prefix)" >> "$GITHUB_ENV"
 
       - name: Install dependencies
-        run: brew install cmake autoconf automake libtool asciidoctor ccache pkg-config
-
-      - name: Select ccache key
-        id: ccache-key
-        env:
-          RECACHE: ${{ inputs.recache }}
-        run: .github/scripts/select-ccache-key-suffix.sh
-
-      - name: Restore ccache
-        id: ccache
-        uses: actions/cache/restore@v6
-        with:
-          path: .ccache
-          key: ccache-macos-${{ inputs.arch }}-appleclang-${{ github.sha }}${{ steps.ccache-key.outputs.suffix }}
-          restore-keys: |
-            ccache-macos-${{ inputs.arch }}-appleclang-
-
-      - name: Configure ccache
         run: |
-          echo "CCACHE_DIR=${GITHUB_WORKSPACE}/.ccache" >> "$GITHUB_ENV"
-          echo "ccache recache: ${{ inputs.recache }}"
-          if [ "${{ inputs.recache }}" = "true" ]; then
-            echo "CCACHE_RECACHE=1" >> "$GITHUB_ENV"
-            echo "Forcing ccache recache for this run"
-          fi
-          mkdir -p "${GITHUB_WORKSPACE}/.ccache"
-          ccache --version
-          ccache --zero-stats
+          brew install cmake autoconf automake libtool asciidoctor openssl@3 opus
+          echo "OPENSSL_LIB=$(brew --prefix openssl@3)/lib" >> "$GITHUB_ENV"
+          echo "OPUS_LIB=$(brew --prefix opus)/lib" >> "$GITHUB_ENV"
 
       - name: Compute Qt cache key
         id: qt-key
@@ -598,6 +574,8 @@ jobs:
         id: ctest
         run: ctest --parallel 3 --output-on-failure --output-junit ctest-results.xml
         working-directory: wsjtx-build
+        env:
+          DYLD_LIBRARY_PATH: ${{ env.OPENSSL_LIB }}:${{ env.OPUS_LIB }}
 
       - name: Publish test summary
         if: always() && steps.ctest.conclusion != 'skipped'
@@ -641,7 +619,7 @@ jobs:
         id: collect
         run: |
           BUILD=wsjtx-build
-          STAGE="stage/wsjtx-${VERSION}-${ARCH}"
+          STAGE=stage/K4-WSJT-X-${{ inputs.version }}-${{ inputs.arch }}
           ASSETS=assets
 
           mkdir -p "${ASSETS}"
@@ -659,6 +637,25 @@ jobs:
               exit 1
             fi
           done
+
+          # Match QK4's proven macOS deployment. Qt loads OpenSSL at runtime
+          # for TLS-PSK, and the K4 codec loads Opus at runtime, so neither is
+          # visible to normal dependency scanners. Bundle both explicitly.
+          FRAMEWORKS="${APP}/Contents/Frameworks"
+          mkdir -p "$FRAMEWORKS"
+          cp "${OPENSSL_LIB}/libssl.3.dylib" "$FRAMEWORKS/"
+          cp "${OPENSSL_LIB}/libcrypto.3.dylib" "$FRAMEWORKS/"
+          cp "${OPUS_LIB}/libopus.0.dylib" "$FRAMEWORKS/"
+          ln -sf libopus.0.dylib "$FRAMEWORKS/libopus.dylib"
+          chmod -R u+rw "$FRAMEWORKS"
+
+          install_name_tool -id "@rpath/libssl.3.dylib" "$FRAMEWORKS/libssl.3.dylib"
+          install_name_tool -id "@rpath/libcrypto.3.dylib" "$FRAMEWORKS/libcrypto.3.dylib"
+          crypto_ref="$(otool -L "$FRAMEWORKS/libssl.3.dylib" | awk '/libcrypto/{print $1; exit}')"
+          if [ -n "$crypto_ref" ] && [ "$crypto_ref" != "@rpath/libcrypto.3.dylib" ]; then
+            install_name_tool -change "$crypto_ref" "@rpath/libcrypto.3.dylib" "$FRAMEWORKS/libssl.3.dylib"
+          fi
+          install_name_tool -id "@rpath/libopus.0.dylib" "$FRAMEWORKS/libopus.0.dylib"
 
           for bin in jt9 wsprd wsprcode jt65code jt4code ft8code q65code encode77 fcal hash22calc; do
             [ -f "${BUILD}/${bin}" ] && cp "${BUILD}/${bin}" "${ASSETS}/"
@@ -752,6 +749,11 @@ jobs:
       - name: Verify bundled macOS deployment targets
         run: |
           STAGE="${{ steps.collect.outputs.stage_dir }}"
+          FRAMEWORKS="${STAGE}/wsjtx.app/Contents/Frameworks"
+          test -f "${FRAMEWORKS}/libssl.3.dylib"
+          test -f "${FRAMEWORKS}/libcrypto.3.dylib"
+          test -f "${FRAMEWORKS}/libopus.0.dylib"
+          otool -L "${FRAMEWORKS}/libssl.3.dylib" | grep -q '@rpath/libcrypto.3.dylib'
           .github/scripts/verify-macos-artifacts.sh \
             --target "${{ env.DEPLOYMENT_TARGET }}" \
             --arch "${{ inputs.arch }}" \
@@ -814,8 +816,8 @@ jobs:
       - name: Prepare installer package
         run: |
           STAGE="${{ steps.collect.outputs.stage_dir }}"
-          PKG_ID="org.k1jt.wsjtx.${ARCH}"
-          PKG_VERSION="${VERSION}"
+          PKG_ID="com.github.worldwidedx.k4wsjtx.${{ inputs.arch }}"
+          PKG_VERSION="${{ inputs.version }}"
 
           PAYLOAD="$RUNNER_TEMP/pkg-payload"
           SCRIPTS="$RUNNER_TEMP/pkg-scripts"
@@ -856,16 +858,18 @@ jobs:
             --install-location / \
             "$RUNNER_TEMP/wsjtx-component.pkg"
 
-      - name: Build unsigned validation package
-        if: inputs.signing_mode == 'validation'
-        id: package
-        run: |
-          PKG_OUT="wsjtx-${VERSION}-${ARCH}-macOS.pkg"
-          productbuild \
-            --package "$RUNNER_TEMP/wsjtx-component.pkg" \
-            "$PKG_OUT"
-          echo "path=$PKG_OUT" >> "$GITHUB_OUTPUT"
-          echo "artifact_name=wsjtx-${VERSION}-${ARCH}-macOS-unsigned.pkg" >> "$GITHUB_OUTPUT"
+          PKG_OUT="K4-WSJT-X-${{ inputs.version }}-${{ inputs.arch }}-macOS.pkg"
+          if [ "${{ steps.check_secrets.outputs.signing_enabled }}" = "true" ]; then
+            INST_IDENTITY="${{ steps.keychain.outputs.installer_identity }}"
+            productbuild \
+              --package "$RUNNER_TEMP/wsjtx-component.pkg" \
+              --sign "$INST_IDENTITY" \
+              "$PKG_OUT"
+          else
+            productbuild \
+              --package "$RUNNER_TEMP/wsjtx-component.pkg" \
+              "$PKG_OUT"
+          fi
 
       - name: Verify unsigned validation package
         if: inputs.signing_mode == 'validation'
@@ -909,46 +913,54 @@ jobs:
           cp "${{ runner.temp }}/components.plist" distribution-signing-input/
           cp entitlements.plist distribution-signing-input/
 
-      - name: Upload distribution signing input
-        if: inputs.signing_mode == 'distribution'
-        uses: actions/upload-artifact@v7
-        with:
-          name: macos-signing-input-${{ inputs.version }}-${{ inputs.arch }}
-          path: distribution-signing-input
-          retention-days: 1
+            if grep -q "status: Invalid" notarize.log; then
+              SUBMISSION_ID=$(grep "id:" notarize.log | head -1 | awk '{print $2}')
+              xcrun notarytool log "$SUBMISSION_ID" \
+                --apple-id "$APPLE_ID" \
+                --password "$APPLE_ID_PASSWORD" \
+                --team-id "$APPLE_TEAM_ID" || true
+              exit 1
+            fi
 
-      - name: Write validation signing report
-        if: inputs.signing_mode == 'validation'
+            xcrun stapler staple "$file"
+          }
+
+          notarize_and_staple "K4-WSJT-X-${{ inputs.version }}-${{ inputs.arch }}-macOS.pkg"
+
+      - name: Notarize CLI tools
+        if: steps.check_secrets.outputs.signing_enabled == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          PKG_OUT="${{ steps.package.outputs.path }}"
-          PKG_SIGNATURE=$(pkgutil --check-signature "$PKG_OUT" 2>&1 || true)
-          printf '%s\n' "$PKG_SIGNATURE"
-          if [[ "$PKG_SIGNATURE" != *"Status: no signature"* ]]; then
-            echo "::error::Validation package did not report the expected unsigned status."
+          ASSETS="${{ steps.collect.outputs.assets_dir }}"
+          zip -r cli-tools.zip "${ASSETS}"/
+          xcrun notarytool submit cli-tools.zip \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait 2>&1 | tee notarize-cli.log
+
+          if grep -q "status: Invalid" notarize-cli.log; then
+            SUBMISSION_ID=$(grep "id:" notarize-cli.log | head -1 | awk '{print $2}')
+            xcrun notarytool log "$SUBMISSION_ID" \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_ID_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" || true
             exit 1
           fi
-          SHA256=$(shasum -a 256 "$PKG_OUT" | awk '{print $1}')
-          jq -n \
-            --arg mode validation \
-            --arg artifact "$PKG_OUT" \
-            --arg sha256 "$SHA256" \
-            --arg git_sha "$GITHUB_SHA" \
-            '{schema_version: 1, mode: $mode, artifact: $artifact, sha256: $sha256, git_sha: $git_sha, signed: false, notarized: false, publishable: false}' \
-            > macos-signing-report.json
+          rm cli-tools.zip
+
+      - name: Clean up keychain
+        if: always() && steps.check_secrets.outputs.signing_enabled == 'true'
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
 
       - name: Upload pkg
-        if: inputs.signing_mode == 'validation'
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ steps.package.outputs.artifact_name }}
-          path: ${{ steps.package.outputs.path }}
-
-      - name: Upload signing report
-        if: inputs.signing_mode == 'validation'
-        uses: actions/upload-artifact@v7
-        with:
-          name: macos-signing-report-${{ inputs.version }}-${{ inputs.arch }}
-          path: macos-signing-report.json
+          name: K4-WSJT-X-${{ inputs.version }}-${{ inputs.arch }}-macOS.pkg
+          path: K4-WSJT-X-${{ inputs.version }}-${{ inputs.arch }}-macOS.pkg
 
       - name: Package individual binaries
         run: |

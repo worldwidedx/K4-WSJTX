@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       version:
-        description: "WSJT-X version string"
+        description: "K4-WSJT-X version string"
         required: true
         type: string
       hamlib_branch:
@@ -141,6 +141,8 @@ jobs:
             mingw-w64-x86_64-fftw
             mingw-w64-x86_64-libusb
             mingw-w64-x86_64-portaudio
+            mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-opus
             mingw-w64-x86_64-pkg-config
             mingw-w64-x86_64-nsis
             mingw-w64-x86_64-ruby
@@ -357,37 +359,60 @@ jobs:
           # wsjtx-<inputs.version>-win64.exe. release.yml's prepare job
           # enforces numeric-base parity; this override covers the
           # suffix gap.
-          cpack_args=(
-            -G NSIS
-            -D CPACK_PACKAGE_VERSION="${VERSION}"
-            -D CPACK_PACKAGE_FILE_NAME="wsjtx-${VERSION}-win64"
-          )
-          if [ "${CPACK_VERBOSE:-0}" = "1" ]; then
-            cpack_args+=(-V)
-          fi
-          cpack "${cpack_args[@]}"
+          cpack -G NSIS -V \
+            -D CPACK_PACKAGE_VERSION="${{ inputs.version }}" \
+            -D CPACK_PACKAGE_FILE_NAME="K4-WSJT-X-${{ inputs.version }}-win64"
           ls -la *.exe
+          test -x map65/map65.exe
 
-      - name: Verify installer has no Authenticode signature
-        shell: pwsh
+      # Self-signed ephemeral signing — the signing step is wired into the
+      # pipeline, but the signature does NOT chain to a trusted root. This
+      # is intentional: Authenticode certification is a separate decision
+      # (CI/CD adoption decision #5). Generates an ephemeral cert per-run.
+      - name: Sign installer with self-signed ephemeral cert
         run: |
-          $installer = Get-Item "wsjtx-build/wsjtx-${{ inputs.version }}-win64.exe"
-          $signature = Get-AuthenticodeSignature $installer.FullName
-          if ($signature.Status -ne 'NotSigned') {
-            throw "Installer Authenticode status is $($signature.Status), expected NotSigned"
-          }
+          cd wsjtx-build
+          INSTALLER=$(ls K4-WSJT-X-${{ inputs.version }}-*.exe | head -1)
+          if [ -z "$INSTALLER" ]; then
+            echo "ERROR: no NSIS installer produced by cpack"
+            ls -la
+            exit 1
+          fi
+          echo "Unsigned installer: $INSTALLER"
+          # MSYS2 auto-converts arguments starting with '/' into Windows paths
+          # (e.g., '/CN=...' becomes 'D:/a/_temp/msys64/CN=...').
+          # MSYS2_ARG_CONV_EXCL="*" disables that conversion for this command.
+          MSYS2_ARG_CONV_EXCL="*" openssl req -x509 -newkey rsa:2048 \
+            -keyout ephemeral-key.pem -out ephemeral-cert.pem \
+            -days 365 -nodes \
+            -subj "/CN=K4-WSJT-X Ephemeral Dev Signing/O=worldwidedx/C=US"
+          SIGNED="${INSTALLER%.exe}-signed.exe"
+          osslsigncode sign \
+            -certs ephemeral-cert.pem -key ephemeral-key.pem \
+            -n "K4-WSJT-X Installer" \
+            -i "https://github.com/worldwidedx/K4-WSJTX" \
+            -h sha256 \
+            -in "$INSTALLER" -out "$SIGNED"
+          mv "$SIGNED" "$INSTALLER"
+          rm -f ephemeral-key.pem ephemeral-cert.pem
+          echo "Signed installer: $INSTALLER"
+          osslsigncode verify "$INSTALLER" || true
+          # Exit 0: osslsigncode verify returns non-zero on CA-untrust even
+          # when the signature itself is structurally valid. The ephemeral
+          # cert is self-signed by design; the "|| true" keeps CI green.
+          # Structural presence is proven by the sign step succeeding above.
 
       - name: Upload installer artifact
         id: upload_installer
         uses: actions/upload-artifact@v7
         with:
-          name: wsjtx-${{ inputs.version }}-windows-x86_64-installer
-          path: wsjtx-build/wsjtx-${{ inputs.version }}-*.exe
+          name: K4-WSJT-X-${{ inputs.version }}-windows-x86_64-installer
+          path: wsjtx-build/K4-WSJT-X-${{ inputs.version }}-*.exe
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: wsjtx-${{ inputs.version }}-windows-x86_64
+          name: K4-WSJT-X-${{ inputs.version }}-windows-x86_64
           path: |
             wsjtx-build/jt9.exe
             wsjtx-build/wsprd.exe
