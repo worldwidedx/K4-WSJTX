@@ -175,9 +175,20 @@ make install
     exit 1
   }'
 
-ssl_features="$("${prefix}/bin/qmake" -query QT_INSTALL_HEADERS)/QtNetwork/${QT_VERSION}/QtNetwork/private/qtnetwork-config_p.h"
-if [ ! -f "$ssl_features" ] || ! grep -q 'QT_FEATURE_openssl.*1' "$ssl_features"; then
+qt_headers="$("${prefix}/bin/qmake" -query QT_INSTALL_HEADERS)"
+ssl_features=""
+for candidate in \
+  "${qt_headers}/QtNetwork/${QT_VERSION}/QtNetwork/private/qtnetwork-config_p.h" \
+  "${prefix}/lib/QtNetwork.framework/Versions/5/Headers/${QT_VERSION}/QtNetwork/private/qtnetwork-config_p.h"
+do
+  if [ -f "$candidate" ]; then
+    ssl_features="$candidate"
+    break
+  fi
+done
+
+if [ -z "$ssl_features" ] || ! grep -q 'QT_FEATURE_openssl.*1' "$ssl_features"; then
   echo "Qt was not built with its OpenSSL backend; K4 TLS-PSK would not work" >&2
-  [ -f "$ssl_features" ] && cat "$ssl_features" >&2
+  [ -n "$ssl_features" ] && cat "$ssl_features" >&2
   exit 1
 fi
