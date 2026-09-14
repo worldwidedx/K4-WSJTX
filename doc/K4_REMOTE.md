@@ -165,7 +165,10 @@ the `K4-WSJT-X-<version>-<platform>` name.
 The runtime test suite fails a build when Qt cannot load TLS or does not expose
 an OpenSSL PSK cipher. Linux AppImages bundle `libopus.so.0` explicitly. The
 macOS package follows QK4 by bundling OpenSSL 3 and `libopus.0.dylib` inside the
-application's Frameworks directory and preferring those copies at runtime.
+application's Frameworks directory and preferring those copies at runtime. CI
+builds both libraries from pinned, checksum-verified upstream sources for each
+declared macOS deployment target instead of shipping runner-native Homebrew
+binaries.
 
 Pushing `build/vX.Y.Z` or `build/vX.Y.Z-rcN` runs the same five-platform matrix
 and publishes a GitHub Release directly to `worldwidedx/K4-WSJTX`, but only

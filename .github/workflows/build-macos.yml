@@ -80,9 +80,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          brew install cmake autoconf automake libtool asciidoctor openssl@3 opus
-          echo "OPENSSL_LIB=$(brew --prefix openssl@3)/lib" >> "$GITHUB_ENV"
-          echo "OPUS_LIB=$(brew --prefix opus)/lib" >> "$GITHUB_ENV"
+          brew install cmake autoconf automake libtool asciidoctor
 
       - name: Compute Qt cache key
         id: qt-key
@@ -108,6 +106,68 @@ jobs:
             --arch "${{ inputs.arch }}" \
             --allow-prefix "${GITHUB_WORKSPACE}/qt-prefix" \
             "${GITHUB_WORKSPACE}/qt-prefix"
+
+      - name: Cache OpenSSL
+        id: openssl-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: openssl-prefix
+          key: openssl-macos-${{ inputs.arch }}-${{ inputs.runner }}-3.5.8-min${{ inputs.deployment_target }}-${{ hashFiles('.github/scripts/build-openssl-macos.sh') }}
+
+      - name: Build OpenSSL
+        if: steps.openssl-cache.outputs.cache-hit != 'true'
+        run: |
+          .github/scripts/build-openssl-macos.sh \
+            3.5.8 \
+            a8f84a39918ec6415ce765d9b429d313ba97b8143169c172e734b9514464f5b2 \
+            "${{ inputs.deployment_target }}" \
+            "${{ inputs.arch }}" \
+            "${GITHUB_WORKSPACE}/openssl-prefix"
+
+      - name: Save OpenSSL cache
+        if: steps.openssl-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: openssl-prefix
+          key: ${{ steps.openssl-cache.outputs.cache-primary-key }}
+
+      - name: Cache Opus
+        id: opus-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: opus-prefix
+          key: opus-macos-${{ inputs.arch }}-${{ inputs.runner }}-1.5.2-min${{ inputs.deployment_target }}-${{ hashFiles('.github/scripts/build-opus-macos.sh') }}
+
+      - name: Build Opus
+        if: steps.opus-cache.outputs.cache-hit != 'true'
+        run: |
+          .github/scripts/build-opus-macos.sh \
+            1.5.2 \
+            65c1d2f78b9f2fb20082c38cbe47c951ad5839345876e46941612ee87f9a7ce1 \
+            "${{ inputs.deployment_target }}" \
+            "${{ inputs.arch }}" \
+            "${GITHUB_WORKSPACE}/opus-prefix"
+
+      - name: Save Opus cache
+        if: steps.opus-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: opus-prefix
+          key: ${{ steps.opus-cache.outputs.cache-primary-key }}
+
+      - name: Verify controlled TLS and audio runtimes
+        run: |
+          .github/scripts/verify-macos-artifacts.sh \
+            --target "${{ inputs.deployment_target }}" \
+            --arch "${{ inputs.arch }}" \
+            --allow-prefix "${GITHUB_WORKSPACE}/openssl-prefix" \
+            --allow-prefix "${GITHUB_WORKSPACE}/opus-prefix" \
+            "${GITHUB_WORKSPACE}/openssl-prefix" \
+            "${GITHUB_WORKSPACE}/opus-prefix"
+          {
+            echo "OPENSSL_LIB=${GITHUB_WORKSPACE}/openssl-prefix/lib"
+            echo "OPUS_LIB=${GITHUB_WORKSPACE}/opus-prefix/lib"
+          } >> "$GITHUB_ENV"
 
       - name: Install controlled ARM gfortran
         id: controlled-arm-fc
