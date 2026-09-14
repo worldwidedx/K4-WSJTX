@@ -3,6 +3,9 @@
 #include <QCoreApplication>
 #include <QFileInfo>
 #include <QSignalSpy>
+#include <QSslCipher>
+#include <QSslConfiguration>
+#include <QSslSocket>
 #include <QtEndian>
 #include <QtTest>
 
@@ -14,6 +17,7 @@ class K4RemoteTests final : public QObject {
   Q_OBJECT
 
 private Q_SLOTS:
+  void tls_backend_supports_psk();
   void framing_survives_fragmentation();
   void framing_survives_coalescing();
   void password_authentication_is_sha384_hex();
@@ -30,6 +34,25 @@ private Q_SLOTS:
   void guard_calibrates_in_qk4_target_range();
   void guard_trips_on_emergency_alc();
 };
+
+void K4RemoteTests::tls_backend_supports_psk() {
+  QVERIFY2(QSslSocket::supportsSsl(),
+           qPrintable(QStringLiteral("Qt TLS backend unavailable: build=%1 runtime=%2")
+                          .arg(QSslSocket::sslLibraryBuildVersionString(),
+                               QSslSocket::sslLibraryVersionString())));
+
+  bool has_psk_cipher = false;
+  for (auto const &cipher : QSslConfiguration::supportedCiphers()) {
+    if (cipher.name().contains(QStringLiteral("PSK"), Qt::CaseInsensitive)) {
+      has_psk_cipher = true;
+      break;
+    }
+  }
+  QVERIFY2(has_psk_cipher,
+           qPrintable(QStringLiteral("Qt TLS backend has no PSK cipher suites: build=%1 runtime=%2")
+                          .arg(QSslSocket::sslLibraryBuildVersionString(),
+                               QSslSocket::sslLibraryVersionString())));
+}
 
 void K4RemoteTests::framing_survives_fragmentation() {
   K4RemoteProtocolParser parser;

@@ -42,6 +42,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Install OpenSSL build dependency
+        run: brew install openssl@3
+
       - name: Restore Qt cache
         id: qt-cache
         uses: actions/cache/restore@v5

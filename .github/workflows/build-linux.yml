@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       version:
-        description: "WSJT-X version string"
+        description: "K4-WSJT-X version string"
         required: true
         type: string
       hamlib_branch:
@@ -43,6 +43,7 @@ jobs:
             qtbase5-dev qttools5-dev qtmultimedia5-dev libqt5serialport5-dev \
             libqt5sql5-sqlite libqt5websockets5-dev \
             libqt5multimedia5-plugins \
+            libssl-dev libopus-dev libopus0 \
             libusb-1.0-0-dev libudev-dev libreadline-dev portaudio19-dev \
             autoconf automake libtool pkg-config \
             texinfo \
@@ -160,8 +161,8 @@ jobs:
         run: |
           cd wsjtx-build
           cpack -G DEB \
-            -D "CPACK_DEBIAN_FILE_NAME=wsjtx-${VERSION}-linux-${ARCH}.deb"
-          DEB="wsjtx-${VERSION}-linux-${ARCH}.deb"
+            -D "CPACK_DEBIAN_FILE_NAME=K4-WSJT-X-${VERSION}-linux-${ARCH}.deb"
+          DEB="K4-WSJT-X-${VERSION}-linux-${ARCH}.deb"
           if [ ! -f "$DEB" ]; then
             echo "::error::cpack -G DEB produced no .deb at expected path: $DEB"
             ls -la *.deb 2>/dev/null || true
@@ -176,8 +177,8 @@ jobs:
       - name: Upload .deb
         uses: actions/upload-artifact@v7
         with:
-          name: wsjtx-${{ inputs.version }}-linux-${{ inputs.arch }}-deb
-          path: wsjtx-build/wsjtx-${{ inputs.version }}-linux-${{ inputs.arch }}.deb
+          name: K4-WSJT-X-${{ inputs.version }}-linux-${{ inputs.arch }}-deb
+          path: wsjtx-build/K4-WSJT-X-${{ inputs.version }}-linux-${{ inputs.arch }}.deb
           if-no-files-found: error
 
       # RPM builds via the same CPack scaffolding the .deb step above
@@ -209,13 +210,20 @@ jobs:
       - name: Upload RPM
         uses: actions/upload-artifact@v7
         with:
-          name: wsjtx-${{ inputs.version }}-linux-${{ inputs.arch }}-rpm
+          name: K4-WSJT-X-${{ inputs.version }}-linux-${{ inputs.arch }}-rpm
           path: wsjtx-build/*.rpm
           if-no-files-found: error
 
       - name: Install to AppDir
         run: |
           cmake --install wsjtx-build --prefix "${GITHUB_WORKSPACE}/AppDir/usr"
+          # K4 audio loads Opus dynamically, so linuxdeploy cannot discover it
+          # from ELF dependencies. Bundle the runtime explicitly.
+          multiarch="$(dpkg-architecture -qDEB_HOST_MULTIARCH)"
+          opus="$(readlink -f "/usr/lib/${multiarch}/libopus.so.0")"
+          test -f "$opus"
+          mkdir -p AppDir/usr/lib
+          cp "$opus" AppDir/usr/lib/libopus.so.0
           # linuxdeploy's desktop/icon integration needs these exact paths.
           test -x AppDir/usr/bin/wsjtx
           test -x AppDir/usr/bin/jt9
@@ -251,7 +259,7 @@ jobs:
           chmod +x linuxdeploy.AppImage linuxdeploy-plugin-qt.AppImage
 
           # --appimage-extract-and-run avoids FUSE on the hosted runner.
-          export OUTPUT="wsjtx-${VERSION}-linux-${ARCH}.AppImage"
+          export OUTPUT="K4-WSJT-X-${VERSION}-linux-${ARCH}.AppImage"
           ./linuxdeploy.AppImage --appimage-extract-and-run \
             --appdir AppDir \
             --plugin qt \
@@ -267,7 +275,7 @@ jobs:
           VERSION: ${{ inputs.version }}
           ARCH: ${{ inputs.arch }}
         run: |
-          APPIMAGE="wsjtx-${VERSION}-linux-${ARCH}.AppImage"
+          APPIMAGE="K4-WSJT-X-${VERSION}-linux-${ARCH}.AppImage"
           ./"$APPIMAGE" --appimage-extract >/dev/null
           test -x squashfs-root/usr/bin/wsjtx
           test -x squashfs-root/usr/bin/jt9
@@ -279,6 +287,7 @@ jobs:
           ls squashfs-root/usr/lib/ | grep -q "^libQt5Core\.so"
           ls squashfs-root/usr/lib/ | grep -q "^libQt5Widgets\.so"
           ls squashfs-root/usr/lib/ | grep -q "^libQt5Multimedia\.so"
+          find squashfs-root -name 'libopus.so.0' -type f | grep -q .
           # Verify Qt audio backend plugins were bundled. Without them,
           # QAudioDeviceInfo::availableDevices() returns empty at runtime
           # and the user sees "no audio devices" — observed in v3.0.1 on
@@ -301,14 +310,14 @@ jobs:
       - name: Upload AppImage
         uses: actions/upload-artifact@v7
         with:
-          name: wsjtx-${{ inputs.version }}-linux-${{ inputs.arch }}-AppImage
-          path: wsjtx-${{ inputs.version }}-linux-${{ inputs.arch }}.AppImage
+          name: K4-WSJT-X-${{ inputs.version }}-linux-${{ inputs.arch }}-AppImage
+          path: K4-WSJT-X-${{ inputs.version }}-linux-${{ inputs.arch }}.AppImage
           if-no-files-found: error
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: wsjtx-${{ inputs.version }}-linux-${{ inputs.arch }}
+          name: K4-WSJT-X-${{ inputs.version }}-linux-${{ inputs.arch }}
           path: |
             wsjtx-build/jt9
             wsjtx-build/wsprd

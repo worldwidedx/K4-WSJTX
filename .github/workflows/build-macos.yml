@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       version:
-        description: "WSJT-X version string"
+        description: "K4-WSJT-X version string"
         required: true
         type: string
       hamlib_branch:
@@ -79,7 +79,10 @@ jobs:
         run: echo "HOMEBREW_PREFIX=$(brew --prefix)" >> "$GITHUB_ENV"
 
       - name: Install dependencies
-        run: brew install cmake autoconf automake libtool asciidoctor
+        run: |
+          brew install cmake autoconf automake libtool asciidoctor openssl@3 opus
+          echo "OPENSSL_LIB=$(brew --prefix openssl@3)/lib" >> "$GITHUB_ENV"
+          echo "OPUS_LIB=$(brew --prefix opus)/lib" >> "$GITHUB_ENV"
 
       - name: Compute Qt cache key
         id: qt-key
@@ -363,6 +366,8 @@ jobs:
         id: ctest
         run: ctest --output-on-failure --output-junit ctest-results.xml
         working-directory: wsjtx-build
+        env:
+          DYLD_LIBRARY_PATH: ${{ env.OPENSSL_LIB }}:${{ env.OPUS_LIB }}
 
       - name: Publish test summary
         if: always() && steps.ctest.conclusion != 'skipped'
@@ -387,7 +392,7 @@ jobs:
         id: collect
         run: |
           BUILD=wsjtx-build
-          STAGE=stage/wsjtx-${{ inputs.version }}-${{ inputs.arch }}
+          STAGE=stage/K4-WSJT-X-${{ inputs.version }}-${{ inputs.arch }}
           ASSETS=assets
 
           mkdir -p "${ASSETS}"
@@ -402,6 +407,25 @@ jobs:
             echo "::error::CMake install did not create executable MAP65 companion app binary at ${APP}/Contents/MacOS/map65"
             exit 1
           fi
+
+          # Match QK4's proven macOS deployment. Qt loads OpenSSL at runtime
+          # for TLS-PSK, and the K4 codec loads Opus at runtime, so neither is
+          # visible to normal dependency scanners. Bundle both explicitly.
+          FRAMEWORKS="${APP}/Contents/Frameworks"
+          mkdir -p "$FRAMEWORKS"
+          cp "${OPENSSL_LIB}/libssl.3.dylib" "$FRAMEWORKS/"
+          cp "${OPENSSL_LIB}/libcrypto.3.dylib" "$FRAMEWORKS/"
+          cp "${OPUS_LIB}/libopus.0.dylib" "$FRAMEWORKS/"
+          ln -sf libopus.0.dylib "$FRAMEWORKS/libopus.dylib"
+          chmod -R u+rw "$FRAMEWORKS"
+
+          install_name_tool -id "@rpath/libssl.3.dylib" "$FRAMEWORKS/libssl.3.dylib"
+          install_name_tool -id "@rpath/libcrypto.3.dylib" "$FRAMEWORKS/libcrypto.3.dylib"
+          crypto_ref="$(otool -L "$FRAMEWORKS/libssl.3.dylib" | awk '/libcrypto/{print $1; exit}')"
+          if [ -n "$crypto_ref" ] && [ "$crypto_ref" != "@rpath/libcrypto.3.dylib" ]; then
+            install_name_tool -change "$crypto_ref" "@rpath/libcrypto.3.dylib" "$FRAMEWORKS/libssl.3.dylib"
+          fi
+          install_name_tool -id "@rpath/libopus.0.dylib" "$FRAMEWORKS/libopus.0.dylib"
 
           for bin in jt9 wsprd wsprcode jt65code jt4code ft8code q65code encode77 fcal hash22calc; do
             [ -f "${BUILD}/${bin}" ] && cp "${BUILD}/${bin}" "${ASSETS}/"
@@ -869,6 +893,11 @@ jobs:
       - name: Verify bundled macOS deployment targets
         run: |
           STAGE="${{ steps.collect.outputs.stage_dir }}"
+          FRAMEWORKS="${STAGE}/wsjtx.app/Contents/Frameworks"
+          test -f "${FRAMEWORKS}/libssl.3.dylib"
+          test -f "${FRAMEWORKS}/libcrypto.3.dylib"
+          test -f "${FRAMEWORKS}/libopus.0.dylib"
+          otool -L "${FRAMEWORKS}/libssl.3.dylib" | grep -q '@rpath/libcrypto.3.dylib'
           .github/scripts/verify-macos-artifacts.sh \
             --target "${{ inputs.deployment_target }}" \
             --arch "${{ inputs.arch }}" \
@@ -994,7 +1023,7 @@ jobs:
       - name: Build and verify installer pkg
         run: |
           STAGE="${{ steps.collect.outputs.stage_dir }}"
-          PKG_ID="org.k1jt.wsjtx.${{ inputs.arch }}"
+          PKG_ID="com.github.worldwidedx.k4wsjtx.${{ inputs.arch }}"
           PKG_VERSION="${{ inputs.version }}"
 
           PAYLOAD="$RUNNER_TEMP/pkg-payload"
@@ -1036,7 +1065,7 @@ jobs:
             --install-location / \
             "$RUNNER_TEMP/wsjtx-component.pkg"
 
-          PKG_OUT="wsjtx-${{ inputs.version }}-${{ inputs.arch }}-macOS.pkg"
+          PKG_OUT="K4-WSJT-X-${{ inputs.version }}-${{ inputs.arch }}-macOS.pkg"
           if [ "${{ steps.check_secrets.outputs.signing_enabled }}" = "true" ]; then
             INST_IDENTITY="${{ steps.keychain.outputs.installer_identity }}"
             productbuild \
@@ -1122,7 +1151,7 @@ jobs:
             xcrun stapler staple "$file"
           }
 
-          notarize_and_staple "wsjtx-${{ inputs.version }}-${{ inputs.arch }}-macOS.pkg"
+          notarize_and_staple "K4-WSJT-X-${{ inputs.version }}-${{ inputs.arch }}-macOS.pkg"
 
       - name: Notarize CLI tools
         if: steps.check_secrets.outputs.signing_enabled == 'true'
@@ -1156,8 +1185,8 @@ jobs:
       - name: Upload pkg
         uses: actions/upload-artifact@v7
         with:
-          name: wsjtx-${{ inputs.version }}-${{ inputs.arch }}-macOS.pkg
-          path: wsjtx-${{ inputs.version }}-${{ inputs.arch }}-macOS.pkg
+          name: K4-WSJT-X-${{ inputs.version }}-${{ inputs.arch }}-macOS.pkg
+          path: K4-WSJT-X-${{ inputs.version }}-${{ inputs.arch }}-macOS.pkg
 
       - name: Package individual binaries
         run: |

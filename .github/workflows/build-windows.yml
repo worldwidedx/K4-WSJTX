@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       version:
-        description: "WSJT-X version string"
+        description: "K4-WSJT-X version string"
         required: true
         type: string
       hamlib_branch:
@@ -64,6 +64,8 @@ jobs:
             mingw-w64-x86_64-boost
             mingw-w64-x86_64-libusb
             mingw-w64-x86_64-portaudio
+            mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-opus
             mingw-w64-x86_64-pkg-config
             mingw-w64-x86_64-nsis
             mingw-w64-x86_64-osslsigncode
@@ -248,7 +250,7 @@ jobs:
           # suffix gap.
           cpack -G NSIS -V \
             -D CPACK_PACKAGE_VERSION="${{ inputs.version }}" \
-            -D CPACK_PACKAGE_FILE_NAME="wsjtx-${{ inputs.version }}-win64"
+            -D CPACK_PACKAGE_FILE_NAME="K4-WSJT-X-${{ inputs.version }}-win64"
           ls -la *.exe
           test -x map65/map65.exe
 
@@ -259,7 +261,7 @@ jobs:
       - name: Sign installer with self-signed ephemeral cert
         run: |
           cd wsjtx-build
-          INSTALLER=$(ls wsjtx-${{ inputs.version }}-*.exe | head -1)
+          INSTALLER=$(ls K4-WSJT-X-${{ inputs.version }}-*.exe | head -1)
           if [ -z "$INSTALLER" ]; then
             echo "ERROR: no NSIS installer produced by cpack"
             ls -la
@@ -272,12 +274,12 @@ jobs:
           MSYS2_ARG_CONV_EXCL="*" openssl req -x509 -newkey rsa:2048 \
             -keyout ephemeral-key.pem -out ephemeral-cert.pem \
             -days 365 -nodes \
-            -subj "/CN=WSJT-X Ephemeral Dev Signing/O=WSJTX/C=US"
+            -subj "/CN=K4-WSJT-X Ephemeral Dev Signing/O=worldwidedx/C=US"
           SIGNED="${INSTALLER%.exe}-signed.exe"
           osslsigncode sign \
             -certs ephemeral-cert.pem -key ephemeral-key.pem \
-            -n "WSJT-X Installer" \
-            -i "https://github.com/WSJTX/wsjtx-internal" \
+            -n "K4-WSJT-X Installer" \
+            -i "https://github.com/worldwidedx/K4-WSJTX" \
             -h sha256 \
             -in "$INSTALLER" -out "$SIGNED"
           mv "$SIGNED" "$INSTALLER"
@@ -292,13 +294,13 @@ jobs:
       - name: Upload installer artifact
         uses: actions/upload-artifact@v7
         with:
-          name: wsjtx-${{ inputs.version }}-windows-x86_64-installer
-          path: wsjtx-build/wsjtx-${{ inputs.version }}-*.exe
+          name: K4-WSJT-X-${{ inputs.version }}-windows-x86_64-installer
+          path: wsjtx-build/K4-WSJT-X-${{ inputs.version }}-*.exe
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: wsjtx-${{ inputs.version }}-windows-x86_64
+          name: K4-WSJT-X-${{ inputs.version }}-windows-x86_64
           path: |
             wsjtx-build/jt9.exe
             wsjtx-build/map65/map65.exe
