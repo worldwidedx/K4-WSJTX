@@ -572,10 +572,8 @@ jobs:
 
       - name: Run tests
         id: ctest
-        run: ctest --parallel 3 --output-on-failure --output-junit ctest-results.xml
+        run: DYLD_LIBRARY_PATH="${OPENSSL_LIB}:${OPUS_LIB}" ctest --output-on-failure --output-junit ctest-results.xml
         working-directory: wsjtx-build
-        env:
-          DYLD_LIBRARY_PATH: ${{ env.OPENSSL_LIB }}:${{ env.OPUS_LIB }}
 
       - name: Publish test summary
         if: always() && steps.ctest.conclusion != 'skipped'
