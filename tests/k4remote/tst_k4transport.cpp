@@ -2,6 +2,7 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QtEndian>
+#include <cmath>
 #include "Transceiver/K4RemoteTransceiver.hpp"
 #include "commons.h"
 #include "widgets/itoneAndicw.h"
@@ -24,6 +25,7 @@ public:
   bool transmitting {false};
   bool meters {true};
   bool test {false};
+  QByteArray meter {"TM003000000000;"};
 
   FakeK4() {
     connect(&server, &QTcpServer::newConnection, this, [this] {
@@ -44,7 +46,7 @@ public:
       for (auto command : text.split(';', Qt::SkipEmptyParts)) {
         commands << command;
         if (command == "TQ") reply(transmitting ? "TQ1;" : "TQ0;");
-        if (command == "TM" && meters) reply("TM003000000000;");
+        if (command == "TM" && meters) reply(meter.constData());
         if (command == "TS1") test = true;
         if (command == "TS0") test = false;
         if (command == "TS") reply(test ? "TS1;" : "TS0;");
@@ -64,6 +66,11 @@ public:
 class K4TransportTests : public QObject {
   Q_OBJECT
 private slots:
+  void initTestCase() {
+    // Exercise the same precomputed-waveform path used by the FT8/FT4 UI.
+    for (int i = 0; i < 79 * 1920 * 4; ++i)
+      foxcom_.wave[i] = float(0.8 * std::sin(6.283185307179586 * 1500 * i / 48000.));
+  }
   void transmit_data() {
     QTest::addColumn<QString>("mode");
     QTest::addColumn<int>("encoding");
@@ -100,7 +107,7 @@ private slots:
     request.symbolslength(79);
     request.framespersymbol(mode == "FT8" ? 1920. : 576.);
     request.trfrequency(1500.);
-    request.tonespacing(6.25);
+    request.tonespacing(mode == "FT8" ? -3. : -2.);
     request.synchronize(false);
     request.trperiod(mode == "FT8" ? 15. : 7.5);
     rig.set(request, 3);
@@ -193,6 +200,35 @@ private slots:
     QVERIFY(errors.first()[0].toString().contains("audio"));
     QVERIFY(!rig.state().ptt());
     QVERIFY(radio.audio.isEmpty());
+    rig.stop();
+  }
+  void protection_stops_stream_data() {
+    QTest::addColumn<bool>("stale");
+    QTest::newRow("missing-meter") << true;
+    QTest::newRow("excessive-alc") << false;
+  }
+  void protection_stops_stream() {
+    QFETCH(bool, stale);
+    FakeK4 radio;
+    QVERIFY(radio.server.listen(QHostAddress::LocalHost));
+    K4RemoteTransceiver rig(nullptr, "127.0.0.1", radio.server.serverPort(),
+                            "test", false, "", 1, 0, 0.03125f, false, "", 1);
+    QSignalSpy errors(&rig, &Transceiver::remote_tx_error);
+    rig.start(1);
+    QTRY_VERIFY(rig.state().frequency() != 0);
+    auto request = rig.state();
+    request.tune(true);
+    request.ptt(true);
+    rig.set(request, 2);
+    QTRY_VERIFY(!radio.audio.isEmpty());
+    radio.meters = !stale;
+    radio.meter = "TM010000000000;";
+    QTRY_VERIFY_WITH_TIMEOUT(!errors.isEmpty(), 5000);
+    QTRY_VERIFY(!radio.transmitting);
+    QVERIFY(!rig.state().ptt());
+    auto count = radio.audio.size();
+    QTest::qWait(100);
+    QCOMPARE(radio.audio.size(), count);
     rig.stop();
   }
 };

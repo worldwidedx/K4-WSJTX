@@ -162,7 +162,7 @@ function(git_local_changes _source_dir _var)
 
 	execute_process(COMMAND
 		"${GIT_EXECUTABLE}"
-		diff-index --quiet HEAD --
+		diff --quiet HEAD --
 		WORKING_DIRECTORY
 		"${_source_dir}"
 		RESULT_VARIABLE

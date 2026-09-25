@@ -167,16 +167,18 @@ set_source_files_properties("${CMAKE_BINARY_DIR}/${_VersionInfoFile}" PROPERTIES
 
 # generate_version_info.cmake
 if(WIN32)
-  set(_RC_SHORT "${PRODUCT_NAME}.rc")
+  # Emit a short, unambiguous name in the current target's binary dir
+  set(_RC_SHORT "${_VersionResourceFile}")
   configure_file(
     ${_THIS_MODULE_BASE_DIR}/VersionResource.rc.in
     ${CMAKE_CURRENT_BINARY_DIR}/${_RC_SHORT}
     @ONLY
   )
   file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/${_RC_SHORT}" _RC_FWD)
-  # windres doesn't track the ICON directive configure_file wrote into this .rc as a dependency, so an icon-only edit needs this to trigger a rebuild.
-  get_filename_component(_PRODUCT_ICON_ABS "${PRODUCT_ICON}" ABSOLUTE BASE_DIR "${CMAKE_SOURCE_DIR}")
-  set_source_files_properties("${_RC_FWD}" PROPERTIES OBJECT_DEPENDS "${_PRODUCT_ICON_ABS}")
+  # windres does not report included headers to Ninja. Recompile the resource
+  # when the revision changes, otherwise Explorer displays an older build ID.
+  set_source_files_properties("${_RC_FWD}" PROPERTIES
+    OBJECT_DEPENDS "${CMAKE_BINARY_DIR}/scs_version.h;${CMAKE_BINARY_DIR}/${_VersionInfoFile}")
   set(${outfiles} "${_RC_FWD}" PARENT_SCOPE)
 else()
   set(${outfiles} "" PARENT_SCOPE)
