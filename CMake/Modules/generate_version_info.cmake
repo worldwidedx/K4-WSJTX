@@ -168,13 +168,17 @@ set_source_files_properties("${CMAKE_BINARY_DIR}/${_VersionInfoFile}" PROPERTIES
 # generate_version_info.cmake
 if(WIN32)
   # Emit a short, unambiguous name in the current target's binary dir
-  set(_RC_SHORT "wsprd.rc")
+  set(_RC_SHORT "${_VersionResourceFile}")
   configure_file(
     ${_THIS_MODULE_BASE_DIR}/VersionResource.rc.in
     ${CMAKE_CURRENT_BINARY_DIR}/${_RC_SHORT}
     @ONLY
   )
   file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/${_RC_SHORT}" _RC_FWD)
+  # windres does not report included headers to Ninja. Recompile the resource
+  # when the revision changes, otherwise Explorer displays an older build ID.
+  set_source_files_properties("${_RC_FWD}" PROPERTIES
+    OBJECT_DEPENDS "${CMAKE_BINARY_DIR}/scs_version.h;${CMAKE_BINARY_DIR}/${_VersionInfoFile}")
   set(${outfiles} "${_RC_FWD}" PARENT_SCOPE)
 else()
   set(${outfiles} "" PARENT_SCOPE)
