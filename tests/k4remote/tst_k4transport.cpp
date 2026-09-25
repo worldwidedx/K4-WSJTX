@@ -75,7 +75,7 @@ private slots:
     QTest::addColumn<QString>("mode");
     QTest::addColumn<int>("encoding");
     QTest::addColumn<int>("latency");
-    for (auto mode : {QString("FT8"), QString("FT4")})
+    for (auto mode : {QString("FT8"), QString("FT4"), QString("WSPR")})
       for (int encoding = 0; encoding < 4; ++encoding)
         QTest::newRow(qPrintable(QString("%1-EM%2").arg(mode).arg(encoding)))
           << mode << encoding << (encoding == 3 ? 7 : encoding == 2 ? 3 : 0);
@@ -104,12 +104,15 @@ private slots:
     QVERIFY(radio.audio.isEmpty());
     request.tx_audio(true);
     request.jtmode(mode);
-    request.symbolslength(79);
-    request.framespersymbol(mode == "FT8" ? 1920. : 576.);
+    request.symbolslength(mode == "WSPR" ? 162 : 79);
+    request.framespersymbol(mode == "FT8" ? 1920. :
+                            mode == "WSPR" ? 8192. : 576.);
     request.trfrequency(1500.);
-    request.tonespacing(mode == "FT8" ? -3. : -2.);
+    request.tonespacing(mode == "FT8" ? -3. :
+                        mode == "WSPR" ? 0. : -2.);
     request.synchronize(false);
-    request.trperiod(mode == "FT8" ? 15. : 7.5);
+    request.trperiod(mode == "FT8" ? 15. :
+                     mode == "WSPR" ? 120. : 7.5);
     rig.set(request, 3);
     QTRY_VERIFY(radio.audio.size() >= 3);
     QVERIFY(errors.isEmpty());
@@ -137,6 +140,84 @@ private slots:
     rig.set(request, 6);
     QTRY_VERIFY(!radio.audio.isEmpty());
     QCOMPARE(quint8(radio.audio.first()[2]), quint8(0));
+    rig.stop();
+  }
+  void other_modes_data() {
+    QTest::addColumn<QString>("mode");
+    QTest::addColumn<bool>("fast");
+    for (auto mode : {"JT4", "JT9", "JT65", "FST4", "FST4W", "Q65",
+                      "MSK144", "Echo"})
+      QTest::newRow(mode) << QString::fromLatin1(mode)
+                          << (QString::fromLatin1(mode) == "MSK144");
+  }
+  void other_modes() {
+    QFETCH(QString, mode);
+    QFETCH(bool, fast);
+    FakeK4 radio;
+    QVERIFY(radio.server.listen(QHostAddress::LocalHost));
+    K4RemoteTransceiver rig(nullptr, "127.0.0.1", radio.server.serverPort(),
+                            "test", false, "", 1, 0, 0.03125f, false, "", 1);
+    QSignalSpy errors(&rig, &Transceiver::remote_tx_error);
+    rig.start(1);
+    QTRY_VERIFY(rig.state().frequency() != 0);
+    auto request = rig.state();
+    request.ptt(true);
+    rig.set(request, 2);
+    QTRY_VERIFY(rig.state().ptt());
+    request.tx_audio(true);
+    request.jtmode(mode);
+    request.symbolslength(fast ? 2 : 162);
+    request.framespersymbol(fast ? 6. : 8192.);
+    request.trfrequency(1500.);
+    request.tonespacing(fast ? 1000. : 0.);
+    request.synchronize(false);
+    request.fastmode(fast);
+    request.trperiod(fast ? 3. : 120.);
+    rig.set(request, 3);
+    QTRY_VERIFY(radio.audio.size() >= 3);
+    QVERIFY(errors.isEmpty());
+    QVERIFY(radio.transmitting);
+    request.tx_audio(false);
+    request.ptt(false);
+    rig.set(request, 4);
+    QTRY_VERIFY(!radio.transmitting);
+    rig.stop();
+  }
+  void wspr_finishes_with_cw_id() {
+    FakeK4 radio;
+    QVERIFY(radio.server.listen(QHostAddress::LocalHost));
+    K4RemoteTransceiver rig(nullptr, "127.0.0.1", radio.server.serverPort(),
+                            "test", false, "", 1, 0, 0.03125f, false, "", 1);
+    QSignalSpy modulation(&rig, &Transceiver::tci_mod_active);
+    QSignalSpy errors(&rig, &Transceiver::remote_tx_error);
+    rig.start(1);
+    QTRY_VERIFY(rig.state().frequency() != 0);
+    auto request = rig.state();
+    request.ptt(true);
+    rig.set(request, 2);
+    QTRY_VERIFY(rig.state().ptt());
+    icw[0] = 3;
+    icw[1] = 1;
+    icw[2] = 0;
+    icw[3] = 1;
+    request.tx_audio(true);
+    request.jtmode("WSPR");
+    request.symbolslength(1);
+    request.framespersymbol(240.);
+    request.trfrequency(1500.);
+    request.tonespacing(0.);
+    request.synchronize(false);
+    request.trperiod(120.);
+    rig.set(request, 3);
+    QTRY_VERIFY_WITH_TIMEOUT(modulation.size() >= 2 &&
+                             !modulation.last()[0].toBool(), 2000);
+    QVERIFY(radio.audio.size() >= 5);
+    QVERIFY(errors.isEmpty());
+    icw[0] = 0;
+    request.tx_audio(false);
+    request.ptt(false);
+    rig.set(request, 4);
+    QTRY_VERIFY(!radio.transmitting);
     rig.stop();
   }
   void tune_and_disconnect() {

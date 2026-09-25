@@ -2173,7 +2173,7 @@ void Configuration::impl::initialize_k4_remote_ui ()
   k4_latency_spin_->setToolTip (tr ("K4 SL streaming latency tier (0-7)."));
   k4_calibrate_button_ = new QPushButton {tr ("Calibrate Remote Input"), ui_->CAT_control_group_box};
   k4_calibrate_button_->setToolTip (
-    tr ("Use a protected 1500 Hz tone in K4 TEST mode to establish safe FT8/FT4 input drive."));
+    tr ("Use a protected 1500 Hz tone in K4 TEST mode to establish safe digital input drive."));
   k4_calibration_status_ = new QLabel {tr ("Calibration is required before transmitting."),
                                        ui_->CAT_control_group_box};
   k4_calibration_status_->setWordWrap (true);
