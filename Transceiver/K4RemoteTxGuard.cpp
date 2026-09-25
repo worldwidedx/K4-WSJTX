@@ -92,8 +92,9 @@ auto K4RemoteTxGuard::tick(qint64 now) -> Action {
   if (calibrating_ && now - started_ >= 15000)
     return trip(
         "Calibration stopped: a stable audio level could not be established.");
-  if (calibrating_ && now - (last_audio_ < 0 ? started_ : last_audio_) >= 1500)
-    return trip("Calibration stopped: the test tone is not streaming.");
+  if (now - (last_audio_ < 0 ? started_ : last_audio_) >= 1500)
+    return trip(calibrating_ ? "Calibration stopped: the test tone is not streaming."
+                            : "TX stopped: transmit audio is not streaming.");
   return Action::None;
 }
 

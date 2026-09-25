@@ -127,7 +127,9 @@ void TransceiverBase::set (TransceiverState const& s,
             audio_cmd = true;
             requested_.tune (s.tune ());
           }
-          if (!audio_cmd) {
+          // A combined audio/PTT update must not discard the PTT edge.
+          // In particular, Halt Tx may stop modulation and release PTT together.
+          if (!audio_cmd || s.ptt() != requested_.ptt()) {
             bool ptt_on {false};
             bool ptt_off {false};
             if (s.ptt () != requested_.ptt ())

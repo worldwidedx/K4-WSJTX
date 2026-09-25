@@ -43,6 +43,7 @@ protected:
   void do_mode(MODE) override;
   void do_ptt(bool) override;
   void do_poll() override;
+  bool do_pre_update() override { return true; }
 
   void do_audio(bool) override;
   void do_tune(bool) override;
@@ -132,6 +133,9 @@ private:
   bool initial_mode_captured_{false};
   bool split_{false};
   bool ptt_{false};
+  // WSJT-X PTT means permission to start remote audio. Radio TX readback is
+  // separate: K4 keys from the first audio packet, so it cannot gate startup.
+  bool tx_requested_{false};
   bool test_mode_{false};
   bool test_state_known_{false};
   bool has_calibration_{false};

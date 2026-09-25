@@ -46,8 +46,11 @@ and local sound cards are not selectable paths in this fork. VFO A/B frequency,
 split, mode, PTT, test state, input state, RF-power setting, and transmit
 metering are read from the K4 CAT stream.
 
-Digital transmission selects K4 DATA-A with `MD6;DT0;` and uses explicit
-`TX;`/`RX;` commands. It never depends on VOX. Setting changes are made only as
+Digital transmission selects K4 DATA-A with `MD6;DT0;`. As in QK4, PTT opens
+the remote-audio gate and the first outbound audio packet initiates K4 TX.
+WSJT-X is told when that gate is ready, independently of the radio's `TQ`
+readback, so modulation never waits for a TX response that itself needs audio.
+Stopping closes the audio gate and sends `RX;TM0;`. Setting changes are made only as
 part of an explicit operator action or the normal WSJT-X transmit workflow; a
 connection by itself requests readback and does not silently alter operator
 settings.
@@ -148,6 +151,10 @@ cmake --build build-k4remote-tests
 ctest --test-dir build-k4remote-tests --output-on-failure
 ```
 
+Both suites also run in the primary application CTest build on every CI platform.
+The transport suite uses a TCP loopback radio and the production transceiver
+state machine to verify that FT8/FT4 audio starts before radio TX confirmation
+and that a combined modulation/PTT stop stops packet delivery.
 They cover fragmented and coalesced K4 frames, SHA-384 password formatting,
 raw audio channel/encoding behavior, the calibration target, emergency ALC
 trip behavior, and compilation of the complete K4 transceiver and factory.
