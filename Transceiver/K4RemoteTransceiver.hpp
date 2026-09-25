@@ -43,6 +43,7 @@ protected:
   void do_mode(MODE) override;
   void do_ptt(bool) override;
   void do_poll() override;
+  bool do_pre_update() override { return true; }
 
   void do_audio(bool) override;
   void do_tune(bool) override;
@@ -72,7 +73,7 @@ private Q_SLOTS:
   void service_guard();
 
 private:
-  enum class TxKind { None, Message, Tune, Calibration };
+  enum class TxKind { None, Message, CwId, Tune, Calibration };
 
   void connect_socket();
   void connect_resolved_socket(QString const &host);
@@ -132,6 +133,9 @@ private:
   bool initial_mode_captured_{false};
   bool split_{false};
   bool ptt_{false};
+  // WSJT-X PTT means permission to start remote audio. Radio TX readback is
+  // separate: K4 keys from the first audio packet, so it cannot gate startup.
+  bool tx_requested_{false};
   bool test_mode_{false};
   bool test_state_known_{false};
   bool has_calibration_{false};
@@ -157,7 +161,12 @@ private:
   double tx_phase_{0.};
   qint64 tx_sample_{0};
   qint64 tx_silence_{0};
+  qint64 tx_cw_sample_{0};
+  unsigned tx_cw_symbols_{0};
+  double tx_cw_gain_{0.};
+  double tx_envelope_{1.};
   bool synchronize_{true};
+  bool fast_mode_{false};
   bool tuning_{false};
 
   std::shared_ptr<K4RemoteTxControl> tx_control_;

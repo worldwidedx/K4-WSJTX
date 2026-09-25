@@ -1915,13 +1915,21 @@ if (WIN32)
   # libssl-3-x64.dll for current MSYS2 Qt-on-OpenSSL-3). Glob whatever the
   # runner provides so SuperFox verification, Update Hamlib, LotW download,
   # and eQSL keep working as the build environment advances.
-  set (_openssl_msys_prefix "$ENV{MSYSTEM_PREFIX}")
-  if (NOT _openssl_msys_prefix)
-    set (_openssl_msys_prefix "/mingw64")
+  # Use the Qt installation selected by CMake. MSYSTEM_PREFIX may be unset
+  # when configuring from PowerShell or another non-MSYS shell, even though
+  # the build links against MSYS2 Qt. Falling back to /mingw64 in that case
+  # silently produces an installer without TLS or Opus support.
+  get_target_property (_qt_core_runtime Qt5::Core IMPORTED_LOCATION_RELEASE)
+  if (NOT _qt_core_runtime)
+    get_target_property (_qt_core_runtime Qt5::Core IMPORTED_LOCATION)
   endif ()
+  if (NOT _qt_core_runtime)
+    message (FATAL_ERROR "Cannot locate the selected Qt5::Core runtime for Windows packaging")
+  endif ()
+  get_filename_component (_qt_runtime_bin "${_qt_core_runtime}" DIRECTORY)
   file (GLOB _openssl_runtime_dlls
-    "${_openssl_msys_prefix}/bin/libssl-*.dll"
-    "${_openssl_msys_prefix}/bin/libcrypto-*.dll"
+    "${_qt_runtime_bin}/libssl-*.dll"
+    "${_qt_runtime_bin}/libcrypto-*.dll"
   )
   if (_openssl_runtime_dlls)
     install (FILES ${_openssl_runtime_dlls}
@@ -1929,18 +1937,17 @@ if (WIN32)
       #COMPONENT runtime
     )
   else ()
-    message (WARNING
-      "OpenSSL runtime DLLs not found at ${_openssl_msys_prefix}/bin — "
-      "TLS features (SuperFox, Update Hamlib, LotW, eQSL) will fail on "
-      "installs without OpenSSL in PATH."
+    message (FATAL_ERROR
+      "OpenSSL runtime DLLs not found at ${_qt_runtime_bin}; "
+      "the Windows installer cannot support K4 TLS without them."
     )
   endif ()
 
   # EM2/EM3 K4 remote audio loads Xiph Opus at runtime. Accommodate both
   # native Windows (opus.dll) and MSYS2 (libopus-0.dll) naming.
   file (GLOB _opus_runtime_dlls
-    "${_openssl_msys_prefix}/bin/opus.dll"
-    "${_openssl_msys_prefix}/bin/libopus*.dll"
+    "${_qt_runtime_bin}/opus.dll"
+    "${_qt_runtime_bin}/libopus*.dll"
   )
   if (_opus_runtime_dlls)
     install (FILES ${_opus_runtime_dlls}
@@ -1948,9 +1955,9 @@ if (WIN32)
       #COMPONENT runtime
     )
   else ()
-    message (WARNING
-      "Xiph Opus runtime DLL not found at ${_openssl_msys_prefix}/bin — "
-      "K4 EM2/EM3 audio will be unavailable; EM0/EM1 remain usable."
+    message (FATAL_ERROR
+      "Xiph Opus runtime DLL not found at ${_qt_runtime_bin}; "
+      "the Windows installer cannot support K4 EM2/EM3 audio without it."
     )
   endif ()
 endif (WIN32)

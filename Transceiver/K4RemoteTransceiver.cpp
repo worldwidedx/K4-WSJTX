@@ -140,6 +140,8 @@ int K4RemoteTransceiver::do_start() {
                     .arg(codec_.error_string())};
 
   authenticated_ = false;
+  tx_requested_ = ptt_ = false;
+  test_state_known_ = false;
   have_mode_readback_ = false;
   have_data_mode_readback_ = false;
   initial_mode_captured_ = false;
@@ -274,6 +276,9 @@ void K4RemoteTransceiver::socket_disconnected() {
   guard_timer_->stop();
   tx_guard_.stop();
   tx_kind_ = TxKind::None;
+  tx_requested_ = ptt_ = false;
+  update_PTT(false);
+  Q_EMIT tci_mod_active(false);
 
   if (!was_authenticated) {
     connection_error_ =
@@ -384,8 +389,16 @@ void K4RemoteTransceiver::parse_cat_command(QString const &command) {
       Q_EMIT remote_input_calibration_progress(
           tr("K4 ALC was high; reducing remote audio drive."),
           tx_control_->gain.load());
-    else if (action == K4RemoteTxGuard::Action::Calibrated)
-      finish_calibration(true, tr("Remote input calibration completed."));
+    else if (action == K4RemoteTxGuard::Action::Calibrated) {
+      tx_timer_->stop();
+      guard_timer_->stop();
+      tx_guard_.stop();
+      // Leave readyRead before waiting for TS0. QAbstractSocket does not emit
+      // readyRead recursively, even while a nested event loop is running.
+      QTimer::singleShot(0, this, [this] {
+        finish_calibration(true, tr("Remote input calibration completed."));
+      });
+    }
     else if (action == K4RemoteTxGuard::Action::Tripped)
       stop_tx_for_guard(tx_guard_.reason());
   }
@@ -496,6 +509,7 @@ void K4RemoteTransceiver::begin_guard(bool calibration) {
     throw error{tr("Digital TX protection is latched. Stop transmitting before "
                    "retrying.")};
   tx_audio_.reset(tx_control_->gain.load());
+  tx_sequence_ = 0;
   last_meter_query_ = 0;
   send_cat(QStringLiteral("TM1;TM;"));
   guard_timer_->start();
@@ -510,7 +524,7 @@ void K4RemoteTransceiver::do_ptt(bool on) {
     }
     if (split_) {
       Q_EMIT remote_tx_error(
-          tr("Turn K4 split off before transmitting FT8/FT4."));
+          tr("Turn K4 split off before transmitting."));
       return;
     }
     auto const context = radio_input_context();
@@ -526,8 +540,13 @@ void K4RemoteTransceiver::do_ptt(bool on) {
     set_data_a();
     if (!tx_guard_.active())
       begin_guard(false);
-    send_cat(QStringLiteral("TX;"));
+    // QK4's remote PTT opens its audio gate. The first audio packet keys the
+    // K4; waiting for TQ1 here prevents WSJT-X from ever starting modulation.
+    tx_requested_ = true;
+    update_PTT(true);
   } else {
+    tx_requested_ = false;
+    update_PTT(false);
     send_cat(QStringLiteral("RX;TM0;"));
     tx_guard_.stop();
     guard_timer_->stop();
@@ -545,10 +564,12 @@ void K4RemoteTransceiver::do_poll() {
   update_other_frequency(split_ ? tx_frequency_ : 0);
   update_split(split_);
   update_mode(mode_);
-  update_PTT(ptt_);
+  update_PTT(tx_requested_);
 }
 
 void K4RemoteTransceiver::do_stop() {
+  tx_requested_ = false;
+  update_PTT(false);
   tx_timer_->stop();
   guard_timer_->stop();
   keepalive_timer_->stop();
@@ -662,24 +683,50 @@ void K4RemoteTransceiver::do_tune(bool on) {
 
 void K4RemoteTransceiver::do_modulator_start(
     QString mode, unsigned symbols, double frames_per_symbol, double frequency,
-    double tone_spacing, bool synchronize, bool, double, double tr_period) {
-  if (mode != QStringLiteral("FT8") && mode != QStringLiteral("FT4"))
-    throw error{tr(
-        "K4 Remote network transmission currently supports FT8 and FT4 only.")};
+    double tone_spacing, bool synchronize, bool fast_mode, double,
+    double tr_period) {
+  if (tuning_) {
+    // WSJT-X calls transmit() after Tune's PTT-ready update too. Preserve the
+    // continuous tune generator instead of replacing it with a finite message.
+    tx_kind_ = TxKind::Tune;
+    tx_timer_->start();
+    Q_EMIT tci_mod_active(true);
+    return;
+  }
+  if (!symbols || frames_per_symbol <= 0.)
+    throw error{tr("The transmit mode supplied invalid symbol timing.")};
   tx_mode_ = std::move(mode);
   tx_symbols_ = symbols;
   tx_frames_per_symbol_ = frames_per_symbol;
   tx_frequency_hz_ = frequency;
   tx_tone_spacing_ = tone_spacing;
   synchronize_ = synchronize;
+  fast_mode_ = fast_mode;
   period_ = tr_period;
   tx_kind_ = TxKind::Message;
   tx_sample_ = 0;
   tx_phase_ = 0.;
   tx_silence_ = 0;
+  tx_cw_sample_ = 0;
+  tx_cw_symbols_ = period_ > 16. ? qBound(0, int(icw[0]),
+                                         NUM_CW_SYMBOLS - 1) : 0;
+  tx_cw_gain_ = 0.;
+  tx_envelope_ = 1.;
 
-  if (synchronize_) {
-    auto const delay = tx_mode_ == QStringLiteral("FT4") ? 300 : 500;
+  if (synchronize_ && !fast_mode_ && tx_mode_ != QStringLiteral("Echo")) {
+    int delay = 1000;
+    if ((tx_mode_ == QStringLiteral("FT8") &&
+         tx_frames_per_symbol_ == 1920.) ||
+        (tx_mode_ == QStringLiteral("FST4") &&
+         tx_frames_per_symbol_ == 720.) ||
+        (tx_mode_ == QStringLiteral("Q65") &&
+         tx_frames_per_symbol_ <= 3600.))
+      delay = 500;
+    if (tx_mode_ == QStringLiteral("FT8") &&
+        tx_frames_per_symbol_ == 1024.)
+      delay = 400;
+    if (tx_mode_ == QStringLiteral("FT4"))
+      delay = 300;
     auto const period_ms = qMax(1, qRound(period_ * 1000.));
     auto const elapsed = int(QDateTime::currentMSecsSinceEpoch() % period_ms);
     if (elapsed < delay)
@@ -708,34 +755,63 @@ QVector<qint16> K4RemoteTransceiver::generate_tx_frame(int count) {
 
     double frequency = tx_frequency_hz_;
     if (tx_kind_ == TxKind::Message) {
-      auto const symbol =
-          static_cast<unsigned>(tx_sample_ / tx_frames_per_symbol_);
-      if (symbol >= tx_symbols_) {
+      auto const complete = fast_mode_
+                                ? tx_sample_ >= qint64(qMax(0., period_ - 0.5) *
+                                                      sample_rate)
+                                : tx_sample_ >=
+                                      qint64(tx_symbols_ * tx_frames_per_symbol_);
+      if (complete) {
+        if (tx_cw_symbols_) {
+          tx_kind_ = TxKind::CwId;
+          tx_phase_ = 0.;
+        } else {
+          result.resize(i);
+          break;
+        }
+      }
+      if (tx_kind_ == TxKind::Message) {
+        auto const symbol = static_cast<unsigned>(
+            qint64(tx_sample_ / tx_frames_per_symbol_) % tx_symbols_);
+        if (tx_tone_spacing_ < 0. && itone[0] < 100) {
+          // WSJT-X supplies an already filtered 48 kHz waveform for FT8,
+          // FT4, and other modes marked by negative tone spacing.
+          result[i] = qint16(qBound(
+              -32766, qRound(32767. * foxcom_.wave[tx_sample_ * 4]), 32766));
+          ++tx_sample_;
+          continue;
+        }
+        frequency =
+            itone[0] >= 100
+                ? itone[0]
+                : frequency +
+                      itone[symbol] * (tx_tone_spacing_ == 0.
+                                           ? sample_rate / tx_frames_per_symbol_
+                                           : tx_tone_spacing_);
+      }
+    }
+    if (tx_kind_ == TxKind::CwId) {
+      auto const cw_symbol = tx_cw_sample_ / (2560 / 4) + 1;
+      if (cw_symbol > tx_cw_symbols_) {
         result.resize(i);
         break;
       }
-      if (tx_tone_spacing_ < 0. && itone[0] < 100) {
-        // Standard FT8/FT4 uses WSJT-X's already filtered 48 kHz wave.
-        // Select each fourth sample to preserve that exact waveform at
-        // the K4 stream's native 12 kHz rate.
-        result[i] = qint16(qBound(
-            -32766, qRound(32767. * foxcom_.wave[tx_sample_ * 4]), 32766));
-        ++tx_sample_;
-        continue;
-      }
-      frequency =
-          itone[0] >= 100
-              ? itone[0]
-              : frequency +
-                    itone[symbol] * (tx_tone_spacing_ == 0.
-                                         ? sample_rate / tx_frames_per_symbol_
-                                         : tx_tone_spacing_);
+      auto const target = icw[cw_symbol] ? 1. : 0.;
+      tx_cw_gain_ += qBound(-1. / 60., target - tx_cw_gain_, 1. / 60.);
+      ++tx_cw_sample_;
     }
     tx_phase_ += two_pi * frequency / sample_rate;
     if (tx_phase_ >= two_pi)
       tx_phase_ -= two_pi;
-    result[i] = qint16(std::sin(tx_phase_) * 32766.);
-    ++tx_sample_;
+    if (tx_kind_ == TxKind::Message) {
+      auto const fade_start = fast_mode_
+                                  ? qMax(0., period_ - 0.5) * sample_rate - 204.
+                                  : (tx_symbols_ - 0.017) * tx_frames_per_symbol_;
+      if (tx_sample_ > fade_start)
+        tx_envelope_ *= 0.98;
+      ++tx_sample_;
+    }
+    result[i] = qint16(std::sin(tx_phase_) * 32766. *
+                       (tx_kind_ == TxKind::CwId ? tx_cw_gain_ : tx_envelope_));
   }
   return result;
 }
@@ -770,8 +846,9 @@ void K4RemoteTransceiver::service_tx() {
   if (tx_kind_ == TxKind::None || !authenticated_ || !tx_guard_.active())
     return;
   auto samples = generate_tx_frame(frame_samples_);
-  auto const message_complete =
-      samples.size() < frame_samples_ && tx_kind_ == TxKind::Message;
+  auto const message_complete = samples.size() < frame_samples_ &&
+                                (tx_kind_ == TxKind::Message ||
+                                 tx_kind_ == TxKind::CwId);
   // K4/Opus packetization requires the frame size selected by SL. Preserve
   // program length, but zero-pad the final partial packet on the wire.
   if (message_complete && !samples.isEmpty())
@@ -792,6 +869,9 @@ void K4RemoteTransceiver::service_guard() {
 }
 
 void K4RemoteTransceiver::stop_tx_for_guard(QString const &reason) {
+  tx_requested_ = false;
+  update_PTT(false);
+  tx_guard_.stop();
   tx_timer_->stop();
   guard_timer_->stop();
   send_cat(QStringLiteral("RX;TM0;"));
@@ -799,7 +879,7 @@ void K4RemoteTransceiver::stop_tx_for_guard(QString const &reason) {
   tx_kind_ = TxKind::None;
   Q_EMIT tci_mod_active(false);
   if (calibration)
-    finish_calibration(false, reason);
+    QTimer::singleShot(0, this, [this, reason] { finish_calibration(false, reason); });
   else
     Q_EMIT remote_tx_error(reason);
 }
@@ -849,7 +929,6 @@ void K4RemoteTransceiver::calibrate_remote_input() {
   tx_phase_ = 0.;
   try {
     begin_guard(true);
-    send_cat(QStringLiteral("TX;"));
     tx_timer_->start();
     Q_EMIT remote_input_calibration_progress(
         tr("Sending a protected 1500 Hz tone in K4 TEST mode."),
