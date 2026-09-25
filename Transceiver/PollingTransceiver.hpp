@@ -49,7 +49,7 @@ protected:
   void do_post_tx_frequency (Frequency, MODE) override final;
   void do_post_mode (MODE) override final;
   void do_post_ptt (bool = true) override final;
-  bool do_pre_update () override final;
+  bool do_pre_update () override;
 
 private:
   void start_timer ();

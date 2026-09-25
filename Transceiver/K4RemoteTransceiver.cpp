@@ -140,6 +140,8 @@ int K4RemoteTransceiver::do_start() {
                     .arg(codec_.error_string())};
 
   authenticated_ = false;
+  tx_requested_ = ptt_ = false;
+  test_state_known_ = false;
   have_mode_readback_ = false;
   have_data_mode_readback_ = false;
   initial_mode_captured_ = false;
@@ -274,6 +276,9 @@ void K4RemoteTransceiver::socket_disconnected() {
   guard_timer_->stop();
   tx_guard_.stop();
   tx_kind_ = TxKind::None;
+  tx_requested_ = ptt_ = false;
+  update_PTT(false);
+  Q_EMIT tci_mod_active(false);
 
   if (!was_authenticated) {
     connection_error_ =
@@ -384,8 +389,16 @@ void K4RemoteTransceiver::parse_cat_command(QString const &command) {
       Q_EMIT remote_input_calibration_progress(
           tr("K4 ALC was high; reducing remote audio drive."),
           tx_control_->gain.load());
-    else if (action == K4RemoteTxGuard::Action::Calibrated)
-      finish_calibration(true, tr("Remote input calibration completed."));
+    else if (action == K4RemoteTxGuard::Action::Calibrated) {
+      tx_timer_->stop();
+      guard_timer_->stop();
+      tx_guard_.stop();
+      // Leave readyRead before waiting for TS0. QAbstractSocket does not emit
+      // readyRead recursively, even while a nested event loop is running.
+      QTimer::singleShot(0, this, [this] {
+        finish_calibration(true, tr("Remote input calibration completed."));
+      });
+    }
     else if (action == K4RemoteTxGuard::Action::Tripped)
       stop_tx_for_guard(tx_guard_.reason());
   }
@@ -496,6 +509,7 @@ void K4RemoteTransceiver::begin_guard(bool calibration) {
     throw error{tr("Digital TX protection is latched. Stop transmitting before "
                    "retrying.")};
   tx_audio_.reset(tx_control_->gain.load());
+  tx_sequence_ = 0;
   last_meter_query_ = 0;
   send_cat(QStringLiteral("TM1;TM;"));
   guard_timer_->start();
@@ -526,8 +540,13 @@ void K4RemoteTransceiver::do_ptt(bool on) {
     set_data_a();
     if (!tx_guard_.active())
       begin_guard(false);
-    send_cat(QStringLiteral("TX;"));
+    // QK4's remote PTT opens its audio gate. The first audio packet keys the
+    // K4; waiting for TQ1 here prevents WSJT-X from ever starting modulation.
+    tx_requested_ = true;
+    update_PTT(true);
   } else {
+    tx_requested_ = false;
+    update_PTT(false);
     send_cat(QStringLiteral("RX;TM0;"));
     tx_guard_.stop();
     guard_timer_->stop();
@@ -545,10 +564,12 @@ void K4RemoteTransceiver::do_poll() {
   update_other_frequency(split_ ? tx_frequency_ : 0);
   update_split(split_);
   update_mode(mode_);
-  update_PTT(ptt_);
+  update_PTT(tx_requested_);
 }
 
 void K4RemoteTransceiver::do_stop() {
+  tx_requested_ = false;
+  update_PTT(false);
   tx_timer_->stop();
   guard_timer_->stop();
   keepalive_timer_->stop();
@@ -663,6 +684,14 @@ void K4RemoteTransceiver::do_tune(bool on) {
 void K4RemoteTransceiver::do_modulator_start(
     QString mode, unsigned symbols, double frames_per_symbol, double frequency,
     double tone_spacing, bool synchronize, bool, double, double tr_period) {
+  if (tuning_) {
+    // WSJT-X calls transmit() after Tune's PTT-ready update too. Preserve the
+    // continuous tune generator instead of replacing it with a finite message.
+    tx_kind_ = TxKind::Tune;
+    tx_timer_->start();
+    Q_EMIT tci_mod_active(true);
+    return;
+  }
   if (mode != QStringLiteral("FT8") && mode != QStringLiteral("FT4"))
     throw error{tr(
         "K4 Remote network transmission currently supports FT8 and FT4 only.")};
@@ -792,6 +821,9 @@ void K4RemoteTransceiver::service_guard() {
 }
 
 void K4RemoteTransceiver::stop_tx_for_guard(QString const &reason) {
+  tx_requested_ = false;
+  update_PTT(false);
+  tx_guard_.stop();
   tx_timer_->stop();
   guard_timer_->stop();
   send_cat(QStringLiteral("RX;TM0;"));
@@ -799,7 +831,7 @@ void K4RemoteTransceiver::stop_tx_for_guard(QString const &reason) {
   tx_kind_ = TxKind::None;
   Q_EMIT tci_mod_active(false);
   if (calibration)
-    finish_calibration(false, reason);
+    QTimer::singleShot(0, this, [this, reason] { finish_calibration(false, reason); });
   else
     Q_EMIT remote_tx_error(reason);
 }
@@ -849,7 +881,6 @@ void K4RemoteTransceiver::calibrate_remote_input() {
   tx_phase_ = 0.;
   try {
     begin_guard(true);
-    send_cat(QStringLiteral("TX;"));
     tx_timer_->start();
     Q_EMIT remote_input_calibration_progress(
         tr("Sending a protected 1500 Hz tone in K4 TEST mode."),
