@@ -312,6 +312,11 @@ jobs:
       - name: Audit staged runtime DLL imports
         run: |
           WORKSPACE=$(cygpath "${GITHUB_WORKSPACE}")
+          # These libraries are loaded dynamically, so a static import audit
+          # cannot detect a broken TLS or Opus installation.
+          ls "${WORKSPACE}/stage-main/bin"/libssl-*.dll >/dev/null
+          ls "${WORKSPACE}/stage-main/bin"/libcrypto-*.dll >/dev/null
+          ls "${WORKSPACE}/stage-main/bin"/libopus*.dll >/dev/null
           test -f "${WORKSPACE}/stage-main/bin/map65.exe"
           test -f "${WORKSPACE}/stage-main/bin/qmap.exe"
           bash .github/scripts/audit-staged-dll-imports-windows.sh \
