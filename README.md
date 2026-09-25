@@ -8,7 +8,7 @@
 > share the K4 framed TCP stream used by QK4 Mobile. Both password-authenticated
 > TCP and TLS 1.2+ with the K4 password as a pre-shared key are supported.
 >
-> FT8/FT4 transmission uses conservative network-audio drive until the optional
+> Transmission uses conservative network-audio drive until the optional
 > protected K4 TEST-mode calibration is completed. Live ALC protection remains
 > active on every transmission. See [K4 Remote architecture and operation](doc/K4_REMOTE.md).
 

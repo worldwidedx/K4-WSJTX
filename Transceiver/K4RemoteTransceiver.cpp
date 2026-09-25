@@ -524,7 +524,7 @@ void K4RemoteTransceiver::do_ptt(bool on) {
     }
     if (split_) {
       Q_EMIT remote_tx_error(
-          tr("Turn K4 split off before transmitting FT8/FT4."));
+          tr("Turn K4 split off before transmitting."));
       return;
     }
     auto const context = radio_input_context();
@@ -683,7 +683,8 @@ void K4RemoteTransceiver::do_tune(bool on) {
 
 void K4RemoteTransceiver::do_modulator_start(
     QString mode, unsigned symbols, double frames_per_symbol, double frequency,
-    double tone_spacing, bool synchronize, bool, double, double tr_period) {
+    double tone_spacing, bool synchronize, bool fast_mode, double,
+    double tr_period) {
   if (tuning_) {
     // WSJT-X calls transmit() after Tune's PTT-ready update too. Preserve the
     // continuous tune generator instead of replacing it with a finite message.
@@ -692,23 +693,40 @@ void K4RemoteTransceiver::do_modulator_start(
     Q_EMIT tci_mod_active(true);
     return;
   }
-  if (mode != QStringLiteral("FT8") && mode != QStringLiteral("FT4"))
-    throw error{tr(
-        "K4 Remote network transmission currently supports FT8 and FT4 only.")};
+  if (!symbols || frames_per_symbol <= 0.)
+    throw error{tr("The transmit mode supplied invalid symbol timing.")};
   tx_mode_ = std::move(mode);
   tx_symbols_ = symbols;
   tx_frames_per_symbol_ = frames_per_symbol;
   tx_frequency_hz_ = frequency;
   tx_tone_spacing_ = tone_spacing;
   synchronize_ = synchronize;
+  fast_mode_ = fast_mode;
   period_ = tr_period;
   tx_kind_ = TxKind::Message;
   tx_sample_ = 0;
   tx_phase_ = 0.;
   tx_silence_ = 0;
+  tx_cw_sample_ = 0;
+  tx_cw_symbols_ = period_ > 16. ? qBound(0, int(icw[0]),
+                                         NUM_CW_SYMBOLS - 1) : 0;
+  tx_cw_gain_ = 0.;
+  tx_envelope_ = 1.;
 
-  if (synchronize_) {
-    auto const delay = tx_mode_ == QStringLiteral("FT4") ? 300 : 500;
+  if (synchronize_ && !fast_mode_ && tx_mode_ != QStringLiteral("Echo")) {
+    int delay = 1000;
+    if ((tx_mode_ == QStringLiteral("FT8") &&
+         tx_frames_per_symbol_ == 1920.) ||
+        (tx_mode_ == QStringLiteral("FST4") &&
+         tx_frames_per_symbol_ == 720.) ||
+        (tx_mode_ == QStringLiteral("Q65") &&
+         tx_frames_per_symbol_ <= 3600.))
+      delay = 500;
+    if (tx_mode_ == QStringLiteral("FT8") &&
+        tx_frames_per_symbol_ == 1024.)
+      delay = 400;
+    if (tx_mode_ == QStringLiteral("FT4"))
+      delay = 300;
     auto const period_ms = qMax(1, qRound(period_ * 1000.));
     auto const elapsed = int(QDateTime::currentMSecsSinceEpoch() % period_ms);
     if (elapsed < delay)
@@ -737,34 +755,63 @@ QVector<qint16> K4RemoteTransceiver::generate_tx_frame(int count) {
 
     double frequency = tx_frequency_hz_;
     if (tx_kind_ == TxKind::Message) {
-      auto const symbol =
-          static_cast<unsigned>(tx_sample_ / tx_frames_per_symbol_);
-      if (symbol >= tx_symbols_) {
+      auto const complete = fast_mode_
+                                ? tx_sample_ >= qint64(qMax(0., period_ - 0.5) *
+                                                      sample_rate)
+                                : tx_sample_ >=
+                                      qint64(tx_symbols_ * tx_frames_per_symbol_);
+      if (complete) {
+        if (tx_cw_symbols_) {
+          tx_kind_ = TxKind::CwId;
+          tx_phase_ = 0.;
+        } else {
+          result.resize(i);
+          break;
+        }
+      }
+      if (tx_kind_ == TxKind::Message) {
+        auto const symbol = static_cast<unsigned>(
+            qint64(tx_sample_ / tx_frames_per_symbol_) % tx_symbols_);
+        if (tx_tone_spacing_ < 0. && itone[0] < 100) {
+          // WSJT-X supplies an already filtered 48 kHz waveform for FT8,
+          // FT4, and other modes marked by negative tone spacing.
+          result[i] = qint16(qBound(
+              -32766, qRound(32767. * foxcom_.wave[tx_sample_ * 4]), 32766));
+          ++tx_sample_;
+          continue;
+        }
+        frequency =
+            itone[0] >= 100
+                ? itone[0]
+                : frequency +
+                      itone[symbol] * (tx_tone_spacing_ == 0.
+                                           ? sample_rate / tx_frames_per_symbol_
+                                           : tx_tone_spacing_);
+      }
+    }
+    if (tx_kind_ == TxKind::CwId) {
+      auto const cw_symbol = tx_cw_sample_ / (2560 / 4) + 1;
+      if (cw_symbol > tx_cw_symbols_) {
         result.resize(i);
         break;
       }
-      if (tx_tone_spacing_ < 0. && itone[0] < 100) {
-        // Standard FT8/FT4 uses WSJT-X's already filtered 48 kHz wave.
-        // Select each fourth sample to preserve that exact waveform at
-        // the K4 stream's native 12 kHz rate.
-        result[i] = qint16(qBound(
-            -32766, qRound(32767. * foxcom_.wave[tx_sample_ * 4]), 32766));
-        ++tx_sample_;
-        continue;
-      }
-      frequency =
-          itone[0] >= 100
-              ? itone[0]
-              : frequency +
-                    itone[symbol] * (tx_tone_spacing_ == 0.
-                                         ? sample_rate / tx_frames_per_symbol_
-                                         : tx_tone_spacing_);
+      auto const target = icw[cw_symbol] ? 1. : 0.;
+      tx_cw_gain_ += qBound(-1. / 60., target - tx_cw_gain_, 1. / 60.);
+      ++tx_cw_sample_;
     }
     tx_phase_ += two_pi * frequency / sample_rate;
     if (tx_phase_ >= two_pi)
       tx_phase_ -= two_pi;
-    result[i] = qint16(std::sin(tx_phase_) * 32766.);
-    ++tx_sample_;
+    if (tx_kind_ == TxKind::Message) {
+      auto const fade_start = fast_mode_
+                                  ? qMax(0., period_ - 0.5) * sample_rate - 204.
+                                  : (tx_symbols_ - 0.017) * tx_frames_per_symbol_;
+      if (tx_sample_ > fade_start)
+        tx_envelope_ *= 0.98;
+      ++tx_sample_;
+    }
+    result[i] = qint16(std::sin(tx_phase_) * 32766. *
+                       (tx_kind_ == TxKind::CwId ? tx_cw_gain_ : tx_envelope_));
   }
   return result;
 }
@@ -799,8 +846,9 @@ void K4RemoteTransceiver::service_tx() {
   if (tx_kind_ == TxKind::None || !authenticated_ || !tx_guard_.active())
     return;
   auto samples = generate_tx_frame(frame_samples_);
-  auto const message_complete =
-      samples.size() < frame_samples_ && tx_kind_ == TxKind::Message;
+  auto const message_complete = samples.size() < frame_samples_ &&
+                                (tx_kind_ == TxKind::Message ||
+                                 tx_kind_ == TxKind::CwId);
   // K4/Opus packetization requires the frame size selected by SL. Preserve
   // program length, but zero-pad the final partial packet on the wire.
   if (message_complete && !samples.isEmpty())

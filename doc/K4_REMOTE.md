@@ -73,8 +73,10 @@ channel) and is written directly into the normal WSJT-X decode buffer. This
 uses the existing network-audio integration point, so waterfall and decode
 timing remain within the upstream application.
 
-FT8 and FT4 transmit audio use WSJT-X's already generated and filtered waveform,
-downsampled from 48 kHz to the K4 stream's native 12 kHz. Packet sizes follow
+All WSJT-X transmit modes use the K4 remote audio stream. FT8 and FT4 use
+WSJT-X's already generated and filtered waveform, downsampled from 48 kHz to
+the K4 stream's native 12 kHz. Other modes use the supplied symbol tones and
+timing; optional CW ID follows the message. Packet sizes follow
 the selected SL tier: 240, 480, 720, or 1440 samples. EM2 and EM3 require the
 standard Xiph Opus shared library (`opus.dll`, `libopus.so`, or `libopus.dylib`)
 to be available at runtime. EM0 and EM1 do not require Opus.
@@ -153,9 +155,10 @@ ctest --test-dir build-k4remote-tests --output-on-failure
 
 Both suites also run in the primary application CTest build on every CI platform.
 The transport suite uses a TCP loopback radio and the production transceiver
-state machine to verify that FT8/FT4 audio starts before radio TX confirmation
+state machine to verify that transmit audio starts before radio TX confirmation
 and that a combined modulation/PTT stop stops packet delivery.
-They cover fragmented and coalesced K4 frames, SHA-384 password formatting,
+They cover WSPR and the other WSJT-X modes, fragmented and coalesced K4 frames,
+SHA-384 password formatting,
 raw audio channel/encoding behavior, the calibration target, emergency ALC
 trip behavior, and compilation of the complete K4 transceiver and factory.
 Building the complete desktop application still uses the upstream WSJT-X build
