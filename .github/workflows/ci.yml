@@ -27,6 +27,12 @@ on:
         required: false
         type: boolean
         default: false
+      target:
+        description: "Build one tester platform, or all platforms"
+        required: false
+        type: choice
+        options: [all, windows, macos-arm64, macos-intel, linux-x64, linux-arm64]
+        default: all
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
@@ -107,6 +113,7 @@ jobs:
     # Opt-in only -- see the two-tier note above.
     if: >-
       !inputs.diagnose_linux &&
+      (inputs.target == '' || inputs.target == 'all' || inputs.target == 'macos-arm64') &&
       (github.event_name == 'workflow_dispatch' ||
        contains(github.event.pull_request.labels.*.name, 'full-ci'))
     uses: ./.github/workflows/build-macos.yml
@@ -125,6 +132,7 @@ jobs:
     # Opt-in only -- see the two-tier note above.
     if: >-
       !inputs.diagnose_linux &&
+      (inputs.target == '' || inputs.target == 'all' || inputs.target == 'macos-intel') &&
       (github.event_name == 'workflow_dispatch' ||
        contains(github.event.pull_request.labels.*.name, 'full-ci'))
     uses: ./.github/workflows/build-macos.yml
@@ -140,6 +148,7 @@ jobs:
 
   linux:
     needs: [prepare]
+    if: inputs.target == '' || inputs.target == 'all' || inputs.target == 'linux-x64'
     uses: ./.github/workflows/build-linux.yml
     with:
       version: ${{ needs.prepare.outputs.version }}
@@ -179,8 +188,9 @@ jobs:
     needs: [prepare]
     # Opt-in only -- see the two-tier note above.
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      contains(github.event.pull_request.labels.*.name, 'full-ci')
+      (inputs.target == '' || inputs.target == 'all' || inputs.target == 'linux-arm64') &&
+      (github.event_name == 'workflow_dispatch' ||
+       contains(github.event.pull_request.labels.*.name, 'full-ci'))
     uses: ./.github/workflows/build-linux.yml
     with:
       version: ${{ needs.prepare.outputs.version }}
@@ -195,6 +205,7 @@ jobs:
     # Opt-in only -- see the two-tier note above.
     if: >-
       !inputs.diagnose_linux &&
+      (inputs.target == '' || inputs.target == 'all' || inputs.target == 'windows') &&
       (github.event_name == 'workflow_dispatch' ||
        contains(github.event.pull_request.labels.*.name, 'full-ci'))
     uses: ./.github/workflows/build-windows.yml
