@@ -7,7 +7,7 @@ on:
   workflow_call:
     inputs:
       version:
-        description: "K4-WSJT-X version string"
+        description: "WSJT-X version string"
         required: true
         type: string
       hamlib_branch:
@@ -216,8 +216,34 @@ jobs:
         run: echo "HOMEBREW_PREFIX=$(brew --prefix)" >> "$GITHUB_ENV"
 
       - name: Install dependencies
+        run: brew install cmake autoconf automake libtool asciidoctor ccache pkg-config
+
+      - name: Select ccache key
+        id: ccache-key
+        env:
+          RECACHE: ${{ inputs.recache }}
+        run: .github/scripts/select-ccache-key-suffix.sh
+
+      - name: Restore ccache
+        id: ccache
+        uses: actions/cache/restore@v6
+        with:
+          path: .ccache
+          key: ccache-macos-${{ inputs.arch }}-appleclang-${{ github.sha }}${{ steps.ccache-key.outputs.suffix }}
+          restore-keys: |
+            ccache-macos-${{ inputs.arch }}-appleclang-
+
+      - name: Configure ccache
         run: |
-          brew install cmake autoconf automake libtool asciidoctor
+          echo "CCACHE_DIR=${GITHUB_WORKSPACE}/.ccache" >> "$GITHUB_ENV"
+          echo "ccache recache: ${{ inputs.recache }}"
+          if [ "${{ inputs.recache }}" = "true" ]; then
+            echo "CCACHE_RECACHE=1" >> "$GITHUB_ENV"
+            echo "Forcing ccache recache for this run"
+          fi
+          mkdir -p "${GITHUB_WORKSPACE}/.ccache"
+          ccache --version
+          ccache --zero-stats
 
       - name: Compute Qt cache key
         id: qt-key
@@ -258,15 +284,17 @@ jobs:
             --allow-prefix "${GITHUB_WORKSPACE}/qt-prefix" \
             "${GITHUB_WORKSPACE}/qt-prefix"
 
-      - name: Cache OpenSSL
-        id: openssl-cache
-        uses: actions/cache/restore@v5
+      - name: Cache K4 TLS and Opus runtimes
+        id: k4-runtimes
+        uses: actions/cache/restore@v6
         with:
-          path: openssl-prefix
-          key: openssl-macos-${{ inputs.arch }}-${{ inputs.runner }}-3.5.8-min${{ inputs.deployment_target }}-${{ hashFiles('.github/scripts/build-openssl-macos.sh') }}
+          path: |
+            openssl-prefix
+            opus-prefix
+          key: k4-runtimes-${{ inputs.arch }}-openssl-3.5.8-opus-1.5.2-${{ hashFiles('.github/scripts/build-openssl-macos.sh', '.github/scripts/build-opus-macos.sh') }}
 
-      - name: Build OpenSSL
-        if: steps.openssl-cache.outputs.cache-hit != 'true'
+      - name: Build K4 TLS and Opus runtimes
+        if: steps.k4-runtimes.outputs.cache-hit != 'true'
         run: |
           .github/scripts/build-openssl-macos.sh \
             3.5.8 \
@@ -274,24 +302,6 @@ jobs:
             "${{ inputs.deployment_target }}" \
             "${{ inputs.arch }}" \
             "${GITHUB_WORKSPACE}/openssl-prefix"
-
-      - name: Save OpenSSL cache
-        if: steps.openssl-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
-        with:
-          path: openssl-prefix
-          key: ${{ steps.openssl-cache.outputs.cache-primary-key }}
-
-      - name: Cache Opus
-        id: opus-cache
-        uses: actions/cache/restore@v5
-        with:
-          path: opus-prefix
-          key: opus-macos-${{ inputs.arch }}-${{ inputs.runner }}-1.5.2-min${{ inputs.deployment_target }}-${{ hashFiles('.github/scripts/build-opus-macos.sh') }}
-
-      - name: Build Opus
-        if: steps.opus-cache.outputs.cache-hit != 'true'
-        run: |
           .github/scripts/build-opus-macos.sh \
             1.5.2 \
             65c1d2f78b9f2fb20082c38cbe47c951ad5839345876e46941612ee87f9a7ce1 \
@@ -299,14 +309,16 @@ jobs:
             "${{ inputs.arch }}" \
             "${GITHUB_WORKSPACE}/opus-prefix"
 
-      - name: Save Opus cache
-        if: steps.opus-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
+      - name: Save K4 runtime cache
+        if: steps.k4-runtimes.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
         with:
-          path: opus-prefix
-          key: ${{ steps.opus-cache.outputs.cache-primary-key }}
+          path: |
+            openssl-prefix
+            opus-prefix
+          key: ${{ steps.k4-runtimes.outputs.cache-primary-key }}
 
-      - name: Verify controlled TLS and audio runtimes
+      - name: Verify K4 TLS and Opus runtimes
         run: |
           .github/scripts/verify-macos-artifacts.sh \
             --target "${{ inputs.deployment_target }}" \
@@ -315,10 +327,6 @@ jobs:
             --allow-prefix "${GITHUB_WORKSPACE}/opus-prefix" \
             "${GITHUB_WORKSPACE}/openssl-prefix" \
             "${GITHUB_WORKSPACE}/opus-prefix"
-          {
-            echo "OPENSSL_LIB=${GITHUB_WORKSPACE}/openssl-prefix/lib"
-            echo "OPUS_LIB=${GITHUB_WORKSPACE}/opus-prefix/lib"
-          } >> "$GITHUB_ENV"
 
       - name: Install controlled ARM gfortran
         id: controlled-arm-fc
@@ -632,7 +640,7 @@ jobs:
 
       - name: Run tests
         id: ctest
-        run: DYLD_LIBRARY_PATH="${OPENSSL_LIB}:${OPUS_LIB}" ctest --output-on-failure --output-junit ctest-results.xml
+        run: ctest --parallel 3 --output-on-failure --output-junit ctest-results.xml
         working-directory: wsjtx-build
 
       - name: Publish test summary
@@ -677,7 +685,7 @@ jobs:
         id: collect
         run: |
           BUILD=wsjtx-build
-          STAGE=stage/K4-WSJT-X-${{ inputs.version }}-${{ inputs.arch }}
+          STAGE="stage/wsjtx-${VERSION}-${ARCH}"
           ASSETS=assets
 
           mkdir -p "${ASSETS}"
@@ -695,25 +703,6 @@ jobs:
               exit 1
             fi
           done
-
-          # Match QK4's proven macOS deployment. Qt loads OpenSSL at runtime
-          # for TLS-PSK, and the K4 codec loads Opus at runtime, so neither is
-          # visible to normal dependency scanners. Bundle both explicitly.
-          FRAMEWORKS="${APP}/Contents/Frameworks"
-          mkdir -p "$FRAMEWORKS"
-          cp "${OPENSSL_LIB}/libssl.3.dylib" "$FRAMEWORKS/"
-          cp "${OPENSSL_LIB}/libcrypto.3.dylib" "$FRAMEWORKS/"
-          cp "${OPUS_LIB}/libopus.0.dylib" "$FRAMEWORKS/"
-          ln -sf libopus.0.dylib "$FRAMEWORKS/libopus.dylib"
-          chmod -R u+rw "$FRAMEWORKS"
-
-          install_name_tool -id "@rpath/libssl.3.dylib" "$FRAMEWORKS/libssl.3.dylib"
-          install_name_tool -id "@rpath/libcrypto.3.dylib" "$FRAMEWORKS/libcrypto.3.dylib"
-          crypto_ref="$(otool -L "$FRAMEWORKS/libssl.3.dylib" | awk '/libcrypto/{print $1; exit}')"
-          if [ -n "$crypto_ref" ] && [ "$crypto_ref" != "@rpath/libcrypto.3.dylib" ]; then
-            install_name_tool -change "$crypto_ref" "@rpath/libcrypto.3.dylib" "$FRAMEWORKS/libssl.3.dylib"
-          fi
-          install_name_tool -id "@rpath/libopus.0.dylib" "$FRAMEWORKS/libopus.0.dylib"
 
           for bin in jt9 wsprd wsprcode jt65code jt4code ft8code q65code encode77 fcal hash22calc; do
             [ -f "${BUILD}/${bin}" ] && cp "${BUILD}/${bin}" "${ASSETS}/"
@@ -789,6 +778,27 @@ jobs:
             fi
           done
 
+      - name: Bundle K4 TLS and Opus runtimes
+        run: |
+          APP="${{ steps.collect.outputs.stage_dir }}/wsjtx.app"
+          FRAMEWORKS="${APP}/Contents/Frameworks"
+          mkdir -p "$FRAMEWORKS"
+          cp "${GITHUB_WORKSPACE}/openssl-prefix/lib/libssl.3.dylib" "$FRAMEWORKS/"
+          cp "${GITHUB_WORKSPACE}/openssl-prefix/lib/libcrypto.3.dylib" "$FRAMEWORKS/"
+          cp "${GITHUB_WORKSPACE}/opus-prefix/lib/libopus.0.dylib" "$FRAMEWORKS/"
+          ln -sf libopus.0.dylib "$FRAMEWORKS/libopus.dylib"
+          chmod -R u+rw "$FRAMEWORKS"
+          install_name_tool -id "@rpath/libssl.3.dylib" "$FRAMEWORKS/libssl.3.dylib"
+          install_name_tool -id "@rpath/libcrypto.3.dylib" "$FRAMEWORKS/libcrypto.3.dylib"
+          crypto_ref="$(otool -L "$FRAMEWORKS/libssl.3.dylib" | awk '/libcrypto/{print $1; exit}')"
+          if [ -n "$crypto_ref" ] && [ "$crypto_ref" != "@rpath/libcrypto.3.dylib" ]; then
+            install_name_tool -change "$crypto_ref" "@rpath/libcrypto.3.dylib" "$FRAMEWORKS/libssl.3.dylib"
+          fi
+          install_name_tool -id "@rpath/libopus.0.dylib" "$FRAMEWORKS/libopus.0.dylib"
+          test -f "$FRAMEWORKS/libssl.3.dylib"
+          test -f "$FRAMEWORKS/libcrypto.3.dylib"
+          test -f "$FRAMEWORKS/libopus.0.dylib"
+
       - name: Deploy macOS CLI tool dependencies
         run: |
           .github/scripts/deploy-macos-cli-tools.sh \
@@ -807,11 +817,6 @@ jobs:
       - name: Verify bundled macOS deployment targets
         run: |
           STAGE="${{ steps.collect.outputs.stage_dir }}"
-          FRAMEWORKS="${STAGE}/wsjtx.app/Contents/Frameworks"
-          test -f "${FRAMEWORKS}/libssl.3.dylib"
-          test -f "${FRAMEWORKS}/libcrypto.3.dylib"
-          test -f "${FRAMEWORKS}/libopus.0.dylib"
-          otool -L "${FRAMEWORKS}/libssl.3.dylib" | grep -q '@rpath/libcrypto.3.dylib'
           .github/scripts/verify-macos-artifacts.sh \
             --target "${{ env.DEPLOYMENT_TARGET }}" \
             --arch "${{ inputs.arch }}" \
@@ -874,8 +879,8 @@ jobs:
       - name: Prepare installer package
         run: |
           STAGE="${{ steps.collect.outputs.stage_dir }}"
-          PKG_ID="com.github.worldwidedx.k4wsjtx.${{ inputs.arch }}"
-          PKG_VERSION="${{ inputs.version }}"
+          PKG_ID="com.github.worldwidedx.k4wsjtx.${ARCH}"
+          PKG_VERSION="${VERSION}"
 
           PAYLOAD="$RUNNER_TEMP/pkg-payload"
           SCRIPTS="$RUNNER_TEMP/pkg-scripts"
@@ -916,18 +921,16 @@ jobs:
             --install-location / \
             "$RUNNER_TEMP/wsjtx-component.pkg"
 
-          PKG_OUT="K4-WSJT-X-${{ inputs.version }}-${{ inputs.arch }}-macOS.pkg"
-          if [ "${{ steps.check_secrets.outputs.signing_enabled }}" = "true" ]; then
-            INST_IDENTITY="${{ steps.keychain.outputs.installer_identity }}"
-            productbuild \
-              --package "$RUNNER_TEMP/wsjtx-component.pkg" \
-              --sign "$INST_IDENTITY" \
-              "$PKG_OUT"
-          else
-            productbuild \
-              --package "$RUNNER_TEMP/wsjtx-component.pkg" \
-              "$PKG_OUT"
-          fi
+      - name: Build unsigned validation package
+        if: inputs.signing_mode == 'validation'
+        id: package
+        run: |
+          PKG_OUT="K4-WSJT-X-${VERSION}-${ARCH}-macOS.pkg"
+          productbuild \
+            --package "$RUNNER_TEMP/wsjtx-component.pkg" \
+            "$PKG_OUT"
+          echo "path=$PKG_OUT" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=K4-WSJT-X-${VERSION}-${ARCH}-macOS-unsigned.pkg" >> "$GITHUB_OUTPUT"
 
       - name: Verify unsigned validation package
         if: inputs.signing_mode == 'validation'
@@ -971,54 +974,46 @@ jobs:
           cp "${{ runner.temp }}/components.plist" distribution-signing-input/
           cp entitlements.plist distribution-signing-input/
 
-            if grep -q "status: Invalid" notarize.log; then
-              SUBMISSION_ID=$(grep "id:" notarize.log | head -1 | awk '{print $2}')
-              xcrun notarytool log "$SUBMISSION_ID" \
-                --apple-id "$APPLE_ID" \
-                --password "$APPLE_ID_PASSWORD" \
-                --team-id "$APPLE_TEAM_ID" || true
-              exit 1
-            fi
-
-            xcrun stapler staple "$file"
-          }
-
-          notarize_and_staple "K4-WSJT-X-${{ inputs.version }}-${{ inputs.arch }}-macOS.pkg"
-
-      - name: Notarize CLI tools
-        if: steps.check_secrets.outputs.signing_enabled == 'true'
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_ID_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          ASSETS="${{ steps.collect.outputs.assets_dir }}"
-          zip -r cli-tools.zip "${ASSETS}"/
-          xcrun notarytool submit cli-tools.zip \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_ID_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait 2>&1 | tee notarize-cli.log
-
-          if grep -q "status: Invalid" notarize-cli.log; then
-            SUBMISSION_ID=$(grep "id:" notarize-cli.log | head -1 | awk '{print $2}')
-            xcrun notarytool log "$SUBMISSION_ID" \
-              --apple-id "$APPLE_ID" \
-              --password "$APPLE_ID_PASSWORD" \
-              --team-id "$APPLE_TEAM_ID" || true
-            exit 1
-          fi
-          rm cli-tools.zip
-
-      - name: Clean up keychain
-        if: always() && steps.check_secrets.outputs.signing_enabled == 'true'
-        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
-
-      - name: Upload pkg
+      - name: Upload distribution signing input
+        if: inputs.signing_mode == 'distribution'
         uses: actions/upload-artifact@v7
         with:
-          name: K4-WSJT-X-${{ inputs.version }}-${{ inputs.arch }}-macOS.pkg
-          path: K4-WSJT-X-${{ inputs.version }}-${{ inputs.arch }}-macOS.pkg
+          name: macos-signing-input-${{ inputs.version }}-${{ inputs.arch }}
+          path: distribution-signing-input
+          retention-days: 1
+
+      - name: Write validation signing report
+        if: inputs.signing_mode == 'validation'
+        run: |
+          PKG_OUT="${{ steps.package.outputs.path }}"
+          PKG_SIGNATURE=$(pkgutil --check-signature "$PKG_OUT" 2>&1 || true)
+          printf '%s\n' "$PKG_SIGNATURE"
+          if [[ "$PKG_SIGNATURE" != *"Status: no signature"* ]]; then
+            echo "::error::Validation package did not report the expected unsigned status."
+            exit 1
+          fi
+          SHA256=$(shasum -a 256 "$PKG_OUT" | awk '{print $1}')
+          jq -n \
+            --arg mode validation \
+            --arg artifact "$PKG_OUT" \
+            --arg sha256 "$SHA256" \
+            --arg git_sha "$GITHUB_SHA" \
+            '{schema_version: 1, mode: $mode, artifact: $artifact, sha256: $sha256, git_sha: $git_sha, signed: false, notarized: false, publishable: false}' \
+            > macos-signing-report.json
+
+      - name: Upload pkg
+        if: inputs.signing_mode == 'validation'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.package.outputs.artifact_name }}
+          path: ${{ steps.package.outputs.path }}
+
+      - name: Upload signing report
+        if: inputs.signing_mode == 'validation'
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-signing-report-${{ inputs.version }}-${{ inputs.arch }}
+          path: macos-signing-report.json
 
       - name: Package individual binaries
         run: |

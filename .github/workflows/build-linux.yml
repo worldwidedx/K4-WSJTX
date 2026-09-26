@@ -11,57 +11,12 @@ on:
         description: "Hamlib branch to build"
         required: false
         type: string
-        default: "4.7.2"
+        default: "4.7.0"
       arch:
-        description: "Linux target architecture: x86_64, aarch64, or armhf"
+        description: "Linux target architecture: x86_64 or aarch64"
         required: false
         type: string
         default: "x86_64"
-      recache:
-        description: "Force ccache to recompile and refresh cached objects"
-        required: false
-        type: boolean
-        default: false
-      image_tag:
-        description: "Immutable GHCR image tag; empty resolves the current validated generation"
-        required: false
-        type: string
-        default: ""
-      image_source:
-        description: "Builder image source: internal or public-release"
-        required: false
-        type: string
-        default: "internal"
-      image_digest:
-        description: "Required sha256 digest for a public-release builder image"
-        required: false
-        type: string
-        default: ""
-      armhf_cross_image_digest:
-        description: "Required sha256 digest for the public-release ARMHF cross-builder"
-        required: false
-        type: string
-        default: ""
-      allow_stale_image:
-        description: "Allow a previously promoted image when a dependency refresh changed the recipe"
-        required: false
-        type: boolean
-        default: false
-      save_ccache:
-        description: "Save compiled objects for trusted builds"
-        required: false
-        type: boolean
-        default: false
-      validate_fortran_fallback:
-        description: "Build the x86_64 non-OpenMP common-library sentinel graph"
-        required: false
-        type: boolean
-        default: false
-      build_packages:
-        description: "Build, validate, and upload Linux packages and executable artifacts"
-        required: false
-        type: boolean
-        default: true
       release_channel:
         description: "Build release channel: DEVEL, RC, or GA"
         required: false
@@ -72,127 +27,10 @@ on:
         required: false
         type: string
         default: ""
-  # Also runnable on its own ("Run workflow" / gh workflow run) to build a single
-  # Linux arch without dispatching the full ci.yml matrix. GitHub only exposes
-  # workflow_dispatch when the trigger is on the default branch (develop), so this
-  # must be merged before it can be dispatched. This entry point supports focused
-  # single-architecture diagnosis and candidate-image validation; ARMHF also joins
-  # ci.yml's opt-in full-ci matrix. Inputs mirror workflow_call with standalone
-  # defaults: hamlib_branch matches what ci.yml / release.yml pass (4.7.2), and
-  # version is overridable via `-f version=...`.
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "WSJT-X version string (artifact + package names)"
-        required: false
-        type: string
-        default: "3.2.0-devel"
-      hamlib_branch:
-        description: "Hamlib branch to build"
-        required: false
-        type: string
-        default: "4.7.2"
-      arch:
-        description: "Linux target architecture"
-        required: false
-        type: choice
-        options:
-          - x86_64
-          - aarch64
-          - armhf
-        default: "x86_64"
-      recache:
-        description: "Force ccache to recompile and refresh cached objects"
-        required: false
-        type: boolean
-        default: false
-      image_tag:
-        description: "Immutable GHCR image tag; empty resolves the current validated generation"
-        required: false
-        type: string
-        default: ""
-      image_source:
-        description: "Builder image source"
-        required: false
-        type: choice
-        options:
-          - internal
-          - public-release
-        default: internal
-      image_digest:
-        description: "sha256 digest required with public-release image source"
-        required: false
-        type: string
-        default: ""
-      armhf_cross_image_digest:
-        description: "sha256 digest required for the public-release ARMHF cross-builder"
-        required: false
-        type: string
-        default: ""
-      allow_stale_image:
-        description: "Allow a previously promoted image when a dependency refresh changed the recipe"
-        required: false
-        type: boolean
-        default: false
-      save_ccache:
-        description: "Save compiled objects"
-        required: false
-        type: boolean
-        default: false
-      validate_fortran_fallback:
-        description: "Build the x86_64 non-OpenMP common-library sentinel graph"
-        required: false
-        type: boolean
-        default: false
-      build_packages:
-        description: "Build, validate, and upload Linux packages and executable artifacts"
-        required: false
-        type: boolean
-        default: true
-      release_channel:
-        description: "Build release channel"
-        required: false
-        type: choice
-        options:
-          - DEVEL
-          - RC
-          - GA
-        default: "DEVEL"
-      rc_number:
-        description: "Release candidate number when release_channel is RC"
-        required: false
-        type: string
-        default: ""
-
-# Architecture jobs are gated on `inputs.arch`. Each call from ci.yml /
-# release.yml passes a single target, so exactly one build job runs per call.
-# Splitting on arch
-# keeps the per-arch runtime profile explicit at the job level:
-#
-#   x86_64 — validated Noble container on ubuntu-24.04.
-#   aarch64 — validated GCC 13.4 Bookworm container on ubuntu-24.04-arm. This keeps the
-#            Bookworm glibc 2.36 + pre-t64 library baseline while using GCC 13
-#            (issue #49).
-#   armhf  — native x86_64-to-ARMHF GCC 13.4 cross-build followed by target
-#            tests and packaging in a Bookworm arm/v7 container under QEMU
-#            (issue #51). DigiPi / Pi Zero 2W class.
-#
-# The native jobs use the build-linux-payload composite action. ARMHF needs
-# separate host-build and target-runtime phases, but shares their artifact
-# validators and external artifact contracts.
-
-permissions:
-  contents: read
-  packages: read
 
 jobs:
-  resolve-image:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    outputs:
-      image_tag: ${{ steps.resolve.outputs.image_tag }}
-      image_reference: ${{ steps.resolve.outputs.image_reference }}
-      cross_image_reference: ${{ steps.resolve.outputs.cross_image_reference }}
+  build:
+    runs-on: ${{ inputs.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@v6
 
@@ -275,7 +113,7 @@ jobs:
             -DCMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/hamlib-prefix;${GITHUB_WORKSPACE}/pfunit-prefix" \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DWSJT_SKIP_MANPAGES=ON \
-            -DWSJT_BUILD_TESTS=ON \
+            -DWSJT_ENABLE_TESTS=ON \
             -DWSJT_RELEASE_CHANNEL="${{ inputs.release_channel }}" \
             -DWSJT_RC_NUMBER="${{ inputs.rc_number }}" \
             -DPFUNIT_DIR="${{ steps.pfunit.outputs.dir }}" \
@@ -289,9 +127,36 @@ jobs:
         run: ctest --output-on-failure --output-junit ctest-results.xml
         working-directory: wsjtx-build
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REQUESTED_TAG: ${{ inputs.image_tag }}
-          ARMHF_BUILD: ${{ inputs.arch == 'armhf' }}
+          QT_QPA_PLATFORM: offscreen
+
+      - name: Publish test summary
+        if: always() && steps.ctest.conclusion != 'skipped'
+        working-directory: wsjtx-build
+        run: python3 ../.github/scripts/publish-ctest-summary.py "Linux ${{ inputs.arch }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload test results
+        if: always() && steps.ctest.conclusion != 'skipped'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ctest-results-linux-${{ inputs.arch }}
+          path: wsjtx-build/ctest-results.xml
+          if-no-files-found: ignore
+
+      - name: Verify binary
+        run: |
+          file wsjtx-build/jt9
+          file wsjtx-build/jt9 | grep -q "ELF 64-bit"
+
+      # CMakeLists.txt:1989-2012 enables CPack's DEB generator when
+      # dpkg-buildpackage is on the path (provided by dpkg-dev, installed
+      # above). The DEB generator ignores CPACK_PACKAGE_FILE_NAME and
+      # uses its own CPACK_DEBIAN_FILE_NAME (default <pkg>_<ver>_<arch>.deb
+      # → wsjtx_3.0.1_amd64.deb regardless). Override that variable to
+      # align the filename with the AppImage/installer naming used by
+      # the rest of the pipeline.
+      - name: Package .deb
+        env:
+          VERSION: ${{ inputs.version }}
           ARCH: ${{ inputs.arch }}
         run: |
           cd wsjtx-build
@@ -382,14 +247,16 @@ jobs:
           LINUXDEPLOY_TAG: "1-alpha-20251107-1"
         run: |
           case "$ARCH" in
-            x86_64) package=linux-noble; cross_package= ;;
-            aarch64) package=linux-arm64-bookworm; cross_package= ;;
-            armhf) package=linux-armv7-bookworm; cross_package=linux-armhf-cross-bookworm ;;
-            *)
-              echo "::error::Unsupported Linux architecture: $ARCH"
-              exit 2
-              ;;
+            x86_64)  LINUXDEPLOY_SHA256="c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d" ;;
+            aarch64) LINUXDEPLOY_SHA256="620095110d693282b8ebeb244a95b5e911cf8f65f76c88b4b47d16ae6346fcff" ;;
+            *)       echo "::error::Unknown linuxdeploy arch: $ARCH"; exit 1 ;;
           esac
+          curl -fsSL -o linuxdeploy.AppImage \
+            "https://github.com/linuxdeploy/linuxdeploy/releases/download/${LINUXDEPLOY_TAG}/linuxdeploy-${ARCH}.AppImage"
+          curl -fsSL -o linuxdeploy-plugin-qt.AppImage \
+            "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-${ARCH}.AppImage"
+          echo "${LINUXDEPLOY_SHA256}  linuxdeploy.AppImage" | sha256sum -c -
+          chmod +x linuxdeploy.AppImage linuxdeploy-plugin-qt.AppImage
 
           # --appimage-extract-and-run avoids FUSE on the hosted runner.
           export OUTPUT="K4-WSJT-X-${VERSION}-linux-${ARCH}.AppImage"
@@ -400,153 +267,13 @@ jobs:
             --desktop-file AppDir/usr/share/applications/wsjtx.desktop \
             --icon-file AppDir/usr/share/pixmaps/wsjtx_icon.png
 
-          if [ -n "$REQUESTED_TAG" ]; then
-            IMAGE_TAG="$REQUESTED_TAG" .github/scripts/validate-ci-inputs.sh
-            echo "image_tag=$REQUESTED_TAG" >> "$GITHUB_OUTPUT"
-          elif [ "$ARMHF_BUILD" = true ]; then
-            RESOLVE_ARMHF=true .github/scripts/resolve-linux-ci-image-tag.py
-          else
-            .github/scripts/resolve-linux-ci-image-tag.py
-          fi
+          ls -lh "$OUTPUT"
+          file "$OUTPUT"
 
-          if [ "$IMAGE_SOURCE" = public-release ]; then
-            echo "image_reference=${package_root}/${package}@${IMAGE_DIGEST}" >> "$GITHUB_OUTPUT"
-            if [ "$ARCH" = armhf ]; then
-              echo "cross_image_reference=${package_root}/${cross_package}@${ARMHF_CROSS_IMAGE_DIGEST}" >> "$GITHUB_OUTPUT"
-            fi
-          else
-            image_tag="$(awk -F= '$1 == "image_tag" { print $2 }' "$GITHUB_OUTPUT" | tail -n 1)"
-            echo "image_reference=${package_root}/${package}:${image_tag}" >> "$GITHUB_OUTPUT"
-            if [ "$ARCH" = armhf ]; then
-              echo "cross_image_reference=${package_root}/${cross_package}:${image_tag}" >> "$GITHUB_OUTPUT"
-            fi
-          fi
-
-  build-x86_64:
-    needs: resolve-image
-    if: inputs.arch == 'x86_64'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 65
-    container:
-      image: ${{ needs.resolve-image.outputs.image_reference }}
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@v7
-      - name: Validate workflow inputs
+      - name: Smoke-test AppImage payload
         env:
-          WSJTX_VERSION: ${{ inputs.version }}
-          HAMLIB_BRANCH: ${{ inputs.hamlib_branch }}
-          WSJT_RELEASE_CHANNEL: ${{ inputs.release_channel }}
-          WSJT_RC_NUMBER: ${{ inputs.rc_number }}
+          VERSION: ${{ inputs.version }}
           ARCH: ${{ inputs.arch }}
-          IMAGE_TAG: ${{ needs.resolve-image.outputs.image_tag }}
-          VALIDATE_FORTRAN_FALLBACK: ${{ inputs.validate_fortran_fallback }}
-        run: .github/scripts/validate-ci-inputs.sh
-      - uses: ./.github/actions/build-linux-payload
-        with:
-          arch: x86_64
-          version: ${{ inputs.version }}
-          hamlib_branch: ${{ inputs.hamlib_branch }}
-          runtime_base: host
-          recache: ${{ inputs.recache }}
-          save_ccache: ${{ inputs.save_ccache }}
-          validate_fortran_fallback: ${{ inputs.validate_fortran_fallback }}
-          build_packages: ${{ inputs.build_packages }}
-          release_channel: ${{ inputs.release_channel }}
-          rc_number: ${{ inputs.rc_number }}
-          allow_stale_image: ${{ inputs.allow_stale_image }}
-
-  build-aarch64:
-    needs: resolve-image
-    if: inputs.arch == 'aarch64'
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 45
-    # The official GCC image adds GCC 13.4 without moving off the Bookworm
-    # glibc 2.36 and pre-t64 runtime baseline (issue #49).
-    container:
-      image: ${{ needs.resolve-image.outputs.image_reference }}
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@v7
-      - name: Validate workflow inputs
-        env:
-          WSJTX_VERSION: ${{ inputs.version }}
-          HAMLIB_BRANCH: ${{ inputs.hamlib_branch }}
-          WSJT_RELEASE_CHANNEL: ${{ inputs.release_channel }}
-          WSJT_RC_NUMBER: ${{ inputs.rc_number }}
-          ARCH: ${{ inputs.arch }}
-          IMAGE_TAG: ${{ needs.resolve-image.outputs.image_tag }}
-          VALIDATE_FORTRAN_FALLBACK: ${{ inputs.validate_fortran_fallback }}
-        run: .github/scripts/validate-ci-inputs.sh
-      - uses: ./.github/actions/build-linux-payload
-        with:
-          arch: aarch64
-          version: ${{ inputs.version }}
-          hamlib_branch: ${{ inputs.hamlib_branch }}
-          runtime_base: bookworm-gcc13.4
-          recache: ${{ inputs.recache }}
-          save_ccache: ${{ inputs.save_ccache }}
-          validate_fortran_fallback: ${{ inputs.validate_fortran_fallback }}
-          build_packages: ${{ inputs.build_packages }}
-          release_channel: ${{ inputs.release_channel }}
-          rc_number: ${{ inputs.rc_number }}
-          allow_stale_image: ${{ inputs.allow_stale_image }}
-
-  build-armhf:
-    needs: resolve-image
-    if: inputs.arch == 'armhf'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 160
-    # Compile natively on x86_64 with a pinned GCC 13.4 cross-toolchain, then
-    # execute target tests and packaging in a clean Bookworm ARMv7 runtime.
-    #
-    # Keep JavaScript actions on the host: the runner's x86_64 Node runtime
-    # cannot execute in the ARMv7 container. Both explicit containers mount
-    # the checkout at /work so CTest paths remain stable across phases.
-    env:
-      VERSION: ${{ inputs.version }}
-      HAMLIB_BRANCH: ${{ inputs.hamlib_branch }}
-      WSJT_RELEASE_CHANNEL: ${{ inputs.release_channel }}
-      WSJT_RC_NUMBER: ${{ inputs.rc_number }}
-    steps:
-      # setup-qemu-action runs on the host (job has no `container:`),
-      # mutating the host kernel's binfmt_misc table. With arm/v7
-      # registered, subsequent `docker run --platform linux/arm/v7`
-      # invocations execute the container's arm/v7 init + binaries via
-      # qemu-arm-static.
-      - uses: docker/setup-qemu-action@v4
-        with:
-          image: tonistiigi/binfmt:qemu-v10.2.3-68@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
-          platforms: linux/arm/v7
-      - uses: actions/checkout@v7
-      - name: Validate workflow inputs
-        env:
-          WSJTX_VERSION: ${{ inputs.version }}
-          HAMLIB_BRANCH: ${{ inputs.hamlib_branch }}
-          WSJT_RELEASE_CHANNEL: ${{ inputs.release_channel }}
-          WSJT_RC_NUMBER: ${{ inputs.rc_number }}
-          ARCH: armhf
-          IMAGE_TAG: ${{ needs.resolve-image.outputs.image_tag }}
-          VALIDATE_FORTRAN_FALLBACK: ${{ inputs.validate_fortran_fallback }}
-        run: .github/scripts/validate-ci-inputs.sh
-
-      - uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Inspect ARMHF image pair
-        id: image
-        env:
-          CROSS_BUILDER_IMAGE: ${{ needs.resolve-image.outputs.cross_image_reference }}
-          RUNTIME_IMAGE: ${{ needs.resolve-image.outputs.image_reference }}
-          ALLOW_STALE_IMAGE: ${{ inputs.allow_stale_image }}
-          HAMLIB_BRANCH: ${{ inputs.hamlib_branch }}
         run: |
           APPIMAGE="K4-WSJT-X-${VERSION}-linux-${ARCH}.AppImage"
           ./"$APPIMAGE" --appimage-extract >/dev/null
@@ -576,113 +303,18 @@ jobs:
             find squashfs-root -path '*/plugins/*' -name '*.so' 2>/dev/null | head -20
             exit 1
           fi
-          if [ "$cross_toolchain_id" != "$runtime_toolchain_id" ]; then
-            echo "ARMHF toolchain identity mismatch: $cross_toolchain_id != $runtime_toolchain_id" >&2
-            exit 1
-          fi
-          cross_recipe_match=$(awk -F= '$1 == "cross_recipe_match" { print $2 }' "$output_file")
-          runtime_recipe_match=$(awk -F= '$1 == "runtime_recipe_match" { print $2 }' "$output_file")
-          recipe_match=false
-          if [ "$cross_recipe_match" = true ] && [ "$runtime_recipe_match" = true ]; then
-            recipe_match=true
-          fi
-          ccache_compatibility_id=$(awk -F= '$1 == "cross_ccache_compatibility_id" { print $2 }' "$output_file")
-          ccache_compiler_check=$(awk -F= '$1 == "cross_ccache_compiler_check" { print $2 }' "$output_file")
-          # Empty manifest values could coalesce caches from incompatible
-          # toolchains, so reject them before constructing any cache key.
-          if [ -z "$ccache_compatibility_id" ] || [ -z "$ccache_compiler_check" ]; then
-            echo "ARMHF image verification returned incomplete ccache identity" >&2
-            exit 1
-          fi
-          {
-            echo "generation=$cross_generation"
-            echo "recipe_match=$recipe_match"
-            echo "ccache_compatibility_id=$ccache_compatibility_id"
-            echo "ccache_compiler_check=$ccache_compiler_check"
-          } >> "$GITHUB_OUTPUT"
+          echo "Qt audio plugins bundled:"
+          echo "$audio_plugins"
+          rm -rf squashfs-root
 
-      - name: Select armhf ccache key
-        id: ccache-key
-        env:
-          RECACHE: ${{ inputs.recache }}
-        run: .github/scripts/select-ccache-key-suffix.sh
-
-      - name: Restore armhf ccache
-        id: ccache
-        uses: actions/cache/restore@v6
-        with:
-          path: .ccache-armhf
-          key: ccache-linux-armhf-${{ steps.image.outputs.ccache_compatibility_id }}-${{ steps.image.outputs.generation }}-${{ github.sha }}${{ steps.ccache-key.outputs.suffix }}
-          restore-keys: |
-            ccache-linux-armhf-${{ steps.image.outputs.ccache_compatibility_id }}-${{ steps.image.outputs.generation }}-
-            ccache-linux-armhf-${{ steps.image.outputs.ccache_compatibility_id }}-
-
-      - name: Cross-build ARMHF binaries
-        env:
-          ARCH: armhf
-          CROSS_BUILDER_IMAGE: ${{ needs.resolve-image.outputs.cross_image_reference }}
-          RECACHE: ${{ inputs.recache }}
-          CCACHE_COMPILERCHECK: ${{ steps.image.outputs.ccache_compiler_check }}
-          WSJTX_CI_IMAGE_ALLOW_RECIPE_MISMATCH: ${{ inputs.allow_stale_image }}
-        run: |
-          ccache_args=()
-          if [ "$RECACHE" = true ]; then
-            ccache_args=(-e CCACHE_RECACHE=1)
-          fi
-          docker run --rm --platform linux/amd64 \
-            -v "${GITHUB_WORKSPACE}:/work" \
-            -w /work \
-            -e VERSION \
-            -e HAMLIB_BRANCH \
-            -e ARCH \
-            -e WSJT_RELEASE_CHANNEL \
-            -e WSJT_RC_NUMBER \
-            -e CCACHE_DIR=/work/.ccache-armhf \
-            -e CCACHE_COMPILERCHECK \
-            -e WSJTX_CI_IMAGE_ALLOW_RECIPE_MISMATCH \
-            "${ccache_args[@]}" \
-            "$CROSS_BUILDER_IMAGE" \
-            bash .github/scripts/build-linux-armhf-cross.sh
-
-      - name: Test and package under ARMv7 QEMU
-        id: armhf-runtime
-        env:
-          ARCH: armhf
-          RUNTIME_IMAGE: ${{ needs.resolve-image.outputs.image_reference }}
-          WSJTX_CI_IMAGE_ALLOW_RECIPE_MISMATCH: ${{ inputs.allow_stale_image }}
-          ARMHF_RUNTIME_PHASE: ${{ inputs.build_packages && 'all' || 'test' }}
-        run: |
-          GITHUB_TOKEN="${{ github.token }}" docker run --rm --platform linux/arm/v7 \
-            -v "${GITHUB_WORKSPACE}:/work" \
-            -w /work \
-            -e VERSION \
-            -e HAMLIB_BRANCH \
-            -e ARCH \
-            -e WSJT_RELEASE_CHANNEL \
-            -e WSJT_RC_NUMBER \
-            -e GITHUB_TOKEN \
-            -e ARMHF_RUNTIME_PHASE \
-            -e WSJTX_CI_IMAGE_ALLOW_RECIPE_MISMATCH \
-            "$RUNTIME_IMAGE" \
-            bash .github/scripts/validate-linux-armhf-runtime.sh
-
-      - name: Publish armhf test summary
-        if: always()
-        run: >-
-          python3 .github/scripts/publish-ctest-summary.py
-          "Linux armhf" wsjtx-build/ctest-results.xml
-          >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload armhf AppImage startup diagnostics
-        if: inputs.build_packages && failure() && steps.armhf-runtime.outcome == 'failure'
+      - name: Upload AppImage
         uses: actions/upload-artifact@v7
         with:
           name: K4-WSJT-X-${{ inputs.version }}-linux-${{ inputs.arch }}-AppImage
           path: K4-WSJT-X-${{ inputs.version }}-linux-${{ inputs.arch }}.AppImage
           if-no-files-found: error
-          compression-level: 0
-      - name: Upload RPM
-        if: inputs.build_packages
+
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:
           name: K4-WSJT-X-${{ inputs.version }}-linux-${{ inputs.arch }}
@@ -690,21 +322,3 @@ jobs:
             wsjtx-build/jt9
             wsjtx-build/wsprd
             wsjtx-build/wsjtx
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: ctest-results-linux-armhf
-          path: wsjtx-build/ctest-results.xml
-          if-no-files-found: ignore
-
-      - name: Report suppressed armhf ccache save
-        if: inputs.save_ccache && steps.image.outputs.recipe_match != 'true'
-        run: echo "::notice::Not saving armhf ccache because this build used a stale Linux CI image recipe"
-
-      - name: Save armhf ccache
-        if: inputs.save_ccache && steps.image.outputs.recipe_match == 'true' && steps.ccache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
-        with:
-          path: .ccache-armhf
-          key: ${{ steps.ccache.outputs.cache-primary-key }}

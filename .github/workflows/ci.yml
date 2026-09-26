@@ -43,8 +43,6 @@ jobs:
       version: ${{ steps.v.outputs.version }}
       release_channel: ${{ steps.v.outputs.release_channel }}
       rc_number: ${{ steps.v.outputs.rc_number }}
-      linux_image_tag: ${{ steps.linux-image.outputs.image_tag }}
-      armhf_image_tag: ${{ steps.armhf-image.outputs.image_tag }}
       save_linux_ccache: ${{ steps.ccache-policy.outputs.save_ccache }}
       build_linux_packages: ${{ steps.packaging-policy.outputs.build_packages }}
     steps:
@@ -67,6 +65,9 @@ jobs:
           VERSION=$(jq -r .version <<<"$STATE")
           CHANNEL=$(jq -r .channel <<<"$STATE")
           RC_NUMBER=$(jq -r .rc <<<"$STATE")
+          if [[ "$CHANNEL" == "RC" ]]; then
+            VERSION="${VERSION}-rc${RC_NUMBER}"
+          fi
           echo "Derived version from release-state.txt: $VERSION"
           {
             echo "version=$VERSION"
@@ -90,26 +91,6 @@ jobs:
           CURRENT_SHA: ${{ github.sha }}
           FULL_CI: ${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}
         run: .github/scripts/select-linux-packaging.sh
-      - id: linux-image
-        name: Resolve Linux CI image generation
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: .github/scripts/resolve-linux-ci-image-tag.py
-      - id: armhf-image
-        name: Resolve ARMHF CI image generation
-        if: >-
-          github.event_name == 'workflow_dispatch' ||
-          contains(github.event.pull_request.labels.*.name, 'full-ci')
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REQUESTED_TAG: ${{ inputs.armhf_image_tag || '' }}
-        run: |
-          if [[ -n "$REQUESTED_TAG" ]]; then
-            echo "Using requested ARMHF CI image generation: $REQUESTED_TAG"
-            echo "image_tag=$REQUESTED_TAG" >> "$GITHUB_OUTPUT"
-          else
-            RESOLVE_ARMHF=true .github/scripts/resolve-linux-ci-image-tag.py
-          fi
 
   # Two-tier CI to conserve Actions minutes. The default path runs one Linux
   # x86_64 smoke leg; sanitizer and broader platform coverage are opt-in.
@@ -167,12 +148,6 @@ jobs:
       version: ${{ needs.prepare.outputs.version }}
       hamlib_branch: "4.7.2"
       arch: "x86_64"
-      image_tag: ${{ needs.prepare.outputs.linux_image_tag }}
-      allow_stale_image: true
-      recache: ${{ inputs.recache || false }}
-      save_ccache: ${{ needs.prepare.outputs.save_linux_ccache == 'true' }}
-      validate_fortran_fallback: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
-      build_packages: ${{ needs.prepare.outputs.build_linux_packages == 'true' }}
       release_channel: ${{ needs.prepare.outputs.release_channel }}
       rc_number: ${{ needs.prepare.outputs.rc_number }}
     secrets: inherit
@@ -187,7 +162,7 @@ jobs:
     with:
       hamlib_branch: "4.7.2"
       sanitizer: asan-ubsan
-      image_tag: ${{ needs.prepare.outputs.linux_image_tag }}
+      image_tag: ""
       allow_stale_image: true
       recache: ${{ inputs.recache || false }}
       advisory: true
@@ -214,31 +189,6 @@ jobs:
       version: ${{ needs.prepare.outputs.version }}
       hamlib_branch: "4.7.2"
       arch: "aarch64"
-      image_tag: ${{ needs.prepare.outputs.linux_image_tag }}
-      allow_stale_image: true
-      recache: ${{ inputs.recache || false }}
-      save_ccache: ${{ needs.prepare.outputs.save_linux_ccache == 'true' }}
-      build_packages: ${{ needs.prepare.outputs.build_linux_packages == 'true' }}
-      release_channel: ${{ needs.prepare.outputs.release_channel }}
-      rc_number: ${{ needs.prepare.outputs.rc_number }}
-    secrets: inherit
-
-  linux-armhf:
-    needs: [prepare, linux]
-    # Opt-in only -- target tests and runtime validation execute under QEMU.
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      contains(github.event.pull_request.labels.*.name, 'full-ci')
-    uses: ./.github/workflows/build-linux.yml
-    with:
-      version: ${{ needs.prepare.outputs.version }}
-      hamlib_branch: "4.7.2"
-      arch: "armhf"
-      image_tag: ${{ needs.prepare.outputs.armhf_image_tag }}
-      allow_stale_image: true
-      recache: ${{ inputs.recache || false }}
-      save_ccache: ${{ needs.prepare.outputs.save_linux_ccache == 'true' }}
-      build_packages: ${{ needs.prepare.outputs.build_linux_packages == 'true' }}
       release_channel: ${{ needs.prepare.outputs.release_channel }}
       rc_number: ${{ needs.prepare.outputs.rc_number }}
     secrets: inherit
