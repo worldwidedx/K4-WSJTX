@@ -209,6 +209,8 @@
 #include "item_delegates/FrequencyDeltaDelegate.hpp"
 #include "item_delegates/MessageItemDelegate.hpp"
 #include "Transceiver/TransceiverFactory.hpp"
+#include "Transceiver/TransceiverBase.hpp"
+#include <mutex>
 #include "Transceiver/Transceiver.hpp"
 #include "Transceiver/K4RemoteProtocol.hpp"
 #include "Transceiver/K4RemoteTxGuard.hpp"
@@ -2889,6 +2891,10 @@ Configuration::impl::~impl ()
 {
   {
     PerformanceTrace::Phase transceiver_thread {"transceiver_thread.shutdown"};
+    // K4 startup runs a nested event loop. Ask it to exit, then wait until
+    // start() has unwound before QThread::finished can delete the rig.
+    transceiver_thread_->requestInterruption ();
+    std::lock_guard<std::recursive_mutex> startup_guard {TransceiverBase::startup_mutex ()};
     transceiver_thread_->quit ();
     transceiver_thread_->wait ();
   }

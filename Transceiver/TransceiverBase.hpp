@@ -2,6 +2,7 @@
 #define TRANSCEIVER_BASE_HPP__
 
 #include <stdexcept>
+#include <mutex>
 
 #include <QString>
 
@@ -75,6 +76,10 @@ public:
   void set (TransceiverState const&,
             unsigned sequence_number) noexcept override final;
   void stop () noexcept override final;
+
+  // Shutdown must not end the worker thread while start() is inside a
+  // transport's nested connection event loop.
+  static std::recursive_mutex& startup_mutex ();
 
   //
   // Query operations

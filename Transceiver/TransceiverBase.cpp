@@ -14,8 +14,17 @@ namespace
   auto const unexpected = TransceiverBase::tr ("Unexpected rig error");
 }
 
+std::recursive_mutex& TransceiverBase::startup_mutex ()
+{
+  static std::recursive_mutex mutex;
+  return mutex;
+}
+
 void TransceiverBase::start (unsigned sequence_number) noexcept
 {
+  if (QThread::currentThread ()->isInterruptionRequested ()) return;
+  std::lock_guard<std::recursive_mutex> startup_guard {startup_mutex ()};
+  if (QThread::currentThread ()->isInterruptionRequested ()) return;
   CAT_TRACE ("#: " << sequence_number);
 
   QString message;

@@ -14,6 +14,7 @@
 #include <QSslCipher>
 #include <QSslConfiguration>
 #include <QSslPreSharedKeyAuthenticator>
+#include <QThread>
 
 #include "commons.h"
 #include "moc_K4RemoteTransceiver.cpp"
@@ -122,6 +123,8 @@ int K4RemoteTransceiver::frame_samples_for_latency(int latency) {
 }
 
 int K4RemoteTransceiver::do_start() {
+  if (QThread::currentThread()->isInterruptionRequested())
+    throw error{tr("K4 remote connection cancelled during shutdown.")};
   if (socket_->thread() != thread() || parser_->thread() != thread() ||
       tx_timer_->thread() != thread() || guard_timer_->thread() != thread() ||
       keepalive_timer_->thread() != thread())
@@ -156,16 +159,29 @@ int K4RemoteTransceiver::do_start() {
   QTimer timeout;
   timeout.setSingleShot(true);
   connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+  QTimer cancellation_timer;
+  cancellation_timer.setInterval(25);
+  connect(&cancellation_timer, &QTimer::timeout, &loop, [&loop] {
+    if (QThread::currentThread()->isInterruptionRequested())
+      loop.quit();
+  });
   startup_loop_ = &loop;
   connect_socket();
   timeout.start(connection_timeout_ms);
+  cancellation_timer.start();
   loop.exec();
   startup_loop_ = nullptr;
+  cancellation_timer.stop();
   if (host_lookup_id_ >= 0) {
     QHostInfo::abortHostLookup(host_lookup_id_);
     host_lookup_id_ = -1;
   }
 
+  if (QThread::currentThread()->isInterruptionRequested()) {
+    keepalive_timer_->stop();
+    socket_->abort();
+    throw error{tr("K4 remote connection cancelled during shutdown.")};
+  }
   if (!authenticated_) {
     keepalive_timer_->stop();
     socket_->abort();
