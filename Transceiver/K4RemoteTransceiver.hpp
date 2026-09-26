@@ -12,6 +12,7 @@
 #include "K4RemoteProtocol.hpp"
 #include "K4RemoteTxGuard.hpp"
 #include "../Audio/TxAudioQueue.hpp"
+#include "ReceiveAudio.hpp"
 #include "PollingTransceiver.hpp"
 #include "TransceiverFactory.hpp"
 
@@ -151,6 +152,7 @@ private:
   qint32 block_size_{3456};
   qint64 samples_since_signal_{0};
   unsigned last_period_ms_{999999};
+  ReceiveAudioProducer receive_audio_producer_;
   qreal rx_volume_{0.};
   qreal tx_volume_{0.}; // K4 RF-power setpoint in watts, not audio attenuation.
 

@@ -41,6 +41,7 @@ add_test(NAME k4_remote_tests COMMAND k4_remote_tests)
 
 add_executable(k4_remote_transport_tests
   tst_k4transport.cpp
+  ../../DecDataMutex.cpp
   ../../Audio/TxAudioQueue.cpp
   ../../Modulator/JttyPcmFifo.cpp
   ../../Transceiver/Transceiver.cpp

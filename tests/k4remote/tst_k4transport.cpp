@@ -80,6 +80,35 @@ private slots:
         QTest::newRow(qPrintable(QString("%1-EM%2").arg(mode).arg(encoding)))
           << mode << encoding << (encoding == 3 ? 7 : encoding == 2 ? 3 : 0);
   }
+  void receive_audio_reaches_32_pipeline() {
+    FakeK4 radio;
+    QVERIFY(radio.server.listen(QHostAddress::LocalHost));
+    K4RemoteTransceiver rig(nullptr, "127.0.0.1", radio.server.serverPort(),
+                            "test", false, "", 1, 0, 0.03125f, false, "", 1);
+    QList<ReceiveAudio> blocks;
+    connect(&rig, &Transceiver::receiveAudio, this,
+            [&](ReceiveAudio block) { blocks.append(std::move(block)); });
+    rig.start(1);
+    QTRY_VERIFY(rig.state().frequency() != 0);
+    auto request = rig.state();
+    request.blocksize(240);
+    request.audio(true);
+    rig.set(request, 2);
+
+    QByteArray stereo(240 * 2 * int(sizeof(qint16)), '\0');
+    for (int i = 0; i != 240; ++i) {
+      auto *sample = reinterpret_cast<uchar *>(stereo.data() + i * 4);
+      qToLittleEndian<qint16>(300, sample);
+      qToLittleEndian<qint16>(300, sample + 2);
+    }
+    radio.client->write(K4RemoteProtocol::build_audio_packet(stereo, 0, 1, 240));
+    QTRY_VERIFY(!blocks.isEmpty());
+    QCOMPARE(blocks.first()->start, 0);
+    QCOMPARE(blocks.first()->end(), 240);
+    QCOMPARE(blocks.first()->samples.front(), short(4800));
+    QVERIFY(blocks.first()->epoch != 0);
+    rig.stop();
+  }
   void transmit() {
     QFETCH(QString, mode);
     QFETCH(int, encoding);

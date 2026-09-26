@@ -19,8 +19,6 @@
 #include "moc_K4RemoteTransceiver.cpp"
 #include "widgets/itoneAndicw.h"
 
-extern dec_data dec_data;
-
 namespace {
 constexpr double two_pi{6.283185307179586476925286766559};
 constexpr int sample_rate{12000};
@@ -146,6 +144,12 @@ int K4RemoteTransceiver::do_start() {
   have_data_mode_readback_ = false;
   initial_mode_captured_ = false;
   connection_error_.clear();
+  {
+    QMutexLocker lock{&dec_data_mutex()};
+    receive_audio_producer_.reset(period_);
+    samples_since_signal_ = 0;
+    last_period_ms_ = 999999;
+  }
   parser_->clear();
   codec_.reset();
   QEventLoop loop;
@@ -597,13 +601,21 @@ void K4RemoteTransceiver::do_stop() {
 void K4RemoteTransceiver::do_audio(bool on) {
   audio_enabled_ = on;
   if (on) {
-    dec_data.params.kin = 0;
+    QMutexLocker lock{&dec_data_mutex()};
+    receive_audio_producer_.reset(period_);
     samples_since_signal_ = 0;
     last_period_ms_ = 999999;
   }
 }
 void K4RemoteTransceiver::do_period(double value) {
-  period_ = value > 0. ? value : 15.;
+  auto const next = value > 0. ? value : 15.;
+  if (period_ != next) {
+    QMutexLocker lock{&dec_data_mutex()};
+    period_ = next;
+    receive_audio_producer_.reset(period_);
+    samples_since_signal_ = 0;
+    last_period_ms_ = 999999;
+  }
 }
 void K4RemoteTransceiver::do_blocksize(qint32 value) {
   block_size_ = qMax(1, value);
@@ -637,37 +649,50 @@ void K4RemoteTransceiver::audio_received(QByteArray const &payload) {
 void K4RemoteTransceiver::write_rx_audio(QByteArray const &pcm) {
   auto const *samples = reinterpret_cast<qint16 const *>(pcm.constData());
   auto count = pcm.size() / static_cast<int>(sizeof(qint16));
-  auto const capacity = int(sizeof(dec_data.d2) / sizeof(dec_data.d2[0]));
-  // dec_data is shared with the decoder thread. Never trust a concurrently
-  // reset or stale index as a destination pointer.
-  if (dec_data.params.kin < 0 || dec_data.params.kin > capacity) {
-    dec_data.params.kin = 0;
-    samples_since_signal_ = 0;
-  }
-  auto const ms = static_cast<unsigned>(QDateTime::currentMSecsSinceEpoch() %
-                                        qint64(qMax(1., period_) * 1000.));
-  if (ms < last_period_ms_ / 2) {
-    dec_data.params.kin = 0;
-    samples_since_signal_ = 0;
-  }
-  last_period_ms_ = ms;
-
-  int consumed = 0;
-  while (consumed < count && dec_data.params.kin < capacity) {
-    auto const until_signal = block_size_ - int(samples_since_signal_);
-    auto const accepted =
-        qMin(count - consumed,
-             qMin(capacity - dec_data.params.kin, qMax(1, until_signal)));
-    std::memcpy(&dec_data.d2[dec_data.params.kin], samples + consumed,
-                accepted * sizeof(qint16));
-    consumed += accepted;
-    dec_data.params.kin += accepted;
-    samples_since_signal_ += accepted;
-    if (samples_since_signal_ >= block_size_) {
+  QVector<ReceiveAudio> blocks;
+  QVector<qint64> frame_counts;
+  {
+    QMutexLocker lock{&dec_data_mutex()};
+    if (dec_data_input_blocked()) return;
+    auto &producer = receive_audio_producer_.data();
+    auto const capacity = int(sizeof(producer.d2) / sizeof(producer.d2[0]));
+    if (receive_audio_producer_.frames() < 0 ||
+        receive_audio_producer_.frames() > capacity) {
+      receive_audio_producer_.reset(period_);
       samples_since_signal_ = 0;
-      Q_EMIT tciframeswritten(dec_data.params.kin);
+    }
+    auto const ms = static_cast<unsigned>(QDateTime::currentMSecsSinceEpoch() %
+                                          qint64(qMax(1., period_) * 1000.));
+    if (ms < last_period_ms_ / 2) {
+      receive_audio_producer_.reset(period_);
+      samples_since_signal_ = 0;
+    }
+    last_period_ms_ = ms;
+
+    int consumed = 0;
+    while (consumed < count && receive_audio_producer_.frames() < capacity) {
+      auto const until_signal = block_size_ - int(samples_since_signal_);
+      auto const accepted =
+          qMin(count - consumed,
+               qMin(capacity - receive_audio_producer_.frames(),
+                    qMax(1, until_signal)));
+      std::memcpy(&producer.d2[receive_audio_producer_.frames()],
+                  samples + consumed, accepted * sizeof(qint16));
+      consumed += accepted;
+      receive_audio_producer_.setFrames(receive_audio_producer_.frames() + accepted);
+      samples_since_signal_ += accepted;
+      if (samples_since_signal_ >= block_size_) {
+        samples_since_signal_ = 0;
+        frame_counts.append(receive_audio_producer_.frames());
+        blocks.append(receive_audio_producer_.capture(
+            receive_audio_producer_.frames(), period_));
+      }
     }
   }
+  for (auto frames : frame_counts)
+    Q_EMIT tciframeswritten(frames);
+  for (auto const &block : blocks)
+    Q_EMIT receiveAudio(block);
 }
 
 void K4RemoteTransceiver::do_tune(bool on) {
