@@ -291,14 +291,14 @@ jobs:
           path: |
             openssl-prefix
             opus-prefix
-          key: k4-runtimes-${{ inputs.arch }}-openssl-3.5.8-opus-1.5.2-${{ hashFiles('.github/scripts/build-openssl-macos.sh', '.github/scripts/build-opus-macos.sh') }}
+          key: k4-runtimes-${{ inputs.arch }}-openssl-3.6.4-opus-1.5.2-${{ hashFiles('.github/scripts/build-openssl-macos.sh', '.github/scripts/build-opus-macos.sh') }}
 
       - name: Build K4 TLS and Opus runtimes
         if: steps.k4-runtimes.outputs.cache-hit != 'true'
         run: |
           .github/scripts/build-openssl-macos.sh \
-            3.5.8 \
-            a8f84a39918ec6415ce765d9b429d313ba97b8143169c172e734b9514464f5b2 \
+            3.6.4 \
+            9bffaa1ad1e07b354c21bd3324ec02fa15579f45a7d0494b3e74bc449b7333ef \
             "${{ inputs.deployment_target }}" \
             "${{ inputs.arch }}" \
             "${GITHUB_WORKSPACE}/openssl-prefix"
@@ -643,7 +643,7 @@ jobs:
       - name: Run tests
         id: ctest
         run: |
-          export DYLD_LIBRARY_PATH="$(brew --prefix openssl@3)/lib:${GITHUB_WORKSPACE}/opus-prefix/lib"
+          export DYLD_LIBRARY_PATH="${GITHUB_WORKSPACE}/openssl-prefix/lib:${GITHUB_WORKSPACE}/opus-prefix/lib"
           ctest --parallel 3 --output-on-failure --output-junit ctest-results.xml
         working-directory: wsjtx-build
 
@@ -787,7 +787,7 @@ jobs:
           APP="${{ steps.collect.outputs.stage_dir }}/wsjtx.app"
           FRAMEWORKS="${APP}/Contents/Frameworks"
           mkdir -p "$FRAMEWORKS"
-          OPENSSL_LIB="$(brew --prefix openssl@3)/lib"
+          OPENSSL_LIB="${GITHUB_WORKSPACE}/openssl-prefix/lib"
           cp "${OPENSSL_LIB}/libssl.3.dylib" "$FRAMEWORKS/"
           cp "${OPENSSL_LIB}/libcrypto.3.dylib" "$FRAMEWORKS/"
           cp "${GITHUB_WORKSPACE}/opus-prefix/lib/libopus.0.dylib" "$FRAMEWORKS/"
