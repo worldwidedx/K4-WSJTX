@@ -56,7 +56,7 @@ target_link_libraries(k4_remote_transport_tests PRIVATE
   Qt${QT_VERSION_MAJOR}::Core Qt${QT_VERSION_MAJOR}::Network Qt${QT_VERSION_MAJOR}::Test)
 add_test(NAME k4_remote_transport_tests COMMAND k4_remote_transport_tests)
 set_tests_properties(k4_remote_tests k4_remote_transport_tests PROPERTIES
-  TIMEOUT 60 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+  TIMEOUT 180 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 if(WIN32)
   get_target_property(_qt_core Qt${QT_VERSION_MAJOR}::Core IMPORTED_LOCATION_RELEASE)

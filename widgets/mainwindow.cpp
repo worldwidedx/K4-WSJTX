@@ -1648,7 +1648,7 @@ MainWindow::MainWindow(QDir const& temp_directory, bool multiple,
   // to turn off split on the rig e.g. WSPR
   {
     PerformanceTrace::Phase rig_start {m_startup_trace_run, "rig.start_request"};
-    m_config.transceiver_online ();
+    if (!m_automated_test) m_config.transceiver_online ();
   }
   bool vhf {m_config.enable_VHF_features ()};
 
@@ -3467,7 +3467,7 @@ void MainWindow::on_actionSettings_triggered()           // Setup Dialog (Settin
       VHF_features_enabled(b);
     }
 
-    m_config.transceiver_online ();
+    if (!m_automated_test) m_config.transceiver_online ();
     sync_tci_tx_volume (true);
     if(!m_bFastMode) setXIT (ui->TxFreqSpinBox->value ());
     if ((m_config.single_decode () && !m_mode.startsWith ("FST4")) || m_mode=="JT4") {
