@@ -49,7 +49,7 @@ jobs:
             autoconf automake libtool pkg-config \
             texinfo \
             dpkg-dev fakeroot \
-            asciidoctor \
+            asciidoctor gdb \
             rpm
 
       - name: Cache pFUnit
@@ -129,6 +129,17 @@ jobs:
         working-directory: wsjtx-build
         env:
           QT_QPA_PLATFORM: offscreen
+
+      - name: Diagnose Linux startup crash
+        if: failure() && steps.ctest.outcome == 'failure'
+        env:
+          QT_QPA_PLATFORM: offscreen
+          XDG_CONFIG_HOME: ${{ github.workspace }}/wsjtx-build/Testing/Startup/test_wsjtx_startup/config
+          XDG_DATA_HOME: ${{ github.workspace }}/wsjtx-build/Testing/Startup/test_wsjtx_startup/data
+          XDG_CACHE_HOME: ${{ github.workspace }}/wsjtx-build/Testing/Startup/test_wsjtx_startup/cache
+        run: |
+          gdb -batch -ex run -ex 'thread apply all bt 12' --args \
+            wsjtx-build/wsjtx --startup-smoke-test --rig-name CTEST-STARTUP
 
       - name: Publish test summary
         if: always() && steps.ctest.conclusion != 'skipped'

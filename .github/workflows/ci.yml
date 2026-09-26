@@ -98,7 +98,7 @@ jobs:
   # starts, instead of burning them in parallel. `prepare` stays in `needs`
   # for its version output.
   macos:
-    needs: [prepare, linux]
+    needs: [prepare]
     # Opt-in only -- see the two-tier note above.
     if: >-
       github.event_name == 'workflow_dispatch' ||
@@ -115,7 +115,7 @@ jobs:
       rc_number: ${{ needs.prepare.outputs.rc_number }}
 
   macos-intel:
-    needs: [prepare, linux]
+    needs: [prepare]
     # Opt-in only -- see the two-tier note above.
     if: >-
       github.event_name == 'workflow_dispatch' ||
@@ -169,7 +169,7 @@ jobs:
       advisory: true
 
   linux-arm:
-    needs: [prepare, linux]
+    needs: [prepare]
     # Opt-in only -- see the two-tier note above.
     if: >-
       github.event_name == 'workflow_dispatch' ||
@@ -184,7 +184,7 @@ jobs:
     secrets: inherit
 
   windows:
-    needs: [prepare, linux]
+    needs: [prepare]
     # Opt-in only -- see the two-tier note above.
     if: >-
       github.event_name == 'workflow_dispatch' ||
