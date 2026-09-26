@@ -22,6 +22,11 @@ on:
         required: false
         type: string
         default: ""
+      diagnose_linux:
+        description: "Run Linux only to validate K4 startup and packaging"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
@@ -101,8 +106,9 @@ jobs:
     needs: [prepare]
     # Opt-in only -- see the two-tier note above.
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      contains(github.event.pull_request.labels.*.name, 'full-ci')
+      !inputs.diagnose_linux &&
+      (github.event_name == 'workflow_dispatch' ||
+       contains(github.event.pull_request.labels.*.name, 'full-ci'))
     uses: ./.github/workflows/build-macos.yml
     with:
       version: ${{ needs.prepare.outputs.version }}
@@ -118,8 +124,9 @@ jobs:
     needs: [prepare]
     # Opt-in only -- see the two-tier note above.
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      contains(github.event.pull_request.labels.*.name, 'full-ci')
+      !inputs.diagnose_linux &&
+      (github.event_name == 'workflow_dispatch' ||
+       contains(github.event.pull_request.labels.*.name, 'full-ci'))
     uses: ./.github/workflows/build-macos.yml
     with:
       version: ${{ needs.prepare.outputs.version }}
@@ -187,8 +194,9 @@ jobs:
     needs: [prepare]
     # Opt-in only -- see the two-tier note above.
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      contains(github.event.pull_request.labels.*.name, 'full-ci')
+      !inputs.diagnose_linux &&
+      (github.event_name == 'workflow_dispatch' ||
+       contains(github.event.pull_request.labels.*.name, 'full-ci'))
     uses: ./.github/workflows/build-windows.yml
     with:
       version: ${{ needs.prepare.outputs.version }}

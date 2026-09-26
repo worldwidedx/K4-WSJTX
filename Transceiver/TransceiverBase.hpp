@@ -102,6 +102,7 @@ protected:
   // These methods may throw exceptions to signal errors.
   virtual int do_start () = 0;  // returns resolution, See Transceiver::resolution
   virtual void do_post_start () {}
+  virtual void cancel_startup () {}
 
   virtual void do_stop () = 0;
   virtual void do_post_stop () {}
@@ -174,6 +175,8 @@ private:
   unsigned last_sequence_number_;    // from set state operation
   bool period_applied_ {false};
   double applied_period_ {0.0};
+  bool start_in_progress_ {false};
+  bool stop_pending_ {false};
 };
 
 // some loggimg macros

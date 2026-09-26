@@ -25,6 +25,8 @@ void TransceiverBase::start (unsigned sequence_number) noexcept
   if (QThread::currentThread ()->isInterruptionRequested ()) return;
   std::lock_guard<std::recursive_mutex> startup_guard {startup_mutex ()};
   if (QThread::currentThread ()->isInterruptionRequested ()) return;
+  if (start_in_progress_) return;
+  start_in_progress_ = true;
   CAT_TRACE ("#: " << sequence_number);
 
   QString message;
@@ -48,6 +50,12 @@ void TransceiverBase::start (unsigned sequence_number) noexcept
   if (!message.isEmpty ())
     {
       offline (message);
+    }
+  start_in_progress_ = false;
+  if (stop_pending_)
+    {
+      stop_pending_ = false;
+      stop ();
     }
 }
 
@@ -277,6 +285,12 @@ void TransceiverBase::shutdown ()
 
 void TransceiverBase::stop () noexcept
 {
+  if (start_in_progress_)
+    {
+      stop_pending_ = true;
+      cancel_startup ();
+      return;
+    }
   CAT_TRACE ("stop");
   QString message;
   try

@@ -41,6 +41,7 @@ public:
 
 protected:
   int do_start() override;
+  void cancel_startup() override;
   void do_stop() override;
   void do_frequency(Frequency, MODE, bool) override;
   void do_tx_frequency(Frequency, MODE, bool) override;
@@ -118,6 +119,7 @@ private:
   QTimer *keepalive_timer_;
   QElapsedTimer clock_;
   QEventLoop *startup_loop_{nullptr};
+  bool startup_cancelled_{false};
   int host_lookup_id_{-1};
   QString connection_error_;
   bool authenticated_{false};

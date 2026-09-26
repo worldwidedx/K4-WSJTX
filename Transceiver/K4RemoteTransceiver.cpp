@@ -123,6 +123,7 @@ int K4RemoteTransceiver::frame_samples_for_latency(int latency) {
 }
 
 int K4RemoteTransceiver::do_start() {
+  startup_cancelled_ = false;
   if (QThread::currentThread()->isInterruptionRequested())
     throw error{tr("K4 remote connection cancelled during shutdown.")};
   if (socket_->thread() != thread() || parser_->thread() != thread() ||
@@ -177,7 +178,7 @@ int K4RemoteTransceiver::do_start() {
     host_lookup_id_ = -1;
   }
 
-  if (QThread::currentThread()->isInterruptionRequested()) {
+  if (startup_cancelled_ || QThread::currentThread()->isInterruptionRequested()) {
     keepalive_timer_->stop();
     socket_->abort();
     throw error{tr("K4 remote connection cancelled during shutdown.")};
@@ -201,6 +202,12 @@ int K4RemoteTransceiver::do_start() {
             : connection_error_};
   }
   return 0; // K4 reports frequency to 1 Hz
+}
+
+void K4RemoteTransceiver::cancel_startup() {
+  startup_cancelled_ = true;
+  if (startup_loop_)
+    startup_loop_->quit();
 }
 
 void K4RemoteTransceiver::connect_socket() {
