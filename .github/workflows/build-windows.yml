@@ -142,6 +142,7 @@ jobs:
             mingw-w64-x86_64-libusb
             mingw-w64-x86_64-portaudio
             mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-osslsigncode
             mingw-w64-x86_64-opus
             mingw-w64-x86_64-pkg-config
             mingw-w64-x86_64-nsis
