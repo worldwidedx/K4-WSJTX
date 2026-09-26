@@ -92,6 +92,13 @@ private slots:
     connect(&rig, &Transceiver::update, this,
             [&ready](Transceiver::TransceiverState const &state, unsigned) { ready = state.ptt(); });
     QSignalSpy errors(&rig, &Transceiver::remote_tx_error);
+    TxEvidence::TxStartSnapshot sourceCommit;
+    bool sourceCommitted = false;
+    connect(&rig, &Transceiver::txSourceCommitted, this,
+            [&](TxEvidence::TxStartSnapshot snapshot) {
+              sourceCommit = snapshot;
+              sourceCommitted = true;
+            });
     rig.start(1);
     QTRY_VERIFY(rig.state().frequency() != 0);
     auto request = rig.state();
@@ -113,7 +120,13 @@ private slots:
     request.synchronize(false);
     request.trperiod(mode == "FT8" ? 15. :
                      mode == "WSPR" ? 120. : 7.5);
+    request.tx_session_id(TxEvidence::TxSessionId{17});
+    request.tx_generation(TxEvidence::TxGeneration{3});
     rig.set(request, 3);
+    QTRY_VERIFY(sourceCommitted);
+    QCOMPARE(sourceCommit.session_id.value(), qint64(17));
+    QCOMPARE(sourceCommit.generation.value(), qint64(3));
+    QCOMPARE(sourceCommit.mode, mode);
     QTRY_VERIFY(radio.audio.size() >= 3);
     QVERIFY(errors.isEmpty());
     auto packet = radio.audio.first();
@@ -149,6 +162,54 @@ private slots:
                       "MSK144", "Echo"})
       QTest::newRow(mode) << QString::fromLatin1(mode)
                           << (QString::fromLatin1(mode) == "MSK144");
+  }
+  void jtty_queue() {
+    FakeK4 radio;
+    QVERIFY(radio.server.listen(QHostAddress::LocalHost));
+    K4RemoteTransceiver rig(nullptr, "127.0.0.1", radio.server.serverPort(),
+                            "test", false, "", 1, 0, 0.03125f, false, "", 1);
+    bool accepted = false;
+    bool drained = false;
+    int source_rate = 0;
+    connect(&rig, &Transceiver::jtty_enqueue_accepted, this,
+            [&](qint64, qint64, TxAudioQueueProgress) { accepted = true; });
+    connect(&rig, &Transceiver::jtty_drained, this,
+            [&](TxAudioQueueDrainState state) { drained = state.ready; });
+    connect(&rig, &Transceiver::txSourceCommitted, this,
+            [&](TxEvidence::TxStartSnapshot source) {
+              source_rate = source.sample_rate_hz;
+            });
+    rig.start(1);
+    QTRY_VERIFY(rig.state().frequency() != 0);
+    TxAudioQueueEpoch const epoch{1};
+    rig.clear_jtty_pcm(epoch);
+    QVector<qint16> pcm(4800);
+    for (int i = 0; i < pcm.size(); ++i)
+      pcm[i] = qint16(20000. * std::sin(6.283185307179586 * 1500. * i / 48000.));
+    QByteArray bytes(reinterpret_cast<char const *>(pcm.constData()),
+                     pcm.size() * int(sizeof(qint16)));
+    rig.enqueue_jtty_pcm(bytes, epoch, 1);
+    QVERIFY(accepted);
+    auto request = rig.state();
+    request.ptt(true);
+    rig.set(request, 2);
+    QTRY_VERIFY(rig.state().ptt());
+    request.tx_audio(true);
+    request.jtmode("JTTY");
+    request.symbolslength(300);
+    request.framespersymbol(384.);
+    request.trfrequency(1500.);
+    request.tonespacing(-2.);
+    request.synchronize(false);
+    request.trperiod(9.6);
+    rig.set(request, 3);
+    QTRY_COMPARE(source_rate, 48000);
+    QTRY_VERIFY(!radio.audio.isEmpty());
+    QTRY_VERIFY_WITH_TIMEOUT(drained, 3000);
+    request.tx_audio(false);
+    request.ptt(false);
+    rig.set(request, 4);
+    rig.stop();
   }
   void other_modes() {
     QFETCH(QString, mode);

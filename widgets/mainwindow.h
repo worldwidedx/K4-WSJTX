@@ -584,6 +584,7 @@ private slots:
   void on_outAttenuation_valueChanged (int);
   void rigOpen ();
   void handle_transceiver_update (Transceiver::TransceiverState const&);
+  void handle_transceiver_closing (bool failed);
   void handle_k4_rf_power_setting (double, bool);
   void handle_transceiver_failure (QString const& reason);
   void handle_leavingSettings();

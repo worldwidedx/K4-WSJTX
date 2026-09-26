@@ -482,6 +482,20 @@ public:
   Q_SIGNAL void transceiver_TCIframesWritten (qint64) const;
   Q_SIGNAL void transceiverReceiveAudio (ReceiveAudio) const;
   Q_SIGNAL void transceiver_TCImodActive (bool) const;
+  Q_SIGNAL void txSourceCommitted (TxEvidence::TxStartSnapshot) const;
+  Q_SIGNAL void rawTxPlayoutSnapshot (TxEvidence::TxRawPlayoutSnapshot) const;
+  Q_SIGNAL void transceiver_jtty_drained (TxAudioQueueDrainState drain) const;
+  Q_SIGNAL void transceiver_jtty_enqueue_accepted (qint64 enqueueId, qint64 sampleCount,
+                                                   TxAudioQueueProgress progress) const;
+  Q_SIGNAL void transceiver_jtty_enqueue_failed (TxAudioQueueEpoch epoch,
+                                                 qint64 enqueueId) const;
+  Q_SIGNAL void tx_inhibit_status_changed (
+    bool supported, bool inhibited, QString const& holder,
+    quint32 hold_rx, quint32 release_rx, quint32 expiries, quint32 invalid) const;
+  Q_SIGNAL void tx_inhibit_command (QString const& controller, quint32 ttl_ms,
+                                    QString const& station) const;
+  Q_SIGNAL void tx_inhibit_invalid (quint64 count) const;
+  Q_SIGNAL void transceiver_closing (bool failed) const;
   Q_SIGNAL void transceiver_rf_power_setting (double value, bool milliwatts) const;
   Q_SIGNAL void leavingSettings (bool) const;
 

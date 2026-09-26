@@ -2,8 +2,8 @@
 
 # Weak Signal Communication Software
 
-> **K4 WSJT-X fork.** This tree is based on the official WSJT-X 3.0.2
-> development line and replaces its selectable radio and sound-card interfaces
+> **K4 WSJT-X fork.** This tree is based on the official WSJT-X 3.2.0-rc1
+> prerelease and replaces its selectable radio and sound-card interfaces
 > with one Elecraft K4 Remote connection. CAT, receive audio, and transmit audio
 > share the K4 framed TCP stream used by QK4 Mobile. Both password-authenticated
 > TCP and TLS 1.2+ with the K4 password as a pre-shared key are supported.

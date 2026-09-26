@@ -230,6 +230,23 @@ if (WIN32)
       "  -DWSJT_ALLOW_MISSING_OPENSSL_RUNTIME_DLLS=ON"
     )
   endif ()
+
+  # K4 remote audio loads Opus dynamically, so the normal dependency scanner
+  # cannot discover the DLL. Ship it beside the application executable.
+  set (_opus_runtime_dlls)
+  foreach (_opus_runtime_dir IN LISTS _openssl_runtime_dirs)
+    file (GLOB _opus_runtime_dlls "${_opus_runtime_dir}/libopus*.dll")
+    if (_opus_runtime_dlls)
+      break ()
+    endif ()
+  endforeach ()
+  if (_opus_runtime_dlls)
+    install (FILES ${_opus_runtime_dlls}
+      DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
+  else ()
+    message (FATAL_ERROR "Opus runtime DLL not found for K4 remote audio. Searched: ${_openssl_runtime_dirs}")
+  endif ()
 endif (WIN32)
 
 #

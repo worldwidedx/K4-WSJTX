@@ -193,25 +193,9 @@ jobs:
           hamlib_branch: ${{ inputs.hamlib_branch }}
           save_caches: ${{ github.event_name != 'pull_request' }}
 
-      - name: Install OmniRig
-        shell: pwsh
-        run: |
-          # Download OmniRig (provides type library embedded in OmniRig.exe for dumpcpp)
-          Invoke-WebRequest -Uri "https://www.dxatlas.com/OmniRig/Files/OmniRig.zip" -OutFile OmniRig.zip
-          Expand-Archive -Path OmniRig.zip -DestinationPath omnirig-extract
-          # Run the installer silently (InnoSetup)
-          $setup = Get-ChildItem -Path omnirig-extract -Filter "*.exe" -Recurse | Select-Object -First 1
-          if (-not $setup) { throw "No installer found in OmniRig.zip" }
-          Start-Process -FilePath $setup.FullName -ArgumentList '/VERYSILENT','/NORESTART' -Wait
-          # Locate the installed OmniRig.exe (embeds the COM type library)
-          $omnirig = Get-ChildItem -Path "C:\Program Files*\Afreet\OmniRig" -Filter "OmniRig.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $omnirig) { throw "OmniRig install failed — OmniRig.exe not found" }
-          echo "OMNIRIG_PATH=$($omnirig.FullName)" >> $env:GITHUB_ENV
-
       - name: Configure build and tests
         run: |
           WORKSPACE=$(cygpath "${GITHUB_WORKSPACE}")
-          OMNIRIG=$(cygpath "${OMNIRIG_PATH}")
           BOOST_PREFIX="${{ steps.windows-deps.outputs.boost_prefix }}"
           HAMLIB_PREFIX="${{ steps.windows-deps.outputs.hamlib_prefix }}"
           cmake -G "MSYS Makefiles" -S . -B wsjtx-build \
@@ -229,7 +213,6 @@ jobs:
             -DBoost_NO_SYSTEM_PATHS=ON \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DOMNIRIG_TYPE_LIB="${OMNIRIG}" \
             -DCMAKE_Fortran_FLAGS="-fallow-argument-mismatch -std=legacy" \
             -DWSJT_SKIP_MANPAGES=ON \
             -DWSJT_ENABLE_TESTS=ON \

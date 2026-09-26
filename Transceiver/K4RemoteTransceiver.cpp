@@ -682,10 +682,8 @@ void K4RemoteTransceiver::do_tune(bool on) {
 }
 
 void K4RemoteTransceiver::do_modulator_start(
-    QString mode, unsigned symbols, double frames_per_symbol, double frequency,
-    double tone_spacing, bool synchronize, bool fast_mode, double,
-    double tr_period) {
-  if (tuning_) {
+    TxEvidence::TxRequest const& request) {
+  if (request.tuning || tuning_) {
     // WSJT-X calls transmit() after Tune's PTT-ready update too. Preserve the
     // continuous tune generator instead of replacing it with a finite message.
     tx_kind_ = TxKind::Tune;
@@ -693,17 +691,18 @@ void K4RemoteTransceiver::do_modulator_start(
     Q_EMIT tci_mod_active(true);
     return;
   }
-  if (!symbols || frames_per_symbol <= 0.)
+  if (!request.symbols_length || request.frames_per_symbol <= 0.)
     throw error{tr("The transmit mode supplied invalid symbol timing.")};
-  tx_mode_ = std::move(mode);
-  tx_symbols_ = symbols;
-  tx_frames_per_symbol_ = frames_per_symbol;
-  tx_frequency_hz_ = frequency;
-  tx_tone_spacing_ = tone_spacing;
-  synchronize_ = synchronize;
-  fast_mode_ = fast_mode;
-  period_ = tr_period;
-  tx_kind_ = TxKind::Message;
+  tx_mode_ = request.mode;
+  tx_symbols_ = request.symbols_length;
+  tx_frames_per_symbol_ = request.frames_per_symbol;
+  tx_frequency_hz_ = request.frequency_hz;
+  tx_tone_spacing_ = request.tone_spacing;
+  synchronize_ = request.synchronize;
+  fast_mode_ = request.fast_mode;
+  period_ = request.tr_period_s;
+  tx_kind_ = request.mode == QStringLiteral("JTTY") ? TxKind::Jtty
+                                                     : TxKind::Message;
   tx_sample_ = 0;
   tx_phase_ = 0.;
   tx_silence_ = 0;
@@ -736,6 +735,37 @@ void K4RemoteTransceiver::do_modulator_start(
   }
   tx_timer_->start();
   Q_EMIT tci_mod_active(true);
+  // WSJT-X 3.2 uses this source commitment to advance beacon TX lifecycle
+  // (including WSPR/FST4W). It confirms generator setup, not RF playback.
+  TxEvidence::TxStartSnapshot source;
+  source.session_id = request.session_id;
+  source.generation = request.generation;
+  source.mode = request.mode;
+  source.sample_rate_hz = request.mode == QStringLiteral("JTTY") ? 48000
+                                                             : sample_rate;
+  source.diagnostic = tr("K4 remote waveform generator started; RF playback unconfirmed");
+  Q_EMIT txSourceCommitted(source);
+}
+
+void K4RemoteTransceiver::enqueue_jtty_pcm(QByteArray const& samples,
+                                             TxAudioQueueEpoch epoch,
+                                             qint64 enqueue_id) noexcept {
+  if (samples.size() < int(sizeof(qint16)) ||
+      samples.size() % int(sizeof(qint16)) != 0) {
+    Q_EMIT jtty_enqueue_failed(epoch, enqueue_id);
+    return;
+  }
+  auto const count = samples.size() / int(sizeof(qint16));
+  auto const pcm = reinterpret_cast<qint16 const *>(samples.constData());
+  auto const result = jtty_audio_queue_.enqueue(pcm, count, epoch);
+  if (result.accepted)
+    Q_EMIT jtty_enqueue_accepted(enqueue_id, count, result.progress);
+  else
+    Q_EMIT jtty_enqueue_failed(epoch, enqueue_id);
+}
+
+void K4RemoteTransceiver::clear_jtty_pcm(TxAudioQueueEpoch epoch) noexcept {
+  jtty_audio_queue_.clear(epoch);
 }
 
 void K4RemoteTransceiver::do_modulator_stop(bool) {
@@ -747,6 +777,18 @@ void K4RemoteTransceiver::do_modulator_stop(bool) {
 
 QVector<qint16> K4RemoteTransceiver::generate_tx_frame(int count) {
   QVector<qint16> result(count, 0);
+  if (tx_kind_ == TxKind::Jtty) {
+    // The 3.2 JTTY encoder supplies already-rendered 48 kHz PCM. Keep
+    // packetizing silence after its last sample until the queue's drain guard
+    // confirms the end of the transmission.
+    for (int i = 0; i != count; ++i) {
+      int sum = 0;
+      for (int j = 0; j != 4; ++j)
+        sum += jtty_audio_queue_.pullSample(24000);
+      result[i] = qint16(sum / 4);
+    }
+    return result;
+  }
   for (int i = 0; i != count; ++i) {
     if (tx_silence_ > 0) {
       --tx_silence_;
@@ -854,6 +896,11 @@ void K4RemoteTransceiver::service_tx() {
   if (message_complete && !samples.isEmpty())
     samples.resize(frame_samples_);
   send_audio(samples);
+  if (tx_kind_ == TxKind::Jtty) {
+    auto const drain = jtty_audio_queue_.takeDrainReady();
+    if (drain.ready)
+      Q_EMIT jtty_drained(drain);
+  }
   if (message_complete)
     do_modulator_stop(false);
 }

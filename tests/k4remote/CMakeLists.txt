@@ -3,7 +3,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   project(k4_remote_tests LANGUAGES CXX)
 endif()
 
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
@@ -41,6 +41,8 @@ add_test(NAME k4_remote_tests COMMAND k4_remote_tests)
 
 add_executable(k4_remote_transport_tests
   tst_k4transport.cpp
+  ../../Audio/TxAudioQueue.cpp
+  ../../Modulator/JttyPcmFifo.cpp
   ../../Transceiver/Transceiver.cpp
   ../../Transceiver/TransceiverBase.cpp
   ../../Transceiver/PollingTransceiver.cpp

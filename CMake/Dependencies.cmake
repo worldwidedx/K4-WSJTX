@@ -136,7 +136,6 @@ endif ()
 
 if (WIN32)
   add_definitions (-DQT_NEEDS_QTMAIN)
-  find_package (Qt5AxContainer REQUIRED)
 endif (WIN32)
 
 #

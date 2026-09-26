@@ -11,6 +11,7 @@
 #include "K4RemoteAudioCodec.hpp"
 #include "K4RemoteProtocol.hpp"
 #include "K4RemoteTxGuard.hpp"
+#include "../Audio/TxAudioQueue.hpp"
 #include "PollingTransceiver.hpp"
 #include "TransceiverFactory.hpp"
 
@@ -34,6 +35,8 @@ public:
 
   void calibrate_remote_input() override;
   void cancel_remote_input_calibration() override;
+  void enqueue_jtty_pcm(QByteArray const&, TxAudioQueueEpoch, qint64) noexcept override;
+  void clear_jtty_pcm(TxAudioQueueEpoch) noexcept override;
 
 protected:
   int do_start() override;
@@ -54,8 +57,7 @@ protected:
   void do_trfrequency(double) override;
   void do_volume(qreal) override;
   void do_txvolume(qreal) override;
-  void do_modulator_start(QString, unsigned, double, double, double, bool, bool,
-                          double, double) override;
+  void do_modulator_start(TxEvidence::TxRequest const&) override;
   void do_modulator_stop(bool) override;
 
 private Q_SLOTS:
@@ -73,7 +75,7 @@ private Q_SLOTS:
   void service_guard();
 
 private:
-  enum class TxKind { None, Message, CwId, Tune, Calibration };
+  enum class TxKind { None, Message, Jtty, CwId, Tune, Calibration };
 
   void connect_socket();
   void connect_resolved_socket(QString const &host);
@@ -172,6 +174,7 @@ private:
   std::shared_ptr<K4RemoteTxControl> tx_control_;
   K4RemoteTxGuard tx_guard_;
   K4RemoteTxAudio tx_audio_;
+  TxAudioQueue jtty_audio_queue_;
   quint64 tx_generation_{0};
   qint64 last_meter_query_{0};
   bool restore_test_mode_{false};

@@ -49,6 +49,10 @@ set (wsjt_qt_CXXSRCS
   Transceiver/HamlibMode.cpp
   Transceiver/HamlibTransceiver.cpp
   Transceiver/TCITransceiver.cpp
+  Transceiver/K4RemoteProtocol.cpp
+  Transceiver/K4RemoteAudioCodec.cpp
+  Transceiver/K4RemoteTxGuard.cpp
+  Transceiver/K4RemoteTransceiver.cpp
   Transceiver/HRDMessage.cpp
   Transceiver/HRDTransceiver.cpp
   Transceiver/DXLabSuiteCommanderTransceiver.cpp
@@ -239,10 +243,6 @@ if (WIN32)
     killbyname.cpp
     )
 
-  set (wsjt_qt_CXXSRCS
-    ${wsjt_qt_CXXSRCS}
-    Transceiver/OmniRigTransceiver.cpp
-    )
 endif (WIN32)
 
 set (wsjt_FSRCS
@@ -878,31 +878,3 @@ endif ()
 
 set_property (SOURCE ${all_C_and_CXXSRCS} APPEND_STRING PROPERTY COMPILE_FLAGS " -include wsjtx_config.h")
 set_property (SOURCE ${all_C_and_CXXSRCS} APPEND PROPERTY OBJECT_DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/wsjtx_config.h)
-
-if (WIN32)
-  # generate the OmniRig COM interface source
-  if (OMNIRIG_TYPE_LIB)
-    # CI / headless build: type library path provided directly. Bypasses
-    # COM registration which is not available in CI. Pass via
-    # -DOMNIRIG_TYPE_LIB=<path-to-OmniRig.tlb>.
-    file (TO_CMAKE_PATH "${OMNIRIG_TYPE_LIB}" AXSERVERSRCS)
-    message (STATUS "Using OmniRig type library: ${AXSERVERSRCS}")
-  else ()
-    # Normal local build: query the COM registry for the type library.
-    find_program (DUMPCPP NAMES dumpcpp-qt5 dumpcpp)
-    if (NOT DUMPCPP)
-      message (FATAL_ERROR "dumpcpp tool not found")
-    endif ()
-    execute_process (
-      COMMAND ${DUMPCPP} -getfile {4FE359C5-A58F-459D-BE95-CA559FB4F270}
-      OUTPUT_VARIABLE AXSERVER
-      OUTPUT_STRIP_TRAILING_WHITESPACE
-      )
-    string (STRIP "${AXSERVER}" AXSERVER)
-    if (NOT AXSERVER)
-      message (FATAL_ERROR "You need to install OmniRig on this computer, or pass -DOMNIRIG_TYPE_LIB=<path>")
-    endif (NOT AXSERVER)
-    string (REPLACE "\"" "" AXSERVER ${AXSERVER})
-    file (TO_CMAKE_PATH ${AXSERVER} AXSERVERSRCS)
-  endif ()
-endif ()

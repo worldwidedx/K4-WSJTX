@@ -254,6 +254,14 @@ public:
   // rig audio data transfer  w3sz tci
   Q_SIGNAL void tci_mod_active (bool);
 
+  // TX evidence and JTTY queue progress required by the 3.2 audio pipeline.
+  Q_SIGNAL void txSourceCommitted (TxEvidence::TxStartSnapshot);
+  Q_SIGNAL void rawTxPlayoutSnapshot (TxEvidence::TxRawPlayoutSnapshot);
+  Q_SIGNAL void jtty_drained (TxAudioQueueDrainState drain);
+  Q_SIGNAL void jtty_enqueue_accepted (qint64 enqueueId, qint64 sampleCount,
+                                       TxAudioQueueProgress progress);
+  Q_SIGNAL void jtty_enqueue_failed (TxAudioQueueEpoch epoch, qint64 enqueueId);
+
   Q_SIGNAL void remote_input_calibration_progress (QString const& message,
                                                    float gain) const;
   Q_SIGNAL void remote_input_calibration_finished (bool success,
