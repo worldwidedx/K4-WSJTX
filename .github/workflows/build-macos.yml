@@ -568,6 +568,8 @@ jobs:
           path: pfunit-prefix
           key: ${{ steps.pfunit-cache.outputs.cache-primary-key }}
 
+      # Upstream GUI fixtures inject local PortAudio devices. K4 Remote is
+      # network-audio-only, so keep startup/K4 transport tests but skip those.
       - name: Configure build and tests
         env:
           PKG_CONFIG_PATH: ${{ github.workspace }}/qt-prefix/lib/pkgconfig:${{ github.workspace }}/boost-prefix/lib/pkgconfig:${{ github.workspace }}/fftw-prefix/lib/pkgconfig:${{ github.workspace }}/libusb-prefix/lib/pkgconfig:${{ github.workspace }}/portaudio-prefix/lib/pkgconfig:${{ github.workspace }}/hamlib-prefix/lib/pkgconfig:${{ github.workspace }}/pfunit-prefix/lib/pkgconfig
@@ -583,7 +585,7 @@ jobs:
             -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ env.DEPLOYMENT_TARGET }} \
             -DWSJT_SKIP_MANPAGES=ON \
             -DWSJT_ENABLE_TESTS=ON \
-            -DWSJT_ENABLE_GUI_SMOKE_TESTS=ON \
+            -DWSJT_ENABLE_GUI_SMOKE_TESTS=OFF \
             -DWSJT_MACOS_LIBGOMP_LIBRARY="${{ steps.fc.outputs.libgomp }}" \
             -DPFUNIT_DIR="${{ steps.pfunit.outputs.dir }}" \
             -DWSJT_SOURCE_REVISION="${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || '' }}" \
