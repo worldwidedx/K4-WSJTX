@@ -22,11 +22,6 @@ on:
         required: false
         type: string
         default: ""
-      diagnose_linux:
-        description: "Run only Linux builds while investigating startup tests"
-        required: false
-        type: boolean
-        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
@@ -106,7 +101,7 @@ jobs:
     needs: [prepare]
     # Opt-in only -- see the two-tier note above.
     if: >-
-      !inputs.diagnose_linux &&
+      !inputs.recache &&
       (github.event_name == 'workflow_dispatch' ||
        contains(github.event.pull_request.labels.*.name, 'full-ci'))
     uses: ./.github/workflows/build-macos.yml
@@ -124,7 +119,7 @@ jobs:
     needs: [prepare]
     # Opt-in only -- see the two-tier note above.
     if: >-
-      !inputs.diagnose_linux &&
+      !inputs.recache &&
       (github.event_name == 'workflow_dispatch' ||
        contains(github.event.pull_request.labels.*.name, 'full-ci'))
     uses: ./.github/workflows/build-macos.yml
@@ -194,7 +189,7 @@ jobs:
     needs: [prepare]
     # Opt-in only -- see the two-tier note above.
     if: >-
-      !inputs.diagnose_linux &&
+      !inputs.recache &&
       (github.event_name == 'workflow_dispatch' ||
        contains(github.event.pull_request.labels.*.name, 'full-ci'))
     uses: ./.github/workflows/build-windows.yml
