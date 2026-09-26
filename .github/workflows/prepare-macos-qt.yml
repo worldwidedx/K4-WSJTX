@@ -19,6 +19,7 @@ on:
 jobs:
   qt-cache-key:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       key: ${{ steps.qt-key.outputs.key }}
     steps:
@@ -36,6 +37,7 @@ jobs:
   prepare:
     needs: qt-cache-key
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 180
     concurrency:
       group: ${{ needs.qt-cache-key.outputs.key }}
       cancel-in-progress: false
