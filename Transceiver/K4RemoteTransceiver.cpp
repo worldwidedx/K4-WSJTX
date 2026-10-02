@@ -60,6 +60,13 @@ K4RemoteTransceiver::K4RemoteTransceiver(
       calibration_radio_context_{std::move(calibration_radio_context)},
       tx_control_{std::make_shared<K4RemoteTxControl>()},
       tx_guard_{tx_control_} {
+  // Migrate the old context: local analog-input controls do not set the
+  // level of audio supplied by this remote stream.
+  auto const saved = calibration_radio_context_.split('|');
+  if (saved.size() == 6 && saved[2].startsWith("LI") &&
+      saved[3].startsWith("MG") && saved[4].startsWith("CP") &&
+      saved[5].startsWith("TE"))
+    calibration_radio_context_ = saved.mid(0, 2).join('|');
   tx_control_->gain.store(std::isfinite(calibrated_gain)
                               ? qBound(K4RemoteTxGuard::minimum_gain,
                                        calibrated_gain,
@@ -411,6 +418,17 @@ void K4RemoteTransceiver::parse_cat_command(QString const &command) {
     tx_equalizer_ = command;
 
   if (command.startsWith("TM")) {
+    // TM carries SWR in tenths; TransceiverState and the existing UI
+    // high-SWR stop use hundredths (250 means 2.5:1).
+    bool valid_meter = command.size() == 14;
+    for (int i = 2; valid_meter && i < command.size(); ++i)
+      valid_meter = command[i] >= QLatin1Char('0') && command[i] <= QLatin1Char('9');
+    if (valid_meter && tx_requested_ && !test_mode_ &&
+        tx_kind_ != TxKind::Calibration) {
+      auto const swr = command.mid(11, 3).toUInt();
+      update_swr(swr >= 10 ? swr * 10 : 0);
+      update_complete();
+    }
     auto const action = tx_guard_.meter(command, clock_.elapsed());
     if (action == K4RemoteTxGuard::Action::Reduced)
       Q_EMIT remote_input_calibration_progress(
@@ -574,6 +592,7 @@ void K4RemoteTransceiver::do_ptt(bool on) {
   } else {
     tx_requested_ = false;
     update_PTT(false);
+    update_swr(0);
     send_cat(QStringLiteral("RX;TM0;"));
     tx_guard_.stop();
     guard_timer_->stop();
@@ -596,6 +615,7 @@ void K4RemoteTransceiver::do_poll() {
 
 void K4RemoteTransceiver::do_stop() {
   tx_requested_ = false;
+  update_swr(0);
   update_PTT(false);
   tx_timer_->stop();
   guard_timer_->stop();
@@ -966,6 +986,7 @@ void K4RemoteTransceiver::service_guard() {
 void K4RemoteTransceiver::stop_tx_for_guard(QString const &reason) {
   tx_requested_ = false;
   update_PTT(false);
+  update_swr(0);
   tx_guard_.stop();
   tx_timer_->stop();
   guard_timer_->stop();
@@ -990,16 +1011,6 @@ void K4RemoteTransceiver::calibrate_remote_input() {
         false, tr("Stop transmitting before calibrating."), 0.f, QString{});
     return;
   }
-  if (radio_input_context().isEmpty()) {
-    send_cat(QStringLiteral("LI;MG;CP;TE;"));
-    Q_EMIT remote_input_calibration_finished(
-        false,
-        tr("K4 input settings are not available yet. Wait for CAT readback and "
-           "try again."),
-        0.f, QString{});
-    return;
-  }
-
   // Capture the current TEST state, then guarantee that calibration cannot
   // radiate. TS1 is restored to TS0 only when this routine enabled it.
   if (!read_test_state()) {
@@ -1102,15 +1113,10 @@ bool K4RemoteTransceiver::set_test_state(bool enabled, int timeout_ms) {
 }
 
 QString K4RemoteTransceiver::radio_input_context() const {
-  if (line_input_.isEmpty() || mic_gain_.isEmpty() || compression_.isEmpty() ||
-      tx_equalizer_.isEmpty())
-    return {};
-  return QStringLiteral("%1:%2|EM%3|%4|%5|%6|%7")
+  // Remote DATA-A audio bypasses the local analog-input controls. Keep
+  // calibration tied to the endpoint and stream encoding instead.
+  return QStringLiteral("%1:%2|EM%3")
       .arg(host_.trimmed().toLower())
       .arg(port_)
-      .arg(encode_mode_)
-      .arg(line_input_)
-      .arg(mic_gain_)
-      .arg(compression_)
-      .arg(tx_equalizer_);
+      .arg(encode_mode_);
 }

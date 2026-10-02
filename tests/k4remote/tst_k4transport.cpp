@@ -338,6 +338,118 @@ private slots:
     QCOMPARE(radio.audio.size(), count);
     rig.stop();
   }
+  void swr_reporting_data() {
+    QTest::addColumn<QByteArray>("meter");
+    QTest::addColumn<unsigned>("expected");
+    QTest::newRow("matched") << QByteArray("TM003000010010;") << 100u;
+    QTest::newRow("stop-boundary") << QByteArray("TM003000010025;") << 250u;
+    QTest::newRow("high-swr") << QByteArray("TM003000010026;") << 260u;
+    QTest::newRow("maximum") << QByteArray("TM003000010999;") << 9990u;
+    QTest::newRow("no-reading") << QByteArray("TM003000010000;") << 0u;
+  }
+  void swr_reporting() {
+    QFETCH(QByteArray, meter);
+    QFETCH(unsigned, expected);
+    FakeK4 radio;
+    radio.meter = meter;
+    QVERIFY(radio.server.listen(QHostAddress::LocalHost));
+    K4RemoteTransceiver rig(nullptr, "127.0.0.1", radio.server.serverPort(),
+                            "test", false, "", 1, 0, 0.03125f, false, "", 1);
+    QList<unsigned> reported;
+    connect(&rig, &Transceiver::update, this,
+            [&](Transceiver::TransceiverState const &state, unsigned) {
+              reported << state.swr();
+            });
+    rig.start(1);
+    QTRY_VERIFY(rig.state().frequency() != 0);
+    auto request = rig.state();
+    request.tune(true);
+    request.ptt(true);
+    rig.set(request, 2);
+    QTRY_VERIFY(radio.audio.size() >= 3);
+    QTRY_COMPARE(rig.state().swr(), expected);
+    QVERIFY(reported.contains(expected));
+    request = rig.state();
+    request.tune(false);
+    request.ptt(false);
+    rig.set(request, 3);
+    QTRY_VERIFY(!radio.transmitting);
+    QCOMPARE(rig.state().swr(), 0u);
+    // A delayed TX meter must not revive a reading after RX.
+    radio.reply("TM003000010099;");
+    QTest::qWait(50);
+    QCOMPARE(rig.state().swr(), 0u);
+    rig.stop();
+  }
+  void high_swr_stop_request_closes_stream() {
+    FakeK4 radio;
+    QVERIFY(radio.server.listen(QHostAddress::LocalHost));
+    K4RemoteTransceiver rig(nullptr, "127.0.0.1", radio.server.serverPort(),
+                            "test", false, "", 1, 0, 0.03125f, false, "", 1);
+    rig.start(1);
+    QTRY_VERIFY(rig.state().frequency() != 0);
+    auto request = rig.state();
+    request.tune(true);
+    request.ptt(true);
+    rig.set(request, 2);
+    QTRY_VERIFY(radio.audio.size() >= 3);
+    radio.reply("TM003000010026;");
+    QTRY_COMPARE(rig.state().swr(), 260u);
+    // Apply the stop request issued by the existing main-window SWR policy.
+    request = rig.state();
+    request.tune(false);
+    request.ptt(false);
+    rig.set(request, 3);
+    QTRY_VERIFY(!radio.transmitting);
+    auto const count = radio.audio.size();
+    QTest::qWait(100);
+    QCOMPARE(radio.audio.size(), count);
+    QVERIFY(radio.commands.contains("RX"));
+    QCOMPARE(rig.state().swr(), 0u);
+    rig.stop();
+  }
+  void saved_calibration_context_data() {
+    QTest::addColumn<QString>("contextSuffix");
+    QTest::addColumn<bool>("sameEndpoint");
+    QTest::addColumn<bool>("retained");
+    QTest::newRow("current-context") << "|EM1" << true << true;
+    QTest::newRow("legacy-context-controls-changed")
+        << "|EM1|LI010|MG010|CP010|TE010" << true << true;
+    QTest::newRow("codec-changed") << "|EM0" << true << false;
+    QTest::newRow("endpoint-changed") << "|EM1" << false << false;
+    QTest::newRow("unknown-context") << "|EM1|unknown" << true << false;
+  }
+  void saved_calibration_context() {
+    QFETCH(QString, contextSuffix);
+    QFETCH(bool, sameEndpoint);
+    QFETCH(bool, retained);
+    FakeK4 radio;
+    QVERIFY(radio.server.listen(QHostAddress::LocalHost));
+    auto context = QString("127.0.0.1:%1").arg(
+        sameEndpoint ? radio.server.serverPort() : 0) + contextSuffix;
+    K4RemoteTransceiver rig(nullptr, "127.0.0.1", radio.server.serverPort(),
+                            "test", false, "", 1, 0, 0.25f, true, context, 1);
+    rig.start(1);
+    QTRY_VERIFY(rig.state().frequency() != 0);
+    auto request = rig.state();
+    request.tune(true);
+    request.ptt(true);
+    rig.set(request, 2);
+    QTRY_VERIFY(radio.audio.size() >= 8);
+    int peak = 0;
+    for (auto const &packet : radio.audio) {
+      // Inspect uncompressed EM1 wire samples directly: the receive decoder
+      // applies its own gain, which is unrelated to transmit calibration.
+      auto pcm = packet.mid(7);
+      for (int i = 0; i + 1 < pcm.size(); i += 2)
+        peak = qMax(peak, std::abs(int(qFromLittleEndian<qint16>(
+            reinterpret_cast<uchar const *>(pcm.constData() + i)))));
+    }
+    QVERIFY(peak > 0);
+    QVERIFY2(retained ? peak > 2000 : peak < 1500,
+             qPrintable(QString("Unexpected audio peak: %1").arg(peak)));
+    rig.stop();
+  }
   void calibration() {
     FakeK4 radio;
     QVERIFY(radio.server.listen(QHostAddress::LocalHost));

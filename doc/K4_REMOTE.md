@@ -97,12 +97,23 @@ The **Calibrate Remote Input** action follows QK4's safety policy:
 6. Stop after 15 seconds if no stable safe value is found, then restore TEST if
    the application enabled it and require `TS0` confirmation.
 
-The saved calibration is bound to the K4 host and port, EM codec, line input,
-mic gain, compression, and TX equalizer readback. A changed context requires a
+The saved calibration is bound to the K4 host and port and EM codec. Local
+line input, mic gain, compression, and TX equalizer readback do not invalidate
+remote-stream calibration. Existing saved contexts retain their calibrated
+gain using the endpoint and codec fields. A changed endpoint or codec requires a
 new calibration for optimized drive. Transmission remains available without
 one and starts at the conservative 1/32 drive level. Every live transmission
 retains fresh-meter and audio-delivery watchdogs plus automatic downward drive
 adjustment; calibration does not turn off live protection.
+
+## High SWR protection
+
+Direct K4 `TM` meter reports feed the existing WSJT-X SWR display and stop
+policy, without Hamlib. Enable both power/SWR reporting and high-SWR checking
+in Settings. SWR above 2.5:1 stops transmission and shows the existing antenna
+warning; exactly 2.5:1 retains the original behavior. The K4 reports tenths,
+which are converted to the hundredths used by WSJT-X. TEST-mode calibration
+does not report an antenna SWR, and readings clear when transmission stops.
 
 ## Operator acceptance test
 

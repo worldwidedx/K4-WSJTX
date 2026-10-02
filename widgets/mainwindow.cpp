@@ -1184,7 +1184,8 @@ MainWindow::MainWindow(QDir const& temp_directory, bool multiple,
       setDecodedTextFont (font);
     });
 
-  setWindowTitle (branded_program_title ());
+  // Preserve the standard window title for companion-app discovery (JTAlert).
+  setWindowTitle (program_title ().replace (QRegularExpression {"^K4 WSJT-X"}, "WSJT-X"));
 
   connect(&proc_jt9, &QProcess::started, this, [this] {
       if (!m_startup_decoder_reported)
