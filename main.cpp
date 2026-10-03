@@ -13,6 +13,7 @@
 #include <QApplication>
 #include <QSharedMemory>
 #include <QProcessEnvironment>
+#include <QProcess>
 #include <QTemporaryFile>
 #include <QDateTime>
 #include <QLocale>
@@ -55,6 +56,7 @@
 //#include "TraceFile.hpp"
 #include "WSJTXLogging.hpp"
 #include "MultiSettings.hpp"
+#include "K4SettingsMigration.hpp"
 #include "widgets/mainwindow.h"
 #include "Audio/AudioInputSource.hpp"
 #include "Audio/soundout.h"
@@ -352,9 +354,9 @@ int main(int argc, char *argv[])
       std::locale::global (std::locale::classic ());
 
       // Override programs executable basename as application name.
-      // Keep this fork's settings, lock files, and writable data separate from
-      // an upstream WSJT-X installation on the same desktop.
-      a.setApplicationName ("K4 WSJT-X");
+      // Use WSJT-X's standard identity for companion-app discovery.
+      // Launch with --rig-name K4 to isolate this fork's settings and data.
+      a.setApplicationName ("WSJT-X");
       a.setApplicationVersion (version ());
 
       QCommandLineParser parser;
@@ -510,6 +512,21 @@ int main(int argc, char *argv[])
           }
       };
       smoke_phase ("command line accepted");
+      // Companion apps inspect the actual process arguments to find named settings.
+      // Relaunch direct/default launches with an explicit name before opening settings.
+      if (!parser.isSet (rig_option) && !parser.isSet (test_option) && !automated_test)
+        {
+          auto arguments = a.arguments ();
+          arguments.removeFirst ();
+          arguments << "--rig-name" << "K4";
+          if (!QProcess::startDetached (a.applicationFilePath (), arguments))
+            {
+              MessageBox::critical_message (nullptr, "Startup error",
+                "Unable to start the K4 instance.");
+              return EXIT_FAILURE;
+            }
+          return EXIT_SUCCESS;
+        }
       QStandardPaths::setTestModeEnabled (parser.isSet (test_option) || automated_test);
 
       // support for multiple instances running from a single installation
@@ -517,6 +534,11 @@ int main(int argc, char *argv[])
       if (parser.isSet (rig_option) || parser.isSet (test_option) || automated_test)
         {
           auto temp_name = parser.value (rig_option);
+          if (parser.isSet (rig_option) && temp_name.isEmpty ())
+            {
+              std::cerr << "Rig name must not be empty" << std::endl;
+              return EXIT_FAILURE;
+            }
           if (!temp_name.isEmpty ())
             {
               if (temp_name.contains (QRegularExpression {R"([\\/,])"}))
@@ -534,6 +556,26 @@ int main(int argc, char *argv[])
             }
 
           multiple = true;
+        }
+
+      // Preserve the legacy K4 profile on first use of the default named instance.
+      // Never import ordinary WSJT-X settings or replace an existing named profile.
+      if (!parser.isSet (test_option) && !automated_test
+          && a.applicationName () == "WSJT-X - K4")
+        {
+          auto const current_name = a.applicationName ();
+          auto const target_directory = QStandardPaths::writableLocation (QStandardPaths::ConfigLocation);
+          auto const target = QDir {target_directory}.absoluteFilePath (current_name + ".ini");
+          a.setApplicationName ("K4 WSJT-X");
+          auto const legacy = QDir {QStandardPaths::writableLocation (QStandardPaths::ConfigLocation)}
+            .absoluteFilePath ("K4 WSJT-X.ini");
+          a.setApplicationName (current_name);
+          if (!migrate_k4_settings (legacy, target))
+            {
+              MessageBox::critical_message (nullptr, "Settings migration error",
+                "Unable to copy your previous K4 settings. Your original settings are preserved.");
+              return EXIT_FAILURE;
+            }
         }
 
       // now we have the application name we can open the logging and settings
