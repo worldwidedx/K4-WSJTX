@@ -383,6 +383,8 @@ private slots:
   }
   void high_swr_stop_request_closes_stream() {
     FakeK4 radio;
+    // Polling must report the same high SWR as the unsolicited meter packet.
+    radio.meter = "TM003000010026;";
     QVERIFY(radio.server.listen(QHostAddress::LocalHost));
     K4RemoteTransceiver rig(nullptr, "127.0.0.1", radio.server.serverPort(),
                             "test", false, "", 1, 0, 0.03125f, false, "", 1);
