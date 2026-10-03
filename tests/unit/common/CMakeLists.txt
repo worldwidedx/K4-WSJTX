@@ -301,3 +301,7 @@ add_test (NAME test_mainwindow_compact_controls_scaled COMMAND test_mainwindow_c
 set_tests_properties (test_mainwindow_compact_controls_scaled PROPERTIES
   ENVIRONMENT "QT_ENABLE_HIGHDPI_SCALING=1;QT_SCALE_FACTOR=1.5"
 )
+
+add_executable (test_k4_settings_migration test_k4_settings_migration.cpp)
+target_link_libraries (test_k4_settings_migration Qt5::Core)
+add_test (NAME test_k4_settings_migration COMMAND test_k4_settings_migration)
