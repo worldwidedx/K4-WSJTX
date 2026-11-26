@@ -33,6 +33,11 @@ on:
         type: choice
         options: [all, windows, macos-arm64, macos-intel, linux-x64, linux-arm64]
         default: all
+      windows_hardware_test:
+        description: "Package a Windows hardware-test installer after the K4-specific tests"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
@@ -215,3 +220,4 @@ jobs:
       recache: ${{ inputs.recache || false }}
       release_channel: ${{ needs.prepare.outputs.release_channel }}
       prerelease_number: ${{ needs.prepare.outputs.prerelease_number }}
+      hardware_test: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'windows' && inputs.windows_hardware_test }}

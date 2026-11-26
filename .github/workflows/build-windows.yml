@@ -3,6 +3,11 @@ name: Build Windows x86_64
 on:
   workflow_call:
     inputs:
+      hardware_test:
+        description: "Run the K4-specific tests before packaging a hardware-test installer"
+        required: false
+        type: boolean
+        default: false
       version:
         description: "K4-WSJT-X version string"
         required: true
@@ -256,7 +261,11 @@ jobs:
           # packaged installer is unaffected: cpack's bundle_fixup copies
           # libhamlib-4.dll in.
           export PATH="${{ steps.windows-deps.outputs.boost_prefix }}/lib:${{ steps.windows-deps.outputs.hamlib_prefix }}/bin:${PATH}"
-          ctest --output-on-failure --output-junit ctest-results.xml
+          test_scope=()
+          if [[ "${{ inputs.hardware_test }}" == "true" ]]; then
+            test_scope=(-R '^(k4_remote_tests|k4_remote_transport_tests|test_k4_settings_migration)$' --no-tests=error)
+          fi
+          ctest --output-on-failure --output-junit ctest-results.xml "${test_scope[@]}"
         working-directory: wsjtx-build
 
       - name: Publish test summary
