@@ -5,6 +5,8 @@ description: Stream Elecraft K4 receive and transmit audio and control your radi
 
 # K4 WSJT-X — Remote FT8 and FT4 for the Elecraft K4
 
+<p>A fork by <a href="https://www.worldwidedx.com/"><img src="https://avatars.githubusercontent.com/u/306803562?v=4&amp;s=48" alt="" width="24" height="24" style="vertical-align: middle; border-radius: 4px" /> WorldwideDX</a></p>
+
 K4 WSJT-X is a desktop app for operating FT8, FT4, and other WSJT-X digital modes with an Elecraft K4 over a network. It streams receive audio from the K4 directly into the waterfall and decoder, sends transmit audio back to the radio, and carries CAT rig control over the same K4 Remote connection. There’s no USB audio cable, virtual sound card, or separate CAT connection to configure.
 
 [Download K4 WSJT-X for Windows, macOS, or Linux](https://github.com/worldwidedx/K4-WSJTX/releases)
