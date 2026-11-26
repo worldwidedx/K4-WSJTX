@@ -775,8 +775,7 @@ void K4RemoteTransceiver::do_modulator_start(
   tx_phase_ = 0.;
   tx_silence_ = 0;
   tx_cw_sample_ = 0;
-  tx_cw_symbols_ = period_ > 16. ? qBound(0, int(icw[0]),
-                                         NUM_CW_SYMBOLS - 1) : 0;
+  tx_cw_id_ = period_ > 16. ? request.cw_id : QVector<int>{};
   tx_cw_gain_ = 0.;
   tx_envelope_ = 1.;
 
@@ -872,7 +871,7 @@ QVector<qint16> K4RemoteTransceiver::generate_tx_frame(int count) {
                                 : tx_sample_ >=
                                       qint64(tx_symbols_ * tx_frames_per_symbol_);
       if (complete) {
-        if (tx_cw_symbols_) {
+        if (!tx_cw_id_.isEmpty()) {
           tx_kind_ = TxKind::CwId;
           tx_phase_ = 0.;
         } else {
@@ -901,12 +900,12 @@ QVector<qint16> K4RemoteTransceiver::generate_tx_frame(int count) {
       }
     }
     if (tx_kind_ == TxKind::CwId) {
-      auto const cw_symbol = tx_cw_sample_ / (2560 / 4) + 1;
-      if (cw_symbol > tx_cw_symbols_) {
+      auto const cw_symbol = tx_cw_sample_ / (2560 / 4);
+      if (cw_symbol >= static_cast<unsigned>(tx_cw_id_.size())) {
         result.resize(i);
         break;
       }
-      auto const target = icw[cw_symbol] ? 1. : 0.;
+      auto const target = tx_cw_id_.at(cw_symbol) ? 1. : 0.;
       tx_cw_gain_ += qBound(-1. / 60., target - tx_cw_gain_, 1. / 60.);
       ++tx_cw_sample_;
     }
