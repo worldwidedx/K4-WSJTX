@@ -1,5 +1,11 @@
 find_package (Qt5Test 5 REQUIRED)
 
+add_executable (test_fftw_runtime dependencies/test_fftw_runtime.c)
+target_include_directories (test_fftw_runtime PRIVATE ${FFTW3_INCLUDE_DIRS})
+target_link_libraries (test_fftw_runtime PRIVATE ${FFTW3_LIBRARIES} ${LIBM_LIBRARIES})
+set (WSJT_FFTW_VERSION "" CACHE STRING "Required FFTW runtime version for official builds")
+add_test (NAME test_fftw_runtime COMMAND test_fftw_runtime "${WSJT_FFTW_VERSION}")
+
 add_test (
   NAME test_release_state
   COMMAND ${CMAKE_COMMAND}
@@ -7,8 +13,24 @@ add_test (
     -D TEST_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}/release-state
     -P ${CMAKE_SOURCE_DIR}/tests/release/test_release_state.cmake)
 
+add_test (
+  NAME test_release_tarballs
+  COMMAND ${CMAKE_COMMAND}
+    -D SOURCE_DIR=${CMAKE_SOURCE_DIR}
+    -D TEST_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}/release-tarballs
+    -P ${CMAKE_SOURCE_DIR}/tests/release/test_release_tarballs.cmake)
+
+get_property (release_configure_depends DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY CMAKE_CONFIGURE_DEPENDS)
+string (REPLACE ";" "|" release_configure_depends "${release_configure_depends}")
+add_test (
+  NAME test_release_state_dependency
+  COMMAND ${CMAKE_COMMAND}
+    -D SOURCE_DIR=${CMAKE_SOURCE_DIR}
+    -D CONFIGURE_DEPENDS=${release_configure_depends}
+    -P ${CMAKE_SOURCE_DIR}/tests/release/test_release_state_dependency.cmake)
+
 find_package (Git QUIET)
-if (GIT_FOUND)
+if (GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
   add_test (
     NAME test_release_git_archive
     COMMAND ${CMAKE_COMMAND}
@@ -17,6 +39,60 @@ if (GIT_FOUND)
       -D GIT_EXECUTABLE=${GIT_EXECUTABLE}
       -P ${CMAKE_SOURCE_DIR}/tests/release/test_git_archive.cmake)
 endif ()
+if (GIT_FOUND)
+  add_test (
+    NAME test_release_revision_label
+    COMMAND ${CMAKE_COMMAND}
+      -D SOURCE_DIR=${CMAKE_SOURCE_DIR}
+      -D TEST_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}/release-revision-label
+      -D GIT_EXECUTABLE=${GIT_EXECUTABLE}
+      -P ${CMAKE_SOURCE_DIR}/tests/release/test_revision_label.cmake)
+endif ()
+
+add_test (
+  NAME test_release_build_type
+  COMMAND ${CMAKE_COMMAND}
+    -D SOURCE_DIR=${CMAKE_SOURCE_DIR}
+    -D TEST_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}/release-build-type
+    -D GIT_EXECUTABLE=${GIT_EXECUTABLE}
+    -P ${CMAKE_SOURCE_DIR}/tests/release/test_build_type.cmake)
+
+add_test (
+  NAME test_nsis_launcher_config
+  COMMAND ${CMAKE_COMMAND}
+    -D SOURCE_DIR=${CMAKE_SOURCE_DIR}
+    -D TEST_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}/nsis-launcher-config
+    -P ${CMAKE_SOURCE_DIR}/tests/release/test_nsis_launcher_config.cmake)
+
+add_test (
+  NAME test_nsis_preflight_manifest
+  COMMAND ${CMAKE_COMMAND}
+    -D SOURCE_DIR=${CMAKE_SOURCE_DIR}
+    -D TEST_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}/nsis-preflight-manifest
+    -P ${CMAKE_SOURCE_DIR}/tests/release/test_nsis_preflight_manifest.cmake)
+
+# A cross-compiled tree runs its tests in another container than the one that built it.
+if (NOT CMAKE_CROSSCOMPILING)
+  add_test (
+    NAME test_release_expiry_build_step
+    COMMAND ${CMAKE_COMMAND}
+      -D SOURCE_DIR=${CMAKE_SOURCE_DIR}
+      -D BINARY_DIR=${CMAKE_BINARY_DIR}
+      -D TEST_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}/release-expiry-build-step
+      -P ${CMAKE_SOURCE_DIR}/tests/release/test_expiry_build_step.cmake)
+  set_tests_properties (test_release_expiry_build_step PROPERTIES RUN_SERIAL TRUE)
+endif ()
+
+foreach (package_tool dpkg rpm)
+  add_test (
+    NAME test_release_package_order_${package_tool}
+    COMMAND ${CMAKE_COMMAND}
+      -D SOURCE_DIR=${CMAKE_SOURCE_DIR}
+      -D TOOL=${package_tool}
+      -P ${CMAKE_SOURCE_DIR}/tests/release/test_package_version_order.cmake)
+  set_tests_properties (test_release_package_order_${package_tool} PROPERTIES
+    SKIP_REGULAR_EXPRESSION "Skipped: ${package_tool} is not installed")
+endforeach ()
 
 add_compile_options ("$<$<COMPILE_LANGUAGE:Fortran>:-Wall;-Wno-conversion;-fno-second-underscore;-fno-f2c>")
 add_compile_options ("$<$<AND:$<COMPILE_LANGUAGE:Fortran>,$<CONFIG:Debug>>:-fbounds-check>")
@@ -34,7 +110,10 @@ include_directories (${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_SOURCE_DIR})
 add_subdirectory (unit/audio)
 add_subdirectory (unit/band_hopping)
 add_subdirectory (unit/common)
+add_subdirectory (unit/crc)
+add_subdirectory (unit/logging)
 add_subdirectory (unit/decoder_ipc)
+add_subdirectory (unit/decoder_engine)
 add_subdirectory (unit/hrd)
 add_subdirectory (unit/hash)
 add_subdirectory (unit/message_filter)
@@ -56,5 +135,7 @@ add_subdirectory (unit/jt65)
 add_subdirectory (unit/superfox)
 add_subdirectory (unit/streaming)
 add_subdirectory (unit/tci)
+add_subdirectory (unit/waveform)
 add_subdirectory (unit/wsprd)
+add_subdirectory (integration/wsprd)
 add_subdirectory (k4remote)

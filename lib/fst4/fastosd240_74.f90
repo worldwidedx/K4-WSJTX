@@ -1,4 +1,9 @@
-subroutine fastosd240_74(llr,k,apmask,ndeep,message74,cw,nhardmin,dmin)
+module fastosd240_74_module
+   use fst4_osd_workspace, only: fst4_osd_workspace_type
+   private
+   public :: fastosd240_74_owned
+contains
+subroutine fastosd240_74_owned(work,llr,k,apmask,ndeep,message74,cw,nhardmin,dmin)
 ! 
 ! An ordered-statistics decoder for the (240,74) code.
 ! Message payload is 50 bits. Any or all of a 24-bit CRC can be
@@ -12,29 +17,35 @@ subroutine fastosd240_74(llr,k,apmask,ndeep,message74,cw,nhardmin,dmin)
 !
 ! Valid values for k are in the range [50,74].
 !
+   type(fst4_osd_workspace_type), intent(inout), target :: work
+   integer :: iscratch,jscratch
    character*24 c24
    integer, parameter:: N=240
    integer*1 apmask(N),apmaskr(N)
-   integer*1, allocatable, save :: gen(:,:)
-   integer*1, allocatable :: genmrb(:,:),g2(:,:)
-   integer*1, allocatable :: temp(:),temprow(:),m0(:),me(:),mi(:)
+   integer*1, pointer, contiguous :: gen(:,:)
+   integer*1, pointer, contiguous :: genmrb(:,:),g2(:,:)
+   integer*1, pointer, contiguous :: temp(:),temprow(:),m0(:),me(:),mi(:)
    integer indices(N),indices2(N),nxor(N)
    integer*1 cw(N),ce(N),c0(N),hdec(N)
-   integer*1, allocatable :: decoded(:)
+   integer*1, pointer, contiguous :: decoded(:)
    integer*1 message74(74)
-   integer*1, allocatable :: sp(:)
-   integer indx(N),ksave
+   integer*1, pointer, contiguous :: sp(:)
+   integer indx(N)
    real llr(N),rx(N),absrx(N)
 
-   logical first
-   data first/.true./,ksave/64/
-   save first,ksave
 
-   allocate( genmrb(k,N), g2(N,k) )
-   allocate( temp(k), temprow(n), m0(k), me(k), mi(k) )
-   allocate( decoded(k) )
 
-   if( first .or. k.ne.ksave) then ! fill the generator matrix
+   call work%ensure()
+   genmrb(1:k,1:N)=>work%matrix(1:k*N)
+   g2(1:N,1:k)=>work%transpose_matrix(1:k*N)
+   temp=>work%vectors(1:k,1)
+   temprow=>work%vectors(1:N,2)
+   m0=>work%vectors(1:k,3)
+   me=>work%vectors(1:k,4)
+   mi=>work%vectors(1:k,5)
+   decoded=>work%vectors(1:k,6)
+   sp=>work%vectors(1:32,7)
+   if(.not.allocated(work%generator(k)%matrix)) then ! fill the generator matrix
 !
 ! Create generator matrix for partial CRC cascaded with LDPC code.
 !
@@ -44,8 +55,8 @@ subroutine fastosd240_74(llr,k,apmask,ndeep,message74,cw,nhardmin,dmin)
 !
 ! The first p1=k-50 CRC24 bits will be used for error detection.
 !
-      if( allocated(gen) ) deallocate(gen)
-      allocate( gen(k,N) )
+      allocate(work%generator(k)%matrix(k,N))
+      gen=>work%generator(k)%matrix
       gen=0
       do i=1,k
          message74=0
@@ -60,9 +71,9 @@ subroutine fastosd240_74(llr,k,apmask,ndeep,message74,cw,nhardmin,dmin)
          gen(i,:)=cw
       enddo
 
-      first=.false.
-      ksave=k
    endif
+
+   gen=>work%generator(k)%matrix
 
 ! Use best k elements from the sorted list for the first basis. For the 2nd basis replace 
 ! the nswap lowest quality symbols with the best nswap elements from the parity symbols.
@@ -82,15 +93,19 @@ subroutine fastosd240_74(llr,k,apmask,ndeep,message74,cw,nhardmin,dmin)
 
 ! Re-order the columns of the generator matrix in order of decreasing reliability.
       do i=1,N
-         genmrb(1:k,i)=gen(1:k,indx(N+1-i))
+         do jscratch=1,k
+            genmrb(jscratch,i)=gen(jscratch,indx(N+1-i))
+         enddo
          indices(i)=indx(N+1-i)
       enddo
 
       if(ibasis.eq.2) then
          do i=k-nswap+1,k
-            temp(1:k)=genmrb(1:k,i)
-            genmrb(1:k,i)=genmrb(1:k,i+nswap)
-            genmrb(1:k,i+nswap)=temp(1:k)
+            do jscratch=1,k
+               temp(jscratch)=genmrb(jscratch,i)
+               genmrb(jscratch,i)=genmrb(jscratch,i+nswap)
+               genmrb(jscratch,i+nswap)=temp(jscratch)
+            enddo
             itmp=indices(i)
             indices(i)=indices(i+nswap)
             indices(i+nswap)=itmp
@@ -109,9 +124,11 @@ subroutine fastosd240_74(llr,k,apmask,ndeep,message74,cw,nhardmin,dmin)
             if(genmrb(id,icol).ne.1) then
                do j=id+1,k
                   if(genmrb(j,icol).eq.1) then
-                     temprow=genmrb(id,:)
-                     genmrb(id,:)=genmrb(j,:)
-                     genmrb(j,:)=temprow
+                     do jscratch=1,N
+                        temprow(jscratch)=genmrb(id,jscratch)
+                        genmrb(id,jscratch)=genmrb(j,jscratch)
+                        genmrb(j,jscratch)=temprow(jscratch)
+                     enddo
                      iflag=1
                   endif
                enddo
@@ -127,7 +144,9 @@ subroutine fastosd240_74(llr,k,apmask,ndeep,message74,cw,nhardmin,dmin)
          indices2(id)=icol
          do j=1,k
             if(id.ne.j .and. genmrb(j,icol).eq.1) then
-               genmrb(j,:)=ieor(genmrb(id,:),genmrb(j,:))
+               do jscratch=1,N
+                  genmrb(j,jscratch)=ieor(genmrb(id,jscratch),genmrb(j,jscratch))
+               enddo
             endif
          enddo
          icol=icol+1
@@ -135,11 +154,22 @@ subroutine fastosd240_74(llr,k,apmask,ndeep,message74,cw,nhardmin,dmin)
       do i=k+nskipped+1,240
          indices2(i)=i
       enddo
-      genmrb(1:k,:)=genmrb(1:k,indices2)
+      do iscratch=1,k
+         do jscratch=1,N
+            temprow(jscratch)=genmrb(iscratch,jscratch)
+         enddo
+         do jscratch=1,N
+            genmrb(iscratch,jscratch)=temprow(indices2(jscratch))
+         enddo
+      enddo
       indices=indices(indices2)
 
 !************************************
-      g2=transpose(genmrb)
+      do iscratch=1,k
+         do jscratch=1,N
+            g2(jscratch,iscratch)=genmrb(iscratch,jscratch)
+         enddo
+      enddo
 
 ! The hard decisions for the k MRB bits define the order 0 message, m0.
 ! Encode m0 using the modified generator matrix to find the "order 0" codeword.
@@ -159,7 +189,6 @@ subroutine fastosd240_74(llr,k,apmask,ndeep,message74,cw,nhardmin,dmin)
       nhardmin=sum(nxor)
       dmin=sum(nxor*absrx)
       np=32
-      if(ibasis.eq.1)   allocate(sp(np))
 
       cw=c0
       ntotal=0
@@ -202,7 +231,9 @@ subroutine fastosd240_74(llr,k,apmask,ndeep,message74,cw,nhardmin,dmin)
          iflag=k-iorder+1
          do while(iflag .ge.0)
             ntotal=ntotal+1
-            me=ieor(m0,mi)
+            do iscratch=1,k
+               me(iscratch)=ieor(m0(iscratch),mi(iscratch))
+            enddo
             d1=sum(mi(1:k)*absrx(1:k))
             if(d1.gt.rhodmin) exit
             call partial_syndrome(me,sp,np,g2,N,K)
@@ -234,7 +265,7 @@ subroutine fastosd240_74(llr,k,apmask,ndeep,message74,cw,nhardmin,dmin)
       nhardmin=-nhardmin
    enddo  ! basis loop
    return
-end subroutine fastosd240_74
+end subroutine fastosd240_74_owned
 
 subroutine mrbencode74(me,codeword,g2,N,K)
    integer*1 me(K),codeword(N),g2(N,K)
@@ -261,7 +292,7 @@ subroutine partial_syndrome(me,sp,np,g2,N,K)
 end subroutine partial_syndrome
 
 subroutine nextpat74(mi,k,iorder,iflag)
-   integer*1 mi(k),ms(k)
+   integer*1 mi(k),ms(101)
 ! generate the next test error pattern
    ind=-1
    do i=1,k-1
@@ -279,7 +310,7 @@ subroutine nextpat74(mi,k,iorder,iflag)
       nz=iorder-sum(ms)
       ms(k-nz+1:k)=1
    endif
-   mi=ms
+   mi=ms(1:k)
    do i=1,k  ! iflag will point to the lowest-index 1 in mi
       if(mi(i).eq.1) then
          iflag=i
@@ -289,3 +320,14 @@ subroutine nextpat74(mi,k,iorder,iflag)
    return
 end subroutine nextpat74
 
+
+end module fastosd240_74_module
+
+subroutine fastosd240_74(llr,k,apmask,ndeep,message74,cw,nhardmin,dmin)
+   use fastosd240_74_module, only: fastosd240_74_owned
+   use fst4_osd_workspace, only: fst4_osd_workspace_type
+   type(fst4_osd_workspace_type), save :: legacy
+   real llr(240),dmin
+   integer*1 apmask(240),message74(74),cw(240)
+   call fastosd240_74_owned(legacy,llr,k,apmask,ndeep,message74,cw,nhardmin,dmin)
+end subroutine

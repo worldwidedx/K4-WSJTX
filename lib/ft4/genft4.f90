@@ -1,93 +1,99 @@
+module ft4_codec
+  use packjt77, only: pack77_state,pack77_legacy_truncating_fallback_for_state,unpack77_for_state
+  implicit none
+  private
+  public :: genft4_for_state,ft4_tones_from_77bits,ft4_scramble
+
+  integer(kind=1), parameter :: rvec(77)=[ &
+       0,1,0,0,1,0,1,0,0,1,0,1,1,1,1,0,1,0,0,0,1,0,0,1,1,0,1,1,0, &
+       1,0,0,1,0,1,1,0,0,0,0,1,0,0,0,1,0,1,0,0,1,1,1,1,0,0,1,0,1, &
+       0,1,0,1,0,1,1,0,1,1,1,1,1,0,0,0,1,0,1]
+
+contains
+
+  subroutine genft4_for_state(state,msg0,ichk,msgsent,msgbits,i4tone)
+    type(pack77_state), target, intent(inout) :: state
+    character(len=37), intent(in) :: msg0
+    integer, intent(in) :: ichk
+    character(len=37), intent(out) :: msgsent
+    integer(kind=1), intent(inout) :: msgbits(77)
+    integer, intent(inout) :: i4tone(103)
+    character(len=37) :: message
+    character(len=77) :: c77
+    integer :: i,i3,n3
+    logical :: unpacked
+
+    message=msg0
+    i=index(message,char(0))
+    if(i>0) message(i:)=' '
+    message=adjustl(message)
+    i3=-1
+    n3=-1
+    c77=' '
+    unpacked=.false.
+    call pack77_legacy_truncating_fallback_for_state(state,message,i3,n3,c77)
+    if(i3<0.or.n3<0) go to 10
+    call unpack77_for_state(state,c77,0,msgsent,unpacked)
+    if(ichk==1) return
+    read(c77,'(77i1)',err=10) msgbits
+    if(.not.unpacked) go to 10
+    call ft4_tones_from_77bits(msgbits,i4tone)
+    return
+10  msgbits=0
+    i4tone=0
+    msgsent='*** bad message ***'
+  end subroutine
+
+  subroutine ft4_scramble(bits)
+    integer(kind=1), intent(inout) :: bits(77)
+    bits=mod(bits+rvec,2)
+  end subroutine
+
+  subroutine ft4_tones_from_77bits(msgbits,i4tone)
+    integer(kind=1), intent(in) :: msgbits(77)
+    integer, intent(out) :: i4tone(103)
+    integer(kind=1) :: scrambled(77),codeword(174)
+    integer :: i,is,itmp(87)
+    integer, parameter :: graymap(0:3)=[0,1,3,2]
+
+    scrambled=msgbits
+    call ft4_scramble(scrambled)
+    call encode174_91(scrambled,codeword)
+    do i=1,87
+       is=codeword(2*i)+2*codeword(2*i-1)
+       itmp(i)=graymap(is)
+    enddo
+    i4tone(1:4)=[0,1,3,2]
+    i4tone(5:33)=itmp(1:29)
+    i4tone(34:37)=[1,0,2,3]
+    i4tone(38:66)=itmp(30:58)
+    i4tone(67:70)=[2,3,1,0]
+    i4tone(71:99)=itmp(59:87)
+    i4tone(100:103)=[3,2,0,1]
+  end subroutine
+end module ft4_codec
+
 subroutine genft4(msg0,ichk,msgsent,msgbits,i4tone)
+  use decoder_codec_context, only: get_decoder_codec_state
+  use ft4_codec, only: genft4_for_state,ft4_scramble
+  implicit none
+  character(len=37), intent(in) :: msg0
+  integer, intent(in) :: ichk
+  character(len=37), intent(out) :: msgsent
+  integer(kind=1), intent(inout) :: msgbits(77)
+  integer, intent(inout) :: i4tone(103)
 
-! Encode an FT4  message
-! Input:
-!   - msg0     requested message to be transmitted
-!   - ichk     if ichk=1, return only msgsent
-!   - msgsent  message as it will be decoded
-!   - i4tone   array of audio tone values, {0,1,2,3} 
-
-! Frame structure:
-! s16 + 87symbols + 2 ramp up/down = 105 total channel symbols
-! r1 + s4 + d29 + s4 + d29 + s4 + d29 + s4 + r1
-
-! Message duration: TxT = 105*576/12000 = 5.04 s
-  
-! use iso_c_binding, only: c_loc,c_size_t
-
-  use packjt77
-  include 'ft4_params.f90'  
-  character*37 msg0
-  character*37 message                    !Message to be generated
-  character*37 msgsent                    !Message as it will be received
-  character*77 c77
-  integer*4 i4tone(NN),itmp(ND)
-  integer*1 codeword(2*ND)
-  integer*1 msgbits(77),rvec(77) 
-  integer icos4a(4),icos4b(4),icos4c(4),icos4d(4)
-  logical unpk77_success
-  data icos4a/0,1,3,2/
-  data icos4b/1,0,2,3/
-  data icos4c/2,3,1,0/
-  data icos4d/3,2,0,1/
-  data rvec/0,1,0,0,1,0,1,0,0,1,0,1,1,1,1,0,1,0,0,0,1,0,0,1,1,0,1,1,0, &
-            1,0,0,1,0,1,1,0,0,0,0,1,0,0,0,1,0,1,0,0,1,1,1,1,0,0,1,0,1, &
-            0,1,0,1,0,1,1,0,1,1,1,1,1,0,0,0,1,0,1/
-  message=msg0
-
-  do i=1, 37
-     if(ichar(message(i:i)).eq.0) then
-        message(i:37)=' '
-        exit
-     endif
-  enddo
-  do i=1,37                               !Strip leading blanks
-     if(message(1:1).ne.' ') exit
-     message=message(i+1:)
-  enddo
-
-  i3=-1
-  n3=-1
-  c77=' '
-  unpk77_success=.false.
-  call pack77_legacy_truncating_fallback(message,i3,n3,c77)
-  if(i3.lt.0 .or. n3.lt.0) go to 1
-  call unpack77(c77,0,msgsent,unpk77_success) !Unpack to get msgsent
-
-  if(ichk.eq.1) go to 999
-  read(c77,'(77i1)',err=1) msgbits
-  if(unpk77_success) go to 2
-1 msgbits=0
-  i4tone=0
-  msgsent='*** bad message ***                  '
-  go to 999
-
-entry get_ft4_tones_from_77bits(msgbits,i4tone)
-
-2 msgbits=mod(msgbits+rvec,2)
-  call encode174_91(msgbits,codeword)
-
-! Grayscale mapping:
-! bits   tone
-! 00     0
-! 01     1
-! 11     2
-! 10     3
-
-  do i=1,ND
-    is=codeword(2*i)+2*codeword(2*i-1)
-    if(is.le.1) itmp(i)=is
-    if(is.eq.2) itmp(i)=3
-    if(is.eq.3) itmp(i)=2
-  enddo
-
-  i4tone(1:4)=icos4a
-  i4tone(5:33)=itmp(1:29)
-  i4tone(34:37)=icos4b
-  i4tone(38:66)=itmp(30:58)
-  i4tone(67:70)=icos4c
-  i4tone(71:99)=itmp(59:87)
-  i4tone(100:103)=icos4d
-
-999 return
+  call genft4_for_state(get_decoder_codec_state(),msg0,ichk,msgsent,msgbits,i4tone)
+  ! The legacy encoder returns scrambled bits; engine evidence uses canonical bits.
+  if(ichk/=1.and.msgsent/='*** bad message ***') call ft4_scramble(msgbits)
 end subroutine genft4
+
+subroutine get_ft4_tones_from_77bits(msgbits,i4tone)
+  use ft4_codec, only: ft4_tones_from_77bits,ft4_scramble
+  implicit none
+  integer(kind=1), intent(inout) :: msgbits(77)
+  integer, intent(out) :: i4tone(103)
+
+  call ft4_tones_from_77bits(msgbits,i4tone)
+  call ft4_scramble(msgbits)
+end subroutine get_ft4_tones_from_77bits

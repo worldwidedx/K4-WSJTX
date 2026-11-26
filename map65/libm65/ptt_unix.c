@@ -15,132 +15,117 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  */
-# include <stdio.h>
-#  include <stdlib.h>
-#  include <unistd.h>
+#include <unistd.h>
 #include <fcntl.h>
-# include <sys/ioctl.h>
-#include <errno.h>
+#include <sys/ioctl.h>
 #include <string.h>
-
-#ifdef HAVE_SYS_STAT_H
-# include <sys/stat.h>
-#endif
-#if (defined(__unix__) || defined(unix)) && !defined(USG)
-# include <sys/param.h>
-#endif
-
-#include <string.h>
-
-int ptt_serial(int fd, int *ntx, int *iptt);
-
-/*
- * ptt_
- *
- * generic unix PTT routine called from Fortran
- *
- * Inputs	
- * unused	Unused, to satisfy old windows calling convention
- * ptt_port	device name
- * ntx		pointer to fortran command on or off
- * iptt		pointer to fortran command status on or off
- * Returns	- non 0 if error
-*/
+#include <poll.h>
+#include "ptt.h"
 
 static char ptt_override[256] = {0};
-static int ptt_override_valid = 0;
+static char opened_path[256] = {0};
+static int fd = -1;
+static enum { PTT_IDLE, PTT_KEYED, PTT_UNCERTAIN } ptt_state = PTT_IDLE;
 
 void ptt_set_override(const char *path)
 {
-    if (path && *path) {
-        strncpy(ptt_override, path, sizeof(ptt_override)-1);
-        ptt_override_valid = 1;
-    } else {
-        ptt_override_valid = 0;
-    }
+    strncpy(ptt_override, path ? path : "", sizeof(ptt_override) - 1);
+    ptt_override[sizeof(ptt_override) - 1] = '\0';
 }
 
-static int fd = -1;
+int ptt_serial(int port_fd, int *ntx, int *iptt)
+{
+    int status = 0;
+    if (ioctl(port_fd, TIOCMGET, &status) < 0)
+        return PTT_ERROR;
+
+    if (*ntx)
+        status |= TIOCM_RTS | TIOCM_DTR;
+    else
+        status &= ~(TIOCM_RTS | TIOCM_DTR);
+
+    if (ioctl(port_fd, TIOCMSET, &status) < 0)
+        return PTT_ERROR;
+
+    *iptt = *ntx;
+    return PTT_OK;
+}
+
+static void close_port(void)
+{
+    if (fd >= 0)
+        close(fd);
+    fd = -1;
+    opened_path[0] = '\0';
+    ptt_state = PTT_IDLE;
+}
+
+static int control_error(int *iptt)
+{
+    struct pollfd port = {fd, 0, 0};
+    /* EIO alone can be transient; hangup identifies a dead connection. */
+    if (poll(&port, 1, 0) > 0 && (port.revents & POLLHUP)) {
+        close_port();
+        *iptt = 0;
+        return PTT_DEVICE_LOST;
+    }
+    ptt_state = PTT_UNCERTAIN;
+    return PTT_ERROR;
+}
 
 int ptt_(int *nport, int *ntx, int *iptt)
 {
-	(void)nport;
-//    ptt_log("ptt_unix: entry nport=%d ntx=%d iptt=%d", *nport, *ntx, *iptt);
+    (void)nport;
 
-    // PTT disabled
-    if (!ptt_override_valid) {
-    *iptt=*ntx;
-    return 0;
-  }
+    /* Always release the open port, even when the next selection is disabled. */
+    if (!*ntx) {
+        if (fd >= 0 && ptt_serial(fd, ntx, iptt))
+            return control_error(iptt);
+        ptt_state = PTT_IDLE;
+        *iptt = 0;
+        if (fd >= 0 && strcmp(opened_path, ptt_override))
+            close_port();
+        return PTT_OK;
+    }
 
-    const char *ptt_port = ptt_override;
+    /* A failed operation must be followed by a confirmed release before TX. */
+    if (ptt_state == PTT_UNCERTAIN)
+        return PTT_ERROR;
+    if (ptt_state == PTT_KEYED) {
+        *iptt = 1;
+        return PTT_OK;
+    }
 
-    // Open once, keep open
+    if (fd >= 0 && strcmp(opened_path, ptt_override))
+        close_port();
+    if (!*ptt_override) {
+        *iptt = *ntx;
+        return PTT_OK;
+    }
+
     if (fd < 0) {
-        fd = open(ptt_port, O_RDWR | O_NONBLOCK);
-        if (fd < 0) {
-//        ptt_log("ptt_unix: open failed errno=%d (%s)", errno, strerror(errno));
-            return 1;
-  }
-//    ptt_log("ptt_unix: open OK fd=%d", fd);
-
-    // *** PATCH: Force RTS+DTR LOW immediately after open ***
-    int status = 0;
-    if (ioctl(fd, TIOCMGET, &status) == 0) {
-        status &= ~(TIOCM_RTS | TIOCM_DTR);
-        ioctl(fd, TIOCMSET, &status);
-//        ptt_log("ptt_unix: forced RTS/DTR LOW after open, status=0x%x", status);
-    }
-    }
-      ptt_serial(fd, ntx, iptt);
-    return 0;
+        fd = open(ptt_override, O_RDWR | O_NONBLOCK | O_NOCTTY);
+        if (fd < 0)
+            return PTT_ERROR;
+        strcpy(opened_path, ptt_override);
+        int off = 0;
+        int status = 0;
+        if (ptt_serial(fd, &off, &status))
+            return control_error(iptt);
     }
 
-
-/*
- * ptt_serial
- *
- * generic serial unix PTT routine called indirectly from Fortran
- *
- * fd		- already opened file descriptor
- * ntx		- pointer to fortran command on or off
- * iptt		- pointer to fortran command status on or off
- */
-
-
-int
-ptt_serial(int fd, int *ntx, int *iptt)
-{
-int status;
-
-if (ioctl(fd, TIOCMGET, &status) < 0) {
-//    ptt_log("TIOCMGET failed errno=%d (%s)", errno, strerror(errno));
-    return 1;
-}
-
-  if(*ntx) {
-    status |= (TIOCM_RTS | TIOCM_DTR);   // PTT ON
-  } else {
-    status &= ~(TIOCM_RTS | TIOCM_DTR);  // PTT OFF
-}
-
-if (ioctl(fd, TIOCMSET, &status) < 0) {
-//    ptt_log("TIOCMSET failed errno=%d (%s)", errno, strerror(errno));
-    return 1;
-}
-
-//ptt_log("TIOCMSET OK status=0x%x", status);
-*iptt = *ntx;
-return 0;
-
+    if (ptt_serial(fd, ntx, iptt))
+        return control_error(iptt);
+    ptt_state = PTT_KEYED;
+    return PTT_OK;
 }
 
 void ptt_close(void)
 {
     if (fd >= 0) {
-        close(fd);
-        fd = -1;
-//        ptt_log("ptt_unix: closed fd");
+        int off = 0;
+        int status = 0;
+        ptt_serial(fd, &off, &status);
+        close_port();
     }
 }
-

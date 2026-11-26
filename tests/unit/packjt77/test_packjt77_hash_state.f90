@@ -6,9 +6,21 @@ program test_packjt77_hash_state
   implicit none
 
   integer :: ntests
-  external :: fillhashvar
-  external :: ft8apsetvar
   external :: genft8
+  interface
+     subroutine fillhashvar(numthreads,lfill,knowledge)
+       import :: pack77_state
+       integer, intent(in) :: numthreads
+       logical, intent(in) :: lfill
+       type(pack77_state), target, optional, intent(inout) :: knowledge
+     end subroutine
+     subroutine ft8apsetvar(lmycallstd,lhiscallstd,numthreads,knowledge)
+       import :: pack77_state
+       logical(1), intent(in) :: lmycallstd,lhiscallstd
+       integer :: numthreads
+       type(pack77_state), target, optional, intent(inout) :: knowledge
+     end subroutine
+  end interface
 
   ntests=0
 
@@ -30,6 +42,7 @@ program test_packjt77_hash_state
   call expect_pack77_free_text_fallback_rejects_unexpanded_dx_macro()
   call expect_pack_unpack_hash_state_matches_pack_only()
   call expect_genft8_failure_state()
+  call expect_unresolved_decode_cannot_be_transmitted()
   call expect_dx_macro_option_uses_explicit_base()
   call expect_failed_pack77_candidates_do_not_record_hashes()
   call expect_ft8apsetvar_does_not_record_template_hashes()
@@ -798,6 +811,31 @@ contains
     ntests=ntests+1
   end subroutine expect_genft8_failure_state
 
+  subroutine expect_unresolved_decode_cannot_be_transmitted()
+    character(len=37) :: input,msgsent
+    character(len=37), parameter :: unresolved(3)=[character(len=37) :: &
+         '<...> V5/HB9SHD RR73', &
+         '<...> RR73; AF8C <W1AW> -10', &
+         '<W2XX> RR73; AF8C <...> -10']
+    integer*1 :: msgbits(77)
+    integer :: itone(79),i3,n3,i
+
+    do i=1,size(unresolved)
+       input=unresolved(i)
+       call genft8(input,i3,n3,msgsent,msgbits,itone)
+       call assert_int(trim(input)//' rejected i3',-1,i3)
+       call assert_int(trim(input)//' rejected n3',-1,n3)
+       call assert_true(trim(input)//' has no tones',all(itone.eq.0))
+    enddo
+
+    input='<V5/HB9SHD> AF8C EN81'
+    call genft8(input,i3,n3,msgsent,msgbits,itone)
+    call assert_int('known sender opening message i3',1,i3)
+    call assert_text_equal('known sender opening message',input,msgsent)
+
+    ntests=ntests+1
+  end subroutine expect_unresolved_decode_cannot_be_transmitted
+
   subroutine expect_dx_macro_option_uses_explicit_base()
     character(len=37) :: shorthand, direct, decoded
     logical :: ok
@@ -881,8 +919,11 @@ contains
 
   subroutine expect_ft8apsetvar_does_not_record_template_hashes()
     logical(1) :: lmycallstd, lhiscallstd
+    type(pack77_state), target :: knowledge
 
     call clear_all_state('N0AAA','PJ2/W1AW')
+    knowledge%mycall13='N0AAA'
+    knowledge%dxcall13='PJ2/W1AW'
     mycall='N0AAA       '
     hiscall='PJ2/W1AW    '
     mybcall='N0AAA       '
@@ -892,8 +933,13 @@ contains
     lmycallstd=.true.
     lhiscallstd=.false.
 
-    call ft8apsetvar(lmycallstd,lhiscallstd,1)
-    call assert_shared_hash_tables_empty('ft8apsetvar template hashes')
+    call ft8apsetvar(lmycallstd,lhiscallstd,1,knowledge)
+    call assert_int('ft8apsetvar owned nzhash',0,knowledge%nzhash)
+    call assert_true('ft8apsetvar owned calls10',all(knowledge%calls10.eq.''))
+    call assert_true('ft8apsetvar owned calls12',all(knowledge%calls12.eq.''))
+    call assert_true('ft8apsetvar owned calls22',all(knowledge%calls22.eq.''))
+    call assert_true('ft8apsetvar owned recent calls',all(knowledge%recent_calls.eq.''))
+    call assert_shared_hash_tables_empty('ft8apsetvar legacy isolation')
 
     ntests=ntests+1
   end subroutine expect_ft8apsetvar_does_not_record_template_hashes

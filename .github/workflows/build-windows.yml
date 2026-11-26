@@ -23,12 +23,12 @@ on:
         type: boolean
         default: false
       release_channel:
-        description: "Build release channel: DEVEL, RC, or GA"
+        description: "Build release channel: DEVEL, BETA, RC, or GA"
         required: false
         type: string
         default: "DEVEL"
-      rc_number:
-        description: "Release candidate number when release_channel is RC"
+      prerelease_number:
+        description: "Prerelease number when release_channel is BETA or RC"
         required: false
         type: string
         default: ""
@@ -75,8 +75,8 @@ on:
           - RC
           - GA
         default: "DEVEL"
-      rc_number:
-        description: "Release candidate number when release_channel is RC"
+      prerelease_number:
+        description: "Prerelease number when release_channel is BETA or RC"
         required: false
         type: string
         default: ""
@@ -94,7 +94,7 @@ jobs:
       VERSION: ${{ inputs.version }}
       HAMLIB_BRANCH: ${{ inputs.hamlib_branch }}
       WSJT_RELEASE_CHANNEL: ${{ inputs.release_channel }}
-      WSJT_RC_NUMBER: ${{ inputs.rc_number }}
+      WSJT_PRERELEASE_NUMBER: ${{ inputs.prerelease_number }}
     defaults:
       run:
         shell: msys2 {0}
@@ -219,7 +219,7 @@ jobs:
             -DWSJT_ENABLE_TESTS=ON \
             -DWSJT_FORTRAN_LIBRARY_VARIANTS=OPENMP_ONLY \
             -DWSJT_RELEASE_CHANNEL="${WSJT_RELEASE_CHANNEL}" \
-            -DWSJT_RC_NUMBER="${WSJT_RC_NUMBER}" \
+            -DWSJT_PRERELEASE_NUMBER="${WSJT_PRERELEASE_NUMBER}" \
             -DPFUNIT_DIR="${{ steps.windows-deps.outputs.pfunit_dir }}" \
             -DGFTL_DIR="${{ steps.windows-deps.outputs.gftl_dir }}" \
             -DGFTL_SHARED_DIR="${{ steps.windows-deps.outputs.gftl_shared_dir }}" \

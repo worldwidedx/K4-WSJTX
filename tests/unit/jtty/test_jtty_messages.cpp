@@ -86,10 +86,10 @@ private slots:
     QCOMPARE (int {movedDefault.atoms.at (0).subtype},
               static_cast<int> (Jtty::CallAction::Call));
 
-    auto const unknownPlaceholder = Jtty::compileNativeMacro (
+    auto const knownSnrPlaceholder = Jtty::compileNativeMacro (
         8, QString {"599 %R"}, context);
-    QCOMPARE (unknownPlaceholder.status, Jtty::NativeMacroStatus::LiteralFallback);
-    QCOMPARE (unknownPlaceholder.text, QString {"599 %R"});
+    QCOMPARE (knownSnrPlaceholder.status, Jtty::NativeMacroStatus::LiteralFallback);
+    QCOMPARE (knownSnrPlaceholder.text, QString {"599 -10"});
 
     auto const editedLegacyCase = Jtty::compileNativeMacro (
         2, QString {"%h 599 %n"}, context);
@@ -213,24 +213,6 @@ private slots:
     QCOMPARE (Jtty::nativeMacroTemplate (2), QString {"%H %E"});
     QCOMPARE (Jtty::nativeMacroTemplate (6), QString {"TU NOW %Q %E"});
     QCOMPARE (Jtty::nativeMacroTemplate (8), QString {"%E"});
-  }
-
-  void savedDefaultMigrationIsExactAndNarrow ()
-  {
-    for (int functionKey : {2, 6, 8}) {
-      QCOMPARE (Jtty::migratedNativeMacroTemplate (
-                  functionKey, Jtty::legacyNativeMacroTemplate (functionKey)),
-                Jtty::nativeMacroTemplate (functionKey));
-    }
-
-    QCOMPARE (Jtty::migratedNativeMacroTemplate (1, QString {"CQ %M CQ"}),
-              QString {"CQ %M CQ"});
-    QCOMPARE (Jtty::migratedNativeMacroTemplate (2, QString {"%h 599 %n"}),
-              QString {"%h 599 %n"});
-    QCOMPARE (Jtty::migratedNativeMacroTemplate (8, QString {" 599 %N "}),
-              QString {" 599 %N "});
-    QCOMPARE (Jtty::migratedNativeMacroTemplate (8, QString {"TEST 599 %N"}),
-              QString {"TEST 599 %N"});
   }
 
   void noneProfileUsesLiveSerial ()
@@ -480,7 +462,7 @@ private slots:
               static_cast<int> (Jtty::ExchangeRole::FieldOnly));
   }
 
-  void configuredSubsquareProducesGrid4WithoutChangingLiteralExpansion ()
+  void configuredSubsquareProducesGrid4InBothNativeAndLiteralExpansion ()
   {
     Jtty::NativeMacroContext const context {
       QString {"K1ABC"}, QString {"W9XYZ"}, 1,
@@ -492,7 +474,7 @@ private slots:
 
     auto const literal = Jtty::compileNativeMacro (QString {"GRID %G"}, context);
     QCOMPARE (literal.status, Jtty::NativeMacroStatus::LiteralFallback);
-    QCOMPARE (literal.text, QString {"GRID fn42ab"});
+    QCOMPARE (literal.text, QString {"GRID FN42"});
   }
 
   void invalidGridIsRejected_data ()
@@ -537,7 +519,7 @@ private slots:
       Jtty::NativeExchangeProfile::RttyRoundup, QString {" dx "}, QString {"fn42"}};
     auto const compiled = Jtty::compileNativeMacro (QString {"TEST %E %G"}, context);
     QCOMPARE (compiled.status, Jtty::NativeMacroStatus::LiteralFallback);
-    QCOMPARE (compiled.text, QString {"TEST 007 fn42"});
+    QCOMPARE (compiled.text, QString {"TEST 007 FN42"});
     QVERIFY (compiled.error.isEmpty ());
   }
 
@@ -546,34 +528,34 @@ private slots:
     QTest::addColumn<QString> ("message");
     QTest::addColumn<QString> ("expected");
     QTest::addColumn<bool> ("substituted");
-    QTest::addColumn<bool> ("truncated");
 
     QTest::newRow ("empty") << QString {} << QString {}
-                            << false << false;
+                            << false;
     QTest::newRow ("supported") << QString {"CQ KA1ABC CQ"} << QString {"CQ KA1ABC CQ"}
-                                << false << false;
+                                << false;
     QTest::newRow ("lowercase-preserved") << QString {"cq ka1abc cq"} << QString {"cq ka1abc cq"}
-                                          << false << false;
+                                          << false;
     QTest::newRow ("tab") << QString {"HELLO\tWORLD"} << QString {"HELLO#WORLD"}
-                          << true << false;
-    QTest::newRow ("cr-lf") << QString {"HELLO\r\nWORLD"} << QString {"HELLO##WORLD"}
-                            << true << false;
+                          << true;
+    // '\n'/'\r' are now forced segment boundaries, not unsupported characters.
+    QTest::newRow ("cr-lf") << QString {"HELLO\r\nWORLD"} << QString {"HELLO\n\nWORLD"}
+                            << false;
     QTest::newRow ("nul") << (QString {"A"} + QChar::Null + QString {"B"}) << QString {"A B"}
-                          << true << false;
+                          << true;
     QTest::newRow ("display-space-marker") << QString {"A~B"} << QString {"A B"}
-                                           << true << false;
+                                           << true;
     QTest::newRow ("exactly-80") << QString (80, QLatin1Char {'A'}) << QString (80, QLatin1Char {'A'})
-                                 << false << false;
-    QTest::newRow ("truncated") << QString (81, QLatin1Char {'A'}) << QString (80, QLatin1Char {'A'})
-                                << false << true;
+                                 << false;
+    QTest::newRow ("long-input-preserved") << QString (81, QLatin1Char {'A'}) << QString (81, QLatin1Char {'A'})
+                                          << false;
     QTest::newRow ("unsupported-past-limit")
         << (QString (80, QLatin1Char {'A'}) + QString {"\t"})
-        << QString (80, QLatin1Char {'A'})
-        << false << true;
-    QTest::newRow ("substitution-and-truncation")
+        << (QString (80, QLatin1Char {'A'}) + QString {"#"})
+        << true;
+    QTest::newRow ("substitution-preserves-suffix")
         << (QString (79, QLatin1Char {'A'}) + QString {"\tB"})
-        << (QString (79, QLatin1Char {'A'}) + QString {"#"})
-        << true << true;
+        << (QString (79, QLatin1Char {'A'}) + QString {"#B"})
+        << true;
   }
 
   void prepareTransmitText ()
@@ -581,72 +563,113 @@ private slots:
     QFETCH (QString, message);
     QFETCH (QString, expected);
     QFETCH (bool, substituted);
-    QFETCH (bool, truncated);
 
     auto const prepared = Jtty::prepareTransmitText (message);
 
     QCOMPARE (prepared.text, expected);
     QCOMPARE (prepared.substituted, substituted);
-    QCOMPARE (prepared.truncated, truncated);
-    QCOMPARE (prepared.changed (), substituted || truncated);
-  }
-
-  void withChainedSpacing_data ()
-  {
-    QTest::addColumn<QString> ("message");
-    QTest::addColumn<bool> ("isChained");
-    QTest::addColumn<QString> ("expected");
-
-    QTest::newRow ("not-chained-unchanged") << QString {"CQ KA1ABC CQ"} << false
-                                            << QString {"CQ KA1ABC CQ"};
-    QTest::newRow ("chained-gets-leading-space") << QString {"TU DE KA1ABC"} << true
-                                                 << QString {" TU DE KA1ABC"};
-    QTest::newRow ("not-chained-empty-stays-empty") << QString {} << false << QString {};
-    QTest::newRow ("chained-at-max-length-drops-last-char")
-        << QString (Jtty::maxTransmitLength, QLatin1Char {'A'}) << true
-        << (QString {" "} + QString (Jtty::maxTransmitLength - 1, QLatin1Char {'A'}));
-  }
-
-  void withChainedSpacing ()
-  {
-    QFETCH (QString, message);
-    QFETCH (bool, isChained);
-    QFETCH (QString, expected);
-
-    QCOMPARE (Jtty::withChainedSpacing (message, isChained), expected);
   }
 
   void transmitFrame_data ()
   {
     QTest::addColumn<QString> ("message");
-    QTest::addColumn<bool> ("isChained");
     QTest::addColumn<QString> ("expected");
 
     auto const padded = [] (QString const& text) {
       return text + QString (Jtty::maxTransmitLength - text.size (), QLatin1Char {' '});
     };
 
-    QTest::newRow ("not-chained-padded-to-width")
-        << QString {"CQ KA1ABC CQ"} << false << padded (QString {"CQ KA1ABC CQ"});
-    QTest::newRow ("chained-prefixed-and-padded")
-        << QString {"TU K1ABC CQ"} << true << padded (QString {" TU K1ABC CQ"});
-    QTest::newRow ("chained-at-max-length-stays-exact")
-        << QString (Jtty::maxTransmitLength, QLatin1Char {'A'}) << true
-        << (QString {" "} + QString (Jtty::maxTransmitLength - 1, QLatin1Char {'A'}));
-    QTest::newRow ("empty-not-chained-all-spaces")
-        << QString {} << false << QString (Jtty::maxTransmitLength, QLatin1Char {' '});
+    QTest::newRow ("padded-to-width")
+        << QString {"CQ KA1ABC CQ"} << padded (QString {"CQ KA1ABC CQ"});
+    QTest::newRow ("at-max-length-stays-exact")
+        << QString (Jtty::maxTransmitLength, QLatin1Char {'A'})
+        << QString (Jtty::maxTransmitLength, QLatin1Char {'A'});
+    QTest::newRow ("empty-all-spaces")
+        << QString {} << QString (Jtty::maxTransmitLength, QLatin1Char {' '});
+    QTest::newRow ("oversized-rejected")
+        << QString (Jtty::maxTransmitLength + 1, QLatin1Char {'A'}) << QString {};
   }
 
   void transmitFrame ()
   {
     QFETCH (QString, message);
-    QFETCH (bool, isChained);
     QFETCH (QString, expected);
 
-    QString const frame = Jtty::transmitFrame (message, isChained);
+    QString const frame = Jtty::transmitFrame (message);
 
     QCOMPARE (frame, expected);
-    QCOMPARE (frame.size (), Jtty::maxTransmitLength);
+    QCOMPARE (frame.size (), message.size () > Jtty::maxTransmitLength
+              ? 0 : Jtty::maxTransmitLength);
+  }
+
+  void transmitSegmentsCoverCompleteInput_data ()
+  {
+    QTest::addColumn<QString> ("source");
+    QTest::addColumn<int> ("firstLength");
+    QTest::addColumn<int> ("segmentCount");
+
+    QTest::newRow ("79-characters") << QString (79, QLatin1Char {'A'}) << 79 << 1;
+    QTest::newRow ("80-characters") << QString (80, QLatin1Char {'A'}) << 80 << 1;
+    QTest::newRow ("81-characters") << QString (81, QLatin1Char {'A'}) << 80 << 2;
+    QTest::newRow ("word-boundary")
+        << (QString (70, QLatin1Char {'A'}) + QString {" WORDS CONTINUE"}) << 77 << 2;
+    QTest::newRow ("space-at-capacity")
+        << (QString (79, QLatin1Char {'A'}) + QString {" SUFFIX"}) << 80 << 2;
+    QTest::newRow ("space-after-capacity")
+        << (QString {"FIRST "} + QString (74, QLatin1Char {'A'}) + QString {" SUFFIX"})
+        << 80 << 2;
+    QTest::newRow ("leading-space-before-long-token")
+        << (QString {" "} + QString (160, QLatin1Char {'A'})) << 80 << 3;
+    QTest::newRow ("many-spaces") << QString (200, QLatin1Char {' '}) << 80 << 3;
+    QTest::newRow ("substitution-after-first-segment")
+        << (QString (80, QLatin1Char {'A'}) + QString {"\tSUFFIX"}) << 80 << 2;
+  }
+
+  void transmitSegmentsCoverCompleteInput ()
+  {
+    QFETCH (QString, source);
+    QFETCH (int, firstLength);
+    QFETCH (int, segmentCount);
+
+    QString const prepared = Jtty::prepareTransmitText (source).text;
+    QString reconstructed;
+    int offset {0};
+    int count {0};
+    while (offset < prepared.size ()) {
+      auto const segment = Jtty::nextTransmitTextSegment (prepared, offset);
+      QCOMPARE (segment.offset, offset);
+      QVERIFY (segment.length > 0);
+      QVERIFY (segment.length <= Jtty::maxTransmitLength);
+      QCOMPARE (segment.text, prepared.mid (offset, segment.length));
+      if (count == 0) QCOMPARE (segment.length, firstLength);
+      reconstructed += segment.text;
+      offset += segment.length;
+      ++count;
+    }
+    QCOMPARE (count, segmentCount);
+    QCOMPARE (reconstructed, prepared);
+  }
+
+  void transmitSegmentRetryRetainsSourceOffset ()
+  {
+    QString const source {"PREFIX FIRST SECOND THIRD SUFFIX"};
+    auto const initial = Jtty::nextTransmitTextSegment (source, 7, 19);
+    QCOMPARE (initial.text, QString {"FIRST SECOND THIRD "});
+    auto const retry = Jtty::nextTransmitTextSegment (source, initial.offset, 12);
+    QCOMPARE (retry.offset, initial.offset);
+    QCOMPARE (retry.text, QString {"FIRST SECOND"});
+    auto const next = Jtty::nextTransmitTextSegment (source, retry.offset + retry.length);
+    QCOMPARE (retry.text + next.text, source.mid (7));
+  }
+
+  void transmitSegmentEmptyAndInvalidRanges ()
+  {
+    QVERIFY (Jtty::nextTransmitTextSegment (QString {}, 0).text.isEmpty ());
+    QVERIFY (Jtty::nextTransmitTextSegment (QString {"ABC"}, -1).text.isEmpty ());
+    QVERIFY (Jtty::nextTransmitTextSegment (QString {"ABC"}, 3).text.isEmpty ());
+    QVERIFY (Jtty::nextTransmitTextSegment (QString {"ABC"}, 0, 0).text.isEmpty ());
+    QCOMPARE (Jtty::nextTransmitTextSegment (QString (100, QLatin1Char {'A'}), 0, 100).length,
+              Jtty::maxTransmitLength);
   }
 
   void wavCaptureValid_data ()
@@ -746,6 +769,13 @@ private slots:
     QCOMPARE (Jtty::jttyLineTimeLabel (QDateTime {}), QString {});
   }
 
+  void formatJttyTxLineLeavesSnrColumnBlank ()
+  {
+    QCOMPARE (Jtty::formatJttyTxLine (1500.f, QString {"CQ K1ABC CQ"}),
+              QString {"1500      CQ K1ABC CQ"});
+    QCOMPARE (Jtty::formatJttyTxLine (1500.4f, QString {}), QString {"1500      "});
+  }
+
   void parseDecodeLine_data ()
   {
     QTest::addColumn<QString> ("line");
@@ -759,6 +789,8 @@ private slots:
         << QString {" 500  599 K1ABC "} << 500 << QString {"599 K1ABC"} << true;
     QTest::newRow ("numeric-leading-message-is-preserved")
         << QString {"1500  599 K1ABC"} << 1500 << QString {"599 K1ABC"} << true;
+    QTest::newRow ("numeric-report-and-serial")
+        << QString {"1500  599 001"} << 1500 << QString {"599 001"} << true;
     QTest::newRow ("frequency-only")
         << QString {"1500"} << 1500 << QString {} << true;
     QTest::newRow ("malformed-frequency")
@@ -777,6 +809,37 @@ private slots:
     auto const decoded = Jtty::parseDecodeLine (line);
 
     QCOMPARE (decoded.frequency, frequency);
+    QCOMPARE (decoded.message, message);
+    QCOMPARE (decoded.valid, valid);
+  }
+
+  void parseDecodeLineWithSnr_data ()
+  {
+    QTest::addColumn<QString> ("line");
+    QTest::addColumn<int> ("snr");
+    QTest::addColumn<QString> ("message");
+    QTest::addColumn<bool> ("valid");
+    QTest::newRow ("negative-snr")
+      << QString {"1500 -12  CQ K1ABC"} << -12 << QString {"CQ K1ABC"} << true;
+    QTest::newRow ("positive-snr")
+      << QString {"1500   8  CQ K1ABC"} << 8 << QString {"CQ K1ABC"} << true;
+    QTest::newRow ("numeric-message")
+      << QString {"1500 -12  599 001"} << -12 << QString {"599 001"} << true;
+    QTest::newRow ("zero-snr") << QString {"1500   0  599 001"} << 0 << QString {"599 001"} << true;
+    QTest::newRow ("no-message") << QString {"1500 -12"} << -12 << QString {} << true;
+    QTest::newRow ("missing-snr")
+      << QString {"1500 CQ K1ABC"} << 0 << QString {"CQ K1ABC"} << false;
+  }
+
+  void parseDecodeLineWithSnr ()
+  {
+    QFETCH (QString, line);
+    QFETCH (int, snr);
+    QFETCH (QString, message);
+    QFETCH (bool, valid);
+    auto const decoded = Jtty::parseDecodeLine (line, true);
+    QCOMPARE (decoded.frequency, 1500);
+    QCOMPARE (decoded.snr, snr);
     QCOMPARE (decoded.message, message);
     QCOMPARE (decoded.valid, valid);
   }
@@ -814,6 +877,39 @@ private slots:
     QFETCH (QString, expected);
 
     QCOMPARE (Jtty::wrapMessage (text), expected);
+  }
+
+  void formatJttyDecodeLine_data ()
+  {
+    QTest::addColumn<float> ("frequency");
+    QTest::addColumn<int> ("snr");
+    QTest::addColumn<QString> ("message");
+    QTest::addColumn<QString> ("expected");
+
+    QTest::newRow ("negative-two-digit-snr")
+        << 1513.f << -10 << QString {"CQ VA7TTO CQ"}
+        << QString {"1513 -10  CQ VA7TTO CQ"};
+    QTest::newRow ("positive-snr-no-forced-sign")
+        << 1500.f << 5 << QString {"K1ABC W9XYZ"}
+        << QString {"1500   5  K1ABC W9XYZ"};
+    QTest::newRow ("three-digit-frequency-padded")
+        << 500.f << 0 << QString {"HELLO"}
+        << QString {" 500   0  HELLO"};
+    QTest::newRow ("multi-digit-snr")
+        << 1500.f << -100 << QString {"WEAK"}
+        << QString {"1500 -100  WEAK"};
+    QTest::newRow ("empty-message-omits-snr")
+        << 1500.f << -10 << QString {} << QString {"1500"};
+  }
+
+  void formatJttyDecodeLine ()
+  {
+    QFETCH (float, frequency);
+    QFETCH (int, snr);
+    QFETCH (QString, message);
+    QFETCH (QString, expected);
+
+    QCOMPARE (Jtty::formatJttyDecodeLine (frequency, snr, message), expected);
   }
 
   void compareMessagesTracksMessageSemantics ()
@@ -931,6 +1027,154 @@ private slots:
     QVERIFY (Jtty::shouldApplyToQsoHistory (false, 1504.f, 1500.f, 5.f));
     QVERIFY (!Jtty::shouldApplyToQsoHistory (false, 1505.f, 1500.f, 5.f));
     QVERIFY (Jtty::shouldApplyToQsoHistory (true, 1510.f, 1500.f, 5.f));
+  }
+
+  void snrFormattingHasLeadingSignAndZeroPad ()
+  {
+    QCOMPARE (Jtty::formatSnr (-10), QString {"-10"});
+    QCOMPARE (Jtty::formatSnr (5), QString {"+05"});
+    QCOMPARE (Jtty::formatSnr (-5), QString {"-05"});
+    QCOMPARE (Jtty::formatSnr (0), QString {"+00"});
+    QCOMPARE (Jtty::formatSnr (100), QString {"+100"});
+  }
+
+  void literalExpansionSubstitutesGridAndSnr ()
+  {
+    // %G's own truncate-to-4 behavior for extended subsquare grids is covered
+    // separately by configuredSubsquareProducesGrid4InBothNativeAndLiteralExpansion;
+    // a plain 4-char grid here keeps this test focused on the %R substitution.
+    Jtty::NativeMacroContext context {QString {"K1ABC"}, QString {"W9XYZ"}, 0};
+    context.grid = QStringLiteral ("FN20");
+    context.snr = -7;
+
+    QCOMPARE (Jtty::expandLiteralMacro (QStringLiteral ("%H %M %G"), context),
+              QString {"W9XYZ K1ABC FN20"});
+    QCOMPARE (Jtty::expandLiteralMacro (QStringLiteral ("%H %M %R"), context),
+              QString {"W9XYZ K1ABC -07"});
+    QCOMPARE (Jtty::expandLiteralMacro (QStringLiteral ("%H %M R%R"), context),
+              QString {"W9XYZ K1ABC R-07"});
+    QCOMPARE (Jtty::expandLiteralMacro (QStringLiteral ("CQ %M %G"), context),
+              QString {"CQ K1ABC FN20"});
+  }
+
+  void fillerTextIsRecognizedStandalone ()
+  {
+    QVERIFY (Jtty::isJttyFillerText (Jtty::jttyFillerText));
+    QVERIFY (Jtty::isJttyFillerText (QStringLiteral ("<<<<<")));
+    QVERIFY (!Jtty::isJttyFillerText (QString {}));
+    QVERIFY (!Jtty::isJttyFillerText (QStringLiteral ("FOX")));
+    QVERIFY (!Jtty::isJttyFillerText (QStringLiteral ("FOX <<<<<")));
+  }
+
+  void macroControlTokensAreStrippedAndReported ()
+  {
+    auto c = Jtty::parseMacroControl (QStringLiteral ("%[CQ %M CQ%]"));
+    QCOMPARE (c.text, QStringLiteral ("CQ %M CQ"));
+    QVERIFY (c.pttOn);
+    QVERIFY (c.pttOff);
+
+    c = Jtty::parseMacroControl (QStringLiteral ("%[%H DE %M "));
+    QCOMPARE (c.text, QStringLiteral ("%H DE %M"));
+    QVERIFY (c.pttOn);
+    QVERIFY (!c.pttOff);
+
+    c = Jtty::parseMacroControl (QStringLiteral ("BTU %H DE %M K%]"));
+    QCOMPARE (c.text, QStringLiteral ("BTU %H DE %M K"));
+    QVERIFY (!c.pttOn);
+    QVERIFY (c.pttOff);
+
+    c = Jtty::parseMacroControl (QStringLiteral ("599%]%[TU"));
+    QCOMPARE (c.text, QStringLiteral ("599 TU"));
+
+    c = Jtty::parseMacroControl (QStringLiteral ("%]"));
+    QVERIFY (c.text.isEmpty ());
+    QVERIFY (c.pttOff);
+
+    c = Jtty::parseMacroControl (QStringLiteral ("%H AGN?"));
+    QCOMPARE (c.text, QStringLiteral ("%H AGN?"));
+    QVERIFY (!c.pttOn);
+    QVERIFY (!c.pttOff);
+    QVERIFY (!c.logQso);
+
+    c = Jtty::parseMacroControl (QStringLiteral ("%[TU %M%L%]"));
+    QCOMPARE (c.text, QStringLiteral ("TU %M"));
+    QVERIFY (c.logQso);
+    QVERIFY (c.pttOn);
+    QVERIFY (c.pttOff);
+    QVERIFY (!c.startsNextQso ());
+
+    c = Jtty::parseMacroControl (QStringLiteral ("%[TU NOW %Q %E%L%]"));
+    QCOMPARE (c.text, QStringLiteral ("TU NOW %Q %E"));
+    QVERIFY (c.startsNextQso ());
+    QVERIFY (!Jtty::parseMacroControl (QStringLiteral ("%[%Q?%]")).startsNextQso ());
+  }
+
+  void fillerStripLeavesRealTextUnaffected ()
+  {
+    QCOMPARE (Jtty::stripJttyFillerText (QStringLiteral ("FOX JUMPED OVER")),
+              QStringLiteral ("FOX JUMPED OVER"));
+  }
+
+  void fillerStripRemovesEmbeddedRunRegardlessOfSpacing ()
+  {
+    // Squished with no separator, as a receiver could decode if neither side's own packing added a boundary space.
+    QCOMPARE (Jtty::stripJttyFillerText (QStringLiteral ("OVER<<<<< <<<<<THE")),
+              QStringLiteral ("OVER THE"));
+    // Normally spaced.
+    QCOMPARE (Jtty::stripJttyFillerText (QStringLiteral ("OVER <<<<< <<<<< THE")),
+              QStringLiteral ("OVER THE"));
+    // Only the first filler frame has arrived so far (message still growing).
+    QCOMPARE (Jtty::stripJttyFillerText (QStringLiteral ("OVER <<<<<")),
+              QStringLiteral ("OVER"));
+  }
+
+  void fillerStripOfPureFillerIsEmpty ()
+  {
+    QVERIFY (Jtty::stripJttyFillerText (Jtty::jttyFillerText).isEmpty ());
+  }
+
+  void macroControlSeparatesPttFromText_data ()
+  {
+    QTest::addColumn<QString> ("macro");
+    QTest::addColumn<QString> ("text");
+    QTest::addColumn<bool> ("pttOn");
+    QTest::addColumn<bool> ("pttOff");
+
+    QTest::newRow ("cq") << "%[CQ %M CQ%]" << "CQ %M CQ" << true << true;
+    QTest::newRow ("tu-cq") << "%[%H TU CQ %M CQ%L%]" << "%H TU CQ %M CQ" << true << true;
+    QTest::newRow ("open-only") << "%[%H DE %M " << "%H DE %M" << true << false;
+    QTest::newRow ("close-only") << "...K%]" << "...K" << false << true;
+    QTest::newRow ("no-ptt") << "AGN?" << "AGN?" << false << false;
+    // Lower case is the token, not characters bound for the air.
+    QTest::newRow ("lowercase-log") << "%[TU %M%l%]" << "TU %M" << true << true;
+    QTest::newRow ("lowercase-tokens") << "%[%h %e%]" << "%H %E" << true << true;
+    // A percent not introducing a token is left alone.
+    QTest::newRow ("percent-literal") << "%[100% COPY%]" << "100% COPY" << true << true;
+    QTest::newRow ("percent-then-token") << "%[%%m%]" << "%%M" << true << true;
+  }
+
+  // pttOff decides both whether the over ends here and whether the commit that
+  // keys PTT carries EOM; the Chat sets rely on the close-only row.
+  void macroControlSeparatesPttFromText ()
+  {
+    QFETCH (QString, macro);
+    QFETCH (QString, text);
+    QFETCH (bool, pttOn);
+    QFETCH (bool, pttOff);
+
+    auto const control = Jtty::parseMacroControl (macro);
+    QCOMPARE (control.text, text);
+    QCOMPARE (control.pttOn, pttOn);
+    QCOMPARE (control.pttOff, pttOff);
+  }
+
+  // The hand-off macro is recognized however its tokens were typed.
+  void lowerCaseTokensStillStartTheNextQso ()
+  {
+    auto const control = Jtty::parseMacroControl (QStringLiteral ("%[TU NOW %q %E%l%]"));
+    QVERIFY (control.logQso);
+    QVERIFY (control.startsNextQso ());
+    QCOMPARE (control.text, QStringLiteral ("TU NOW %Q %E"));
   }
 };
 

@@ -7,6 +7,7 @@ set (qmap_CXXSRCS
   getfile.cpp
   livecq_parser.cpp
   main.cpp
+  ../Network/LiveCQUpload.cpp
   mainwindow.cpp
   meterwidget.cpp
   plotter.cpp

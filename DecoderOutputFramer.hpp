@@ -14,7 +14,10 @@ class DecoderOutputFramer
 public:
   enum class EventType
   {
+    Ready,
+    Error,
     Started,
+    Rejected,
     Record,
     Finished,
     Malformed
@@ -26,6 +29,8 @@ public:
     qint32 generation;
     QByteArray rawLine;
     DecoderIpc::Completion completion;
+    qint32 protocolVersion {0};
+    QByteArray errorStatus {};
   };
 
   using EventHandler = std::function<void (Event const&)>;

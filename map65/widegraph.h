@@ -2,6 +2,7 @@
 #define WIDEGRAPH_H
 
 #include <QDialog>
+#include <QHash>
 #include <QList>
 #include <QString>
 #include <QTimer>
@@ -50,17 +51,20 @@ public:
   // parsing the freq + sender callsign out of the "!"-prefix line);
   // the list ages out after m_decodeLabelPeriods ? TR period of no
   // refresh and gets pushed to the plotter for rendering.
-  // mode_reliable=false: caller has no authoritative mode (e.g. "&"
-  // bandmap line, where display.f90 writes no cmode). On dedup, the
+  // mode_reliable=false: caller has no authoritative mode (e.g. an "&"
+  // bandmap line without the mode character). On dedup, the
   // existing label's is_jt65 is preserved. For brand-new labels the
   // caller's is_jt65 is used as a best-guess seed.
   // freq_reliable=false: caller only has integer-kHz precision (e.g.
   // "&" bandmap line — cfreq0 is 3 chars, no ndf). On dedup, the
   // existing label's freq_khz is preserved so a precise "!" tick
   // is not stomped by a later imprecise "&" refresh.
+  // decode_utc: UTC (hhmm) of the decode an "&" bandmap line reports, or
+  // -1 if unknown. The Band Map repeats old decodes on every redisplay,
+  // so such a line keeps a label alive only when its UTC is new.
   void   addDecodeLabel(double freq_khz, const QString& callsign,
                         bool is_jt65, bool mode_reliable = true,
-                        bool freq_reliable = true);
+                        bool freq_reliable = true, int decode_utc = -1);
   void   clearDecodeLabels();
   bool   decodeLabelsEnabled() const { return m_decodeLabelsEnabled; }
   void   setDecodeLabelsEnabled(bool on);
@@ -132,6 +136,9 @@ private:
 
   // Decoded-callsign overlay state.
   QList<DecodeLabel> m_decodeLabels;
+  // Callsign -> UTC of the decode an aged-out label showed. The Band Map
+  // keeps re-sending that decode, which must not bring the label back.
+  QHash<QString, int> m_expiredLabelUtc;
   bool   m_decodeLabelsEnabled {true};
   int    m_decodeLabelPeriods  {5};   // disappear after N×TRperiod of no decode
   // Overlay opacity preset (0..255). UI offers None=255 / Medium=200 /

@@ -21,6 +21,7 @@ struct DecodeLabel {
     qint64  last_seen_ms;   // wall-clock of most recent fresh decode
     int     hits;           // for tie-breaking when stacking
     bool    is_jt65;        // true = JT65 (orange label); false = Q65 (yellow)
+    int     last_utc = -1;  // UTC (hhmm) of the Band Map decode last seen, or -1
 
     DecodeLabel(double f, const QString& c, qint64 t, int h, bool jt65)
         : freq_khz(f), callsign(c), last_seen_ms(t), hits(h), is_jt65(jt65) {}

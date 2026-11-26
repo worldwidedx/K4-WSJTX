@@ -1,4 +1,8 @@
-subroutine ft8sdvar(s8,srr,itone,msgd,msg37,lft8sd,lcq)
+subroutine ft8sdvar(s8,srr,itone,msgd,msg37,lft8sd,lcq,knowledge)
+
+  use packjt77, only: pack77_state
+  use ft8_codec_context, only: get_ft8_codec_state
+  use ft8var_codec_context, only: genft8sdvar_for_state
 
   use ft8_mod1, only : mycall
   real, intent(in) :: s8(0:7,79)
@@ -10,6 +14,11 @@ subroutine ft8sdvar(s8,srr,itone,msgd,msg37,lft8sd,lcq)
   integer*1 msgbits(77)
   logical(1), intent(in) :: lcq
   logical(1) lft8sd,lmatched(58),valid4(4)
+  type(pack77_state), target, optional, intent(inout) :: knowledge
+  type(pack77_state), pointer :: codec
+
+  codec => get_ft8_codec_state()
+  if(present(knowledge)) codec => knowledge
 
   if(index(msgd,' RR73').gt.0 .or. index(msgd,' 73').gt.0) return ! do not process 73 messages
 ! do not process messages with grid
@@ -38,7 +47,7 @@ subroutine ft8sdvar(s8,srr,itone,msgd,msg37,lft8sd,lcq)
   if(lcq) then
     i3=-1; n3=-1
     msg372=msgd
-    call genft8sdvar(msg372,i3,n3,msgsent37,msgbits,itone)
+    call genft8sdvar_for_state(codec,msg372,i3,n3,msgsent37,msgbits,itone)
     if(i3.lt.0) return
     idtone(1:29)=itone(8:36)
     idtone(30:58)=itone(44:72)
@@ -47,7 +56,7 @@ subroutine ft8sdvar(s8,srr,itone,msgd,msg37,lft8sd,lcq)
     do i=1,4
       msg372=msg4(i)
       i3=-1; n3=-1
-      call genft8sdvar(msg372,i3,n3,msgsent37,msgbits,itone)
+      call genft8sdvar_for_state(codec,msg372,i3,n3,msgsent37,msgbits,itone)
       if(i3.lt.0) cycle
       valid4(i)=.true.
       idtone4(i,1:29)=itone(8:36)

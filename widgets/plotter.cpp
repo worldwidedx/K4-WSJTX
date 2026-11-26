@@ -120,6 +120,7 @@ void CPlotter::resizeEvent(QResizeEvent* )                    //resizeEvent()
     m_2DPixmap.fill(Qt::black);
     m_WaterfallPixmap = QPixmap(kWaterfallStorageWidth, m_h1);
     m_WaterfallPixmap.fill(Qt::black);
+    m_jttyRows.resize (m_h1);
     m_OverlayPixmap = QPixmap(m_Size.width(), m_h2);
     m_OverlayPixmap.fill(Qt::black);
     m_ScalePixmap = QPixmap(m_scale.width(),30);
@@ -154,7 +155,7 @@ void CPlotter::paintEvent(QPaintEvent *)                                // paint
 
 void CPlotter::draw(float swide[], bool bScroll, bool bRed)
 {
-  if (!m_TRperiod) return;      // not ready to plot yet
+  if (m_mode != "JTTY" && !m_TRperiod) return;
   int j,j0;
   float y,y2,ymin;
   bool const drawWaterfall = bScroll or bRed or m_bReplot;
@@ -172,6 +173,12 @@ void CPlotter::draw(float swide[], bool bScroll, bool bRed)
   if(waterfallWidth<1) return;
   if(bScroll and !m_bReplot) {
     m_WaterfallPixmap.scroll(0,1,0,0,waterfallWidth,m_h1);
+    m_jttyRows.prepend ({m_pendingJttyRow,
+        m_pendingJttyRow.reception && m_jttyRowsSinceTimestamp >= fontMetrics ().height ()});
+    if (m_jttyRows.front ().timestamp) m_jttyRowsSinceTimestamp = 0;
+    ++m_jttyRowsSinceTimestamp;
+    m_jttyRows.resize (m_h1);
+    m_pendingJttyRow = {};
   }
   QPainter painter1(&m_WaterfallPixmap);
   if(m_bFirst or bRed or !m_bQ65_Sync or m_mode!=m_mode0
@@ -227,7 +234,8 @@ void CPlotter::draw(float swide[], bool bScroll, bool bRed)
     if(savgBins > availableBins) savgBins = availableBins;
     if(savgBins > 0) {
       m_savgDisplay.resize(savgBins);
-      std::copy(&dec_data.savg[j0], &dec_data.savg[j0] + savgBins, m_savgDisplay.data());
+      auto const * average = m_mode == "JTTY" ? m_jttyCumulative.data () : dec_data.savg;
+      std::copy(average + j0, average + j0 + savgBins, m_savgDisplay.data());
       flat4_(m_savgDisplay.data(),&savgBins,&m_Flatten);
     }
   }
@@ -275,7 +283,7 @@ void CPlotter::draw(float swide[], bool bScroll, bool bRed)
       int j=j0+m_scale.binsPerPixel()*i;
       int n=0;
       for(int k=0; k<m_scale.binsPerPixel() and j<NSMAX; k++) {
-        sum+=spectra_.syellow[j++];
+        sum += m_mode == "JTTY" ? m_jttyLinearAverage[j++] : spectra_.syellow[j++];
         n++;
       }
       if(n>0) y2=2.0*gain2d*sum/n + m_plot2dZero;
@@ -307,7 +315,8 @@ void CPlotter::draw(float swide[], bool bScroll, bool bRed)
 
   if(swidePlot[0]>1.0e29) m_line=0;
   if(m_mode=="FT4" and m_line==34) m_line=0;
-  if(m_line == painter1.fontMetrics ().height () && m_timestamp!=0) {
+  if (m_mode == "JTTY") drawJttyLabels (painter1, true);
+  if(m_mode != "JTTY" && m_line == painter1.fontMetrics ().height () && m_timestamp!=0) {
     painter1.setPen(Qt::white);
     QString t;
     if(m_nUTC<0) {
@@ -320,9 +329,8 @@ void CPlotter::draw(float swide[], bool bScroll, bool bRed)
          .toString ((m_TRperiod < 60.0) or (m_mode=="JTTY") ? "hh:mm:ss" : "hh:mm");
       t = QString {"%1    %2"}.arg (start).arg (m_rxBand);
     }
-    QRect rect{5, -2, m_scale.width()-10, painter1.fontMetrics().ascent()};
-    QRect boundingRect;
-    painter1.drawText(rect, m_timestamp==2?0x0082:0x0081,t, &boundingRect);
+    QRect const rect{5, 0, m_scale.width()-10, painter1.fontMetrics().height()};
+    painter1.drawText(rect, (m_timestamp==2 ? Qt::AlignRight : Qt::AlignLeft) | Qt::AlignTop, t);
   }
 
   if(m_mode=="JT4" or (m_mode=="Q65" and m_nSubMode>=3)) {
@@ -433,8 +441,35 @@ void CPlotter::drawSavedWaterfall()
   if(m_mode=="Q65" and m_bQ65_Sync) {
     draw(m_replotRow.data(),false,true);
   }
+  if (m_mode == "JTTY") {
+    QPainter painter (&m_WaterfallPixmap);
+    drawJttyLabels (painter, false);
+  }
   update();                                    //trigger a new paintEvent
   m_bReplot=false;
+}
+
+void CPlotter::setJttySpectrum (
+    std::array<float, JttySpectrumFrame::BinCount> const& cumulative,
+    std::array<float, JttySpectrumFrame::BinCount> const& linearAverage)
+{
+  m_jttyCumulative = cumulative;
+  m_jttyLinearAverage = linearAverage;
+}
+
+void CPlotter::drawJttyLabels (QPainter& painter, bool newestOnly)
+{
+  if (!m_timestamp) return;
+  painter.setPen (Qt::white);
+  int const count = newestOnly ? std::min (1, m_jttyRows.size ()) : m_jttyRows.size ();
+  for (int row = 0; row < count; ++row) {
+    auto const& saved = m_jttyRows[row];
+    if (!saved.audio.reception || (!saved.timestamp && !saved.audio.gap)) continue;
+    QString label = QDateTime::fromMSecsSinceEpoch (saved.audio.utcEndMs, Qt::UTC).toString ("hh:mm:ss");
+    if (saved.audio.gap) label += "  " + tr ("Input interrupted");
+    QRect const rect {5, row, m_scale.width () - 10, painter.fontMetrics ().height ()};
+    painter.drawText (rect, (m_timestamp == 2 ? Qt::AlignRight : Qt::AlignLeft) | Qt::AlignTop, label);
+  }
 }
 
 void CPlotter::DrawOverlay()                   //DrawOverlay()
@@ -979,14 +1014,10 @@ void CPlotter::mouseDoubleClickEvent (QMouseEvent * event)
     bool leftbutton = (event->button() & Qt::LeftButton);
     bool ctrl = (event->modifiers() & Qt::ControlModifier);
   if (leftbutton and m_mode=="JTTY" and !ctrl) {
-    // Waterfall region is screen y in [30,30+m_h1); row 0 (newest) is at
-    // the top, growing downward -- see the m_j=0 draw + scroll(0,1,...) in
-    // draw(). Ctrl+double-click still falls through below for the old,
-    // unbounded full-buffer rescan.
     int const row = event->y() - 30;
-    if (row >= 0 and row < m_h1) {
-      float const secondsAgo = row * m_waterfallAvg * 3456.0f/12000.0f;
-      emit jttyDecodeAgainAt(secondsAgo);
+    if (row >= 0 && row < m_jttyRows.size ()) {
+      auto const& audio = m_jttyRows[row].audio;
+      if (audio.hasAudio ()) emit jttyDecodeAgainAtSample (audio.reception, audio.endSample);
     }
   } else if (leftbutton) {
     int n=2;

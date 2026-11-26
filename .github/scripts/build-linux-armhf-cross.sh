@@ -5,7 +5,7 @@ VERSION="${VERSION:?missing}"
 ARCH="${ARCH:?missing}"
 HAMLIB_BRANCH="${HAMLIB_BRANCH:?missing}"
 WSJT_RELEASE_CHANNEL="${WSJT_RELEASE_CHANNEL:-DEVEL}"
-WSJT_RC_NUMBER="${WSJT_RC_NUMBER:-}"
+WSJT_PRERELEASE_NUMBER="${WSJT_PRERELEASE_NUMBER:-}"
 if [ "$ARCH" != armhf ]; then
   echo "build-linux-armhf-cross.sh supports only arch=armhf" >&2
   exit 2
@@ -42,7 +42,7 @@ cmake -S . -B wsjtx-build \
   -DWSJT_ENABLE_TESTS=ON \
   -DWSJT_FORTRAN_LIBRARY_VARIANTS=OPENMP_ONLY \
   -DWSJT_RELEASE_CHANNEL="$WSJT_RELEASE_CHANNEL" \
-  -DWSJT_RC_NUMBER="$WSJT_RC_NUMBER" \
+  -DWSJT_PRERELEASE_NUMBER="$WSJT_PRERELEASE_NUMBER" \
   -Wno-dev
 cmake --build wsjtx-build --parallel "$(nproc)"
 ended="$(date +%s)"

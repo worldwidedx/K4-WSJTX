@@ -49,6 +49,9 @@ WavInputResult load_wav_input (QString const& name, int sample_limit)
   auto const wav = WavFile::load (name, sample_limit);
   if (wav.isValid ())
     {
+      result.firstSampleUtc = wav.firstSampleUtc;
+      result.samplesSinceMidnight = wav.samplesSinceMidnight;
+      result.timeReferenceRate = wav.timeReferenceRate;
       result.samples.assign (sample_limit, 0);
       if (!wav.samples.isEmpty ())
         {

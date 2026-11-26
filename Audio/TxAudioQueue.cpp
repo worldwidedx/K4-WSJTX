@@ -63,13 +63,19 @@ TxAudioQueueEnqueueResult TxAudioQueue::enqueue (
 TxAudioQueueEnqueueResult TxAudioQueue::enqueue (
     qint16 const * samples, qint64 count, TxAudioQueueEpoch epoch)
 {
-  bool accepted {false};
+  TxAudioQueueEnqueueFailure failure {TxAudioQueueEnqueueFailure::StaleEpoch};
   TxAudioQueueEpoch current_epoch;
   if (impl_->tryEpoch (current_epoch) && epoch == current_epoch)
     {
-      accepted = impl_->fifo.enqueue (samples, count, epoch.value ());
+      failure = impl_->fifo.enqueue (samples, count, epoch.value ())
+        ? TxAudioQueueEnqueueFailure::None
+        : TxAudioQueueEnqueueFailure::Capacity;
     }
-  return TxAudioQueueEnqueueResult {accepted, progress ()};
+  return TxAudioQueueEnqueueResult {
+    failure == TxAudioQueueEnqueueFailure::None,
+    failure,
+    progress ()
+  };
 }
 
 void TxAudioQueue::clear (TxAudioQueueEpoch epoch)
@@ -108,14 +114,20 @@ TxAudioQueueDrainState TxAudioQueue::takeDrainReady () noexcept
 
 TxAudioQueueProgress TxAudioQueue::progress () const noexcept
 {
-  TxAudioQueueEpoch epoch;
-  impl_->tryEpoch (epoch);
-  return TxAudioQueueProgress {
-    epoch,
+  auto const before = impl_->epoch_sequence.load (std::memory_order_acquire);
+  if (before & 1) return {};
+
+  TxAudioQueueProgress result {
+    TxAudioQueueEpoch {impl_->epoch.load (std::memory_order_relaxed)},
     impl_->fifo.queuedReal (),
     impl_->fifo.servedReal (),
     impl_->fifo.totalReal ()
   };
+  std::atomic_thread_fence (std::memory_order_acquire);
+  auto const after = impl_->epoch_sequence.load (std::memory_order_relaxed);
+  if (!TxAudioQueueDetail::tryMakeEpochSnapshot (
+        before, result.epoch.value (), after, result.epoch)) return {};
+  return result;
 }
 
 qint64 TxAudioQueue::capacity () const noexcept

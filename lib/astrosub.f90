@@ -10,7 +10,8 @@ module astro_module
 contains
 
   subroutine astrosub(nyear,month,nday,uth8,freq8,mygrid_cp,                    &
-       hisgrid_cp,AzSun8,ElSun8,AzMoon8,ElMoon8,AzMoonB8,ElMoonB8,              &
+       hisgrid_cp,use_home_coordinates,home_latitude,home_longitude,             &
+       AzSun8,ElSun8,AzMoon8,ElMoon8,AzMoonB8,ElMoonB8,              &
        ntsky,ndop,ndop00,RAMoon8,DecMoon8,Dgrd8,poloffset8,xnr8,extraazel,      &
        techo8,width1,width2,bTx,AzElFileName_cp,jpleph_file_name_cp,            &
        ephemeris_result)                                                        &
@@ -23,8 +24,8 @@ contains
            C_string_value, assignment(=)
 
     integer(C_int), intent(in), value :: nyear, month, nday
-    logical(C_bool), intent(in), value :: extraazel
-    real(C_double), intent(in), value :: uth8, freq8
+    logical(C_bool), intent(in), value :: extraazel, use_home_coordinates
+    real(C_double), intent(in), value :: uth8, freq8, home_latitude, home_longitude
     real(C_double), intent(out) :: AzSun8, ElSun8, AzMoon8, ElMoon8, AzMoonB8,  &
          ElMoonB8, Ramoon8, DecMoon8, Dgrd8, poloffset8, xnr8, techo8, width1,  &
          width2
@@ -34,6 +35,7 @@ contains
          jpleph_file_name_cp
 
     character(len=6) :: mygrid, hisgrid
+    logical :: use_home_coordinates_f
     character(len=:), allocatable :: AzElFileName
     character(len=1) :: c1
     character(len=32) :: envvar
@@ -50,9 +52,11 @@ contains
 
     mygrid = mygrid_cp
     hisgrid = hisgrid_cp
+    use_home_coordinates_f = use_home_coordinates
     AzElFileName = C_string_value (AzElFileName_cp)
     jpleph_file_name = jpleph_file_name_cp
     call astro0(nyear,month,nday,uth8,freq8,mygrid,hisgrid,                &
+         use_home_coordinates_f,home_latitude,home_longitude,                &
          AzSun8,ElSun8,AzMoon8,ElMoon8,AzMoonB8,ElMoonB8,ntsky,ndop,ndop00,  &
          dbMoon8,RAMoon8,DecMoon8,HA8,Dgrd8,sd8,poloffset8,xnr8,dfdt,dfdt0,  &
          width1,width2,xlst8,techo8,ephemeris_result)

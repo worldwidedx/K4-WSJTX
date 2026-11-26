@@ -3,6 +3,7 @@
 
 #include <QAudioFormat>
 #include <QByteArray>
+#include <QDateTime>
 #include <QString>
 #include "Radio.hpp"
 
@@ -17,6 +18,9 @@ public:
     QByteArray samples;
     QAudioFormat format;
     QString error;
+    QDateTime firstSampleUtc;
+    quint64 samplesSinceMidnight {0};
+    int timeReferenceRate {0};
     int frames {0};
 
     bool isValid () const {return error.isEmpty ();}

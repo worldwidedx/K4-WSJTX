@@ -1,6 +1,7 @@
-subroutine ft8apsetvar(lmycallstd,lhiscallstd,numthreads)
+subroutine ft8apsetvar(lmycallstd,lhiscallstd,numthreads,knowledge)
 
   use packjt77
+  use ft8_codec_context, only: get_ft8_codec_state
   use ft8_mod1, only : apsym,mycall,hiscall,apsymsp,lhound,apsymdxns1,apsymdxnsrrr,mybcall,hisbcall,apcqsym,hisgrid4,     &
                        apsymdxnsrr73,apsymdxns73,apsymmyns1,apsymmyns2,apsymmynsrr73,apsymmyns73,apsymdxstd,apsymdxnsr73, &
                        apsymdxns732,apsymmynsrrr
@@ -13,11 +14,24 @@ subroutine ft8apsetvar(lmycallstd,lhiscallstd,numthreads)
   logical(1), intent(in) :: lmycallstd,lhiscallstd
   type(unpack77_options) :: no_record_options
   type(pack77_options) :: no_tx_hash_options
+  type(pack77_state), target, optional, intent(inout) :: knowledge
+  type(pack77_state), pointer :: codec
   data mycallprev/'QQ2QQ'/
   data hiscallprev/'QQ1QQ'/
   data lhoundprev/.false./
   data first/.true./
   save hiscallprev,mycallprev,lhoundprev,first
+
+  go to 900
+entry reset_ft8apsetvar()
+  hiscallprev='QQ1QQ'
+  mycallprev='QQ2QQ'
+  lhoundprev=.false.
+  first=.true.
+  return
+900 continue
+  codec => get_ft8_codec_state()
+  if(present(knowledge)) codec => knowledge
 
   i1=0
   i3=-1
@@ -34,7 +48,7 @@ subroutine ft8apsetvar(lmycallstd,lhiscallstd,numthreads)
     first=.false.; mycallprev=mycall; lhoundprev=lhound
 
 ! shall hash both callsigns for making AP masks with nonstandard callsign message
-    if(.not.lhound) call fillhashvar(numthreads,.true.)
+    if(.not.lhound) call fold_queued_calls_for_state(codec,numthreads)
 
     lnohiscall=.false.
     hiscallt=hiscall
@@ -51,8 +65,8 @@ subroutine ft8apsetvar(lmycallstd,lhiscallstd,numthreads)
         else; msg='CQ '//trim(hiscall)
         endif
 
-        call pack77(msg,i3,n3,c77,no_tx_hash_options)
-        call unpack77_configured(c77,1,msgchk,unpk77_successvar,no_record_options)
+        call pack77_for_state(codec,msg,i3,n3,c77,no_tx_hash_options)
+        call unpack77_configured_for_state(codec,c77,1,msgchk,unpk77_successvar,no_record_options)
 !read(c77(75:77),'(b3)') k3; print *,'i3 =',k3; print *,msgchk
         if(lhiscallstd .and. i3.ne.1 .or. .not.lhiscallstd .and. i3.ne.4 .or. (msg.ne.msgchk) .or. .not.unpk77_successvar) go to 1
         read(c77,'(77i1)',err=1) apcqsym(1:77)
@@ -62,8 +76,8 @@ subroutine ft8apsetvar(lmycallstd,lhiscallstd,numthreads)
       if(lhiscallstd .and. .not.lmycallstd) then
         msg=trim(hiscall)//' '//trim(hiscall)//' RRR'
         i3=0; n3=0
-        call pack77(msg,i3,n3,c77,no_tx_hash_options)
-        call unpack77_configured(c77,1,msgchk,unpk77_successvar,no_record_options)
+        call pack77_for_state(codec,msg,i3,n3,c77,no_tx_hash_options)
+        call unpack77_configured_for_state(codec,c77,1,msgchk,unpk77_successvar,no_record_options)
 !read(c77(75:77),'(b3)') k3; print *,'i3 =',k3; print *,msgchk
         if(i3.ne.1 .or. (msg.ne.msgchk) .or. .not.unpk77_successvar) go to 2
         read(c77,'(58i1)',err=2) apsymdxstd(1:58)
@@ -73,16 +87,16 @@ subroutine ft8apsetvar(lmycallstd,lhiscallstd,numthreads)
       if(.not.lhound .and. .not.lhiscallstd .and. len_trim(hiscall).gt.2) then
 ! nonstandard DXCall searching
         msg='<W9XYZ> '//trim(hiscall)//' RR73'
-        call pack77(msg,i3,n3,c77,no_tx_hash_options)
-        call unpack77_configured(c77,1,msgchk,unpk77_successvar,no_record_options)
+        call pack77_for_state(codec,msg,i3,n3,c77,no_tx_hash_options)
+        call unpack77_configured_for_state(codec,c77,1,msgchk,unpk77_successvar,no_record_options)
 !read(c77(75:77),'(b3)') k3; print *,'i3 =',k3; print *,msgchk
         if(i3.ne.4 .or. .not.unpk77_successvar) go to 3
         read(c77,'(77i1)',err=3) apsymdxnsrr73(1:77)
         apsymdxnsrr73=2*apsymdxnsrr73-1
 
         msg='<W9XYZ> '//trim(hiscall)//' 73'
-        call pack77(msg,i3,n3,c77,no_tx_hash_options)
-        call unpack77_configured(c77,1,msgchk,unpk77_successvar,no_record_options)
+        call pack77_for_state(codec,msg,i3,n3,c77,no_tx_hash_options)
+        call unpack77_configured_for_state(codec,c77,1,msgchk,unpk77_successvar,no_record_options)
 !read(c77(75:77),'(b3)') k3; print *,'i3 =',k3; print *,msgchk
         if(i3.ne.4 .or. .not.unpk77_successvar) go to 4
         read(c77,'(77i1)',err=4) apsymdxns73(1:77)
@@ -93,28 +107,28 @@ subroutine ft8apsetvar(lmycallstd,lhiscallstd,numthreads)
     if(.not.lhound .and. .not.lmycallstd .and. len_trim(mycall).gt.2) then
       if(lhiscallstd) then
         msg='<'//trim(mycall)//'> '//trim(hiscall)//' -15'
-        call pack77(msg,i3,n3,c77,no_tx_hash_options)
-        call unpack77_configured(c77,1,msgchk,unpk77_successvar,no_record_options)
+        call pack77_for_state(codec,msg,i3,n3,c77,no_tx_hash_options)
+        call unpack77_configured_for_state(codec,c77,1,msgchk,unpk77_successvar,no_record_options)
         if(i3.ne.1 .or. msg.ne.msgchk .or. .not.unpk77_successvar) go to 5
         read(c77,'(58i1)',err=5) apsymmyns2(1:58)
         apsymmyns2=2*apsymmyns2-1
 
         nlenmyc=len_trim(mycall)
         msg=trim(mycall)//' <'//trim(hiscall)//'> RR73'
-        call pack77(msg,i3,n3,c77,no_tx_hash_options)
-        call unpack77_configured(c77,1,msgchk,unpk77_successvar,no_record_options)
+        call pack77_for_state(codec,msg,i3,n3,c77,no_tx_hash_options)
+        call unpack77_configured_for_state(codec,c77,1,msgchk,unpk77_successvar,no_record_options)
         if(i3.ne.4 .or. msg.ne.msgchk .or. .not.unpk77_successvar) go to 6
         read(c77,'(77i1)',err=6) apsymmynsrr73(1:77)
         apsymmynsrr73=2*apsymmynsrr73-1
         msg=trim(mycall)//' <'//trim(hiscall)//'> 73'
-        call pack77(msg,i3,n3,c77,no_tx_hash_options)
-        call unpack77_configured(c77,1,msgchk,unpk77_successvar,no_record_options)
+        call pack77_for_state(codec,msg,i3,n3,c77,no_tx_hash_options)
+        call unpack77_configured_for_state(codec,c77,1,msgchk,unpk77_successvar,no_record_options)
         if(i3.ne.4 .or. msg.ne.msgchk .or. .not.unpk77_successvar) go to 7
         read(c77,'(77i1)',err=7) apsymmyns73(1:77)
         apsymmyns73=2*apsymmyns73-1
         msg=trim(mycall)//' <'//trim(hiscall)//'> RRR'
-        call pack77(msg,i3,n3,c77,no_tx_hash_options)
-        call unpack77_configured(c77,1,msgchk,unpk77_successvar,no_record_options)
+        call pack77_for_state(codec,msg,i3,n3,c77,no_tx_hash_options)
+        call unpack77_configured_for_state(codec,c77,1,msgchk,unpk77_successvar,no_record_options)
         if(i3.ne.4 .or. msg.ne.msgchk .or. .not.unpk77_successvar) go to 15
         read(c77,'(77i1)',err=15) apsymmynsrrr(1:77)
         apsymmynsrrr=2*apsymmynsrrr-1
@@ -122,8 +136,8 @@ subroutine ft8apsetvar(lmycallstd,lhiscallstd,numthreads)
       else if(lnohiscall) then
 
         msg='<'//trim(mycall)//'> ZZ1ZZZ -15'
-        call pack77(msg,i3,n3,c77,no_tx_hash_options)
-        call unpack77_configured(c77,1,msgchk,unpk77_successvar,no_record_options)
+        call pack77_for_state(codec,msg,i3,n3,c77,no_tx_hash_options)
+        call unpack77_configured_for_state(codec,c77,1,msgchk,unpk77_successvar,no_record_options)
         if(i3.ne.1 .or. msgchk.ne.msg .or. .not.unpk77_successvar) go to 8
         read(c77,'(29i1)',err=8) apsymmyns1(1:29)
         apsymmyns1=2*apsymmyns1-1
@@ -135,8 +149,8 @@ subroutine ft8apsetvar(lmycallstd,lhiscallstd,numthreads)
     if(.not.lhound .and. lmycallstd .and. (lhiscallstd .or. lnohiscall)) then
       msg=trim(mycall)//' '//trim(hiscallt)//' RRR'
       i3=0; n3=0
-      call pack77(msg,i3,n3,c77,no_tx_hash_options)
-      call unpack77_configured(c77,1,msgchk,unpk77_successvar,no_record_options)
+      call pack77_for_state(codec,msg,i3,n3,c77,no_tx_hash_options)
+      call unpack77_configured_for_state(codec,c77,1,msgchk,unpk77_successvar,no_record_options)
 !read(c77(75:77),'(b3)') k3; print *,'i3 =',k3; print *,msgchk
       if(i3.ne.1 .or. (msg.ne.msgchk) .or. .not.unpk77_successvar) go to 9
       read(c77,'(58i1)',err=9) apsym(1:58)
@@ -147,8 +161,8 @@ subroutine ft8apsetvar(lmycallstd,lhiscallstd,numthreads)
 ! standard messages from Fox, always base callsigns
       if(len_trim(hisbcall).gt.2 .and. len_trim(mybcall).gt.2) then
         msg=trim(mybcall)//' '//trim(hisbcall)//' -15'
-        call pack77(msg,i3,n3,c77,no_tx_hash_options)
-        call unpack77_configured(c77,1,msgchk,unpk77_successvar,no_record_options)
+        call pack77_for_state(codec,msg,i3,n3,c77,no_tx_hash_options)
+        call unpack77_configured_for_state(codec,c77,1,msgchk,unpk77_successvar,no_record_options)
 !read(c77(75:77),'(b3)') k3; print *,'i3 =',k3; print *,msgchk
         if(i3.ne.1 .or. (msg.ne.msgchk) .or. .not.unpk77_successvar) go to 9
         read(c77,'(58i1)',err=9) apsym(1:58)
@@ -160,8 +174,8 @@ subroutine ft8apsetvar(lmycallstd,lhiscallstd,numthreads)
 ! special messages
       msg=trim(mycall)//' RR73; '//trim(mycall)//' <'//trim(hiscallt)//'> -16'
       i3=0; n3=1
-      call pack77(msg,i3,n3,c77,no_tx_hash_options)
-      call unpack77_configured(c77,1,msgchk,unpk77_successvar,no_record_options)
+      call pack77_for_state(codec,msg,i3,n3,c77,no_tx_hash_options)
+      call unpack77_configured_for_state(codec,c77,1,msgchk,unpk77_successvar,no_record_options)
 !read(c77(75:77),'(b3)') k3; print *,'i3 =',k3; print *,msgchk
       i1=0; i1=index(msgchk,'<'); if(i1.lt.15) return
       if(i3.ne.0 .or. msg(1:i1).ne.msgchk(1:i1) .or. .not.unpk77_successvar) go to 10
@@ -171,32 +185,32 @@ subroutine ft8apsetvar(lmycallstd,lhiscallstd,numthreads)
 
     if(.not.lhound .and. lmycallstd .and. .not.lhiscallstd .and. len_trim(hiscall).gt.2) then
       msg=trim(mycall)//' <'//trim(hiscall)//'> -16' ! report, rreport
-      call pack77(msg,i3,n3,c77,no_tx_hash_options)
-      call unpack77_configured(c77,1,msgchk,unpk77_successvar,no_record_options)
+      call pack77_for_state(codec,msg,i3,n3,c77,no_tx_hash_options)
+      call unpack77_configured_for_state(codec,c77,1,msgchk,unpk77_successvar,no_record_options)
 !read(c77(75:77),'(b3)') k3; print *,'i3 =',k3; print *,msgchk
       if(i3.ne.1 .or. msg.ne.msgchk .or. .not.unpk77_successvar) go to 11
       read(c77,'(58i1)',err=11) apsymdxns1(1:58)
       apsymdxns1=2*apsymdxns1-1
 
       msg='<'//trim(mycall)//'> '//trim(hiscall)//' RRR'
-      call pack77(msg,i3,n3,c77,no_tx_hash_options)
-      call unpack77_configured(c77,1,msgchk,unpk77_successvar,no_record_options)
+      call pack77_for_state(codec,msg,i3,n3,c77,no_tx_hash_options)
+      call unpack77_configured_for_state(codec,c77,1,msgchk,unpk77_successvar,no_record_options)
 !read(c77(75:77),'(b3)') k3; print *,'i3 =',k3; print *,msgchk
       if(i3.ne.4 .or. msg.ne.msgchk .or. .not.unpk77_successvar) go to 12
       read(c77,'(77i1)',err=12) apsymdxnsrrr(1:77)
       apsymdxnsrrr=2*apsymdxnsrrr-1
 
       msg='<'//trim(mycall)//'> '//trim(hiscall)//' RR73'
-      call pack77(msg,i3,n3,c77,no_tx_hash_options)
-      call unpack77_configured(c77,1,msgchk,unpk77_successvar,no_record_options)
+      call pack77_for_state(codec,msg,i3,n3,c77,no_tx_hash_options)
+      call unpack77_configured_for_state(codec,c77,1,msgchk,unpk77_successvar,no_record_options)
 !read(c77(75:77),'(b3)') k3; print *,'i3 =',k3; print *,msgchk
       if(i3.ne.4 .or. msg.ne.msgchk .or. .not.unpk77_successvar) go to 13
       read(c77,'(77i1)',err=13) apsymdxnsr73(1:77)
       apsymdxnsr73=2*apsymdxnsr73-1
 
       msg='<'//trim(mycall)//'> '//trim(hiscall)//' 73'
-      call pack77(msg,i3,n3,c77,no_tx_hash_options)
-      call unpack77_configured(c77,1,msgchk,unpk77_successvar,no_record_options)
+      call pack77_for_state(codec,msg,i3,n3,c77,no_tx_hash_options)
+      call unpack77_configured_for_state(codec,c77,1,msgchk,unpk77_successvar,no_record_options)
 !read(c77(75:77),'(b3)') k3; print *,'i3 =',k3; print *,msgchk
       if(i3.ne.4 .or. msg.ne.msgchk .or. .not.unpk77_successvar) go to 14
       read(c77,'(77i1)',err=14) apsymdxns732(1:77)

@@ -32,6 +32,7 @@ program test_jtty_tbcc_decoder
        'rank-one payload unexpectedly evaluated half-symbol fallback')
   call require(result%exported_candidate_count <= 4_int32, &
        'coherence ladder exposed more than four hypotheses per rung')
+  call expect_decode_symmetry()
 
   payload(33) = 1_int32
   call tbcc_encode(payload, tones, JTTY_TBCC_PROFILE_1167_1545_80F)
@@ -41,6 +42,7 @@ program test_jtty_tbcc_decoder
   call require(.not.success, 'coherence ladder accepted reserved bit one')
   call require(all(decoded == 0_int32), &
        'reserved-bit rejection left a stale payload')
+  call expect_failure_result()
 
   halves = correlations
   correlations = cmplx(0.0_real32, 0.0_real32, real32)
@@ -49,6 +51,7 @@ program test_jtty_tbcc_decoder
   call require(.not.success, 'half-symbol fallback accepted reserved bit one')
   call require(all(decoded == 0_int32), &
        'half-symbol reserved-bit rejection left a stale payload')
+  call expect_failure_result()
 
   payload(33) = 0_int32
   call tbcc_encode(payload, tones, JTTY_TBCC_PROFILE_1167_1545_80F)
@@ -68,22 +71,68 @@ program test_jtty_tbcc_decoder
   call jtty_tbcc_decode(correlations, halves, decoded, success, result)
   call require(.not.success, 'coherence ladder accepted the all-zero payload')
   call require(all(decoded == 0_int32), 'failed ladder decode left stale payload')
-  call require(result%evaluated_rung_count == 4_int32, &
-       'failed decode did not report all evaluated rungs')
+  call expect_failure_result()
 
   correlations = cmplx(0.0_real32, 0.0_real32, real32)
   decoded = huge(0_int32)
   call jtty_tbcc_decode(correlations, halves, decoded, success, result)
   call require(.not.success, 'coherence ladder accepted flat correlations')
   call require(all(decoded == 0_int32), 'flat-correlation decode left stale payload')
-  call require(result%evaluated_rung_count == 4_int32, &
-       'flat-correlation decode did not report all evaluated rungs')
+  call expect_failure_result()
 
   call expect_coherent_decodes()
 
   print *, 'test_jtty_tbcc_decoder: all checks passed'
 
 contains
+
+  subroutine expect_decode_symmetry()
+    complex(real32) :: transformed(0:3, TOTAL_K)
+    integer(int32) :: transformed_payload(PAYLOAD_BITS)
+    type(jtty_tbcc_decode_result) :: baseline, transformed_result
+    logical :: transformed_success
+
+    baseline = result
+    transformed = -correlations
+    call jtty_tbcc_decode(transformed, halves, transformed_payload, transformed_success, transformed_result)
+    call require(transformed_success .and. all(transformed_payload == payload), &
+         'negated correlations changed the decode outcome')
+    call require(transformed_result%accepted_hypothesis_rank == baseline%accepted_hypothesis_rank .and. &
+         transformed_result%accepted_identity == baseline%accepted_identity .and. &
+         transformed_result%exported_candidate_count == baseline%exported_candidate_count .and. &
+         transformed_result%circular_candidate_count == baseline%circular_candidate_count .and. &
+         transformed_result%coherent_block_length == baseline%coherent_block_length .and. &
+         transformed_result%evaluated_rung_count == baseline%evaluated_rung_count, &
+         'negated correlations changed the accepted hypothesis')
+
+    transformed = 2.0_real32*correlations
+    call jtty_tbcc_decode(transformed, halves, transformed_payload, transformed_success, transformed_result)
+    call require(transformed_success .and. all(transformed_payload == payload), &
+         'doubled correlations changed the decode outcome')
+    call require(transformed_result%accepted_hypothesis_rank == baseline%accepted_hypothesis_rank .and. &
+         transformed_result%accepted_identity == baseline%accepted_identity .and. &
+         transformed_result%exported_candidate_count == baseline%exported_candidate_count .and. &
+         transformed_result%circular_candidate_count == baseline%circular_candidate_count .and. &
+         transformed_result%coherent_block_length == baseline%coherent_block_length .and. &
+         transformed_result%evaluated_rung_count == baseline%evaluated_rung_count, &
+         'doubled correlations changed the accepted hypothesis')
+  end subroutine expect_decode_symmetry
+
+  subroutine expect_failure_result()
+    type(jtty_tbcc_decode_result) :: empty
+
+    empty = jtty_tbcc_decode_result()
+    call require(result%accepted_hypothesis_rank == empty%accepted_hypothesis_rank .and. &
+         result%exported_candidate_count == empty%exported_candidate_count .and. &
+         result%circular_candidate_count == empty%circular_candidate_count .and. &
+         result%coherent_block_length == empty%coherent_block_length .and. &
+         result%accepted_identity == empty%accepted_identity .and. &
+         result%accepted_metric == empty%accepted_metric .and. &
+         (result%used_half_symbol_observation .eqv. empty%used_half_symbol_observation), &
+         'failed decode left stale result metadata')
+    call require(result%evaluated_rung_count == 4_int32, &
+         'failed decode did not report all evaluated rungs')
+  end subroutine expect_failure_result
 
   subroutine expect_coherent_decodes()
     ! Seed 6 verifies that reserved-bit pruning retains the valid L1 path.

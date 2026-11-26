@@ -145,11 +145,11 @@ public:
     server.close ();
   }
 
-  bool start ()
+  bool start (ReceivePolicy policy = ReceivePolicy::Timed)
   {
     if (!server.listen ()) return false;
     QString const address = QStringLiteral ("127.0.0.1:%1").arg (server.port ());
-    QMetaObject::invokeMethod (context_, [this, address] {
+    QMetaObject::invokeMethod (context_, [this, address, policy] {
       rig = new TCITransceiver (&logger_, {}, "0", address, true, tci__audio,
                                 context_, [this] { return clock.now (); });
       QObject::connect (rig, &Transceiver::failure, rig, [this] (QString const&) {
@@ -162,6 +162,15 @@ public:
                         [this] (ReceiveAudio audio) {
         receiver_.accept (audio, storage);
       }, Qt::QueuedConnection);
+      QObject::connect (rig, &Transceiver::continuousAudioAvailable, &audioContext_,
+                        [this] (JttyReceiveMailboxPtr mailbox) {
+        continuousMailbox = std::move (mailbox);
+      }, Qt::QueuedConnection);
+      QObject::connect (rig, &Transceiver::continuousReceiveDrained, &audioContext_,
+                        [this] (quint64 request, JttyReceiveMailboxPtr mailbox) {
+        drainedRequest_ = request;
+        drainedMailbox_ = std::move (mailbox);
+      }, Qt::QueuedConnection);
       // A ready message is an ordered fence behind preceding binary frames.
       QObject::connect (rig, &TCITransceiver::tci_done7, rig, [this] {
         std::lock_guard<std::mutex> lock {fenceMutex_};
@@ -173,6 +182,8 @@ public:
       state_.frequency (14074000);
       state_.mode (Transceiver::USB);
       state_.period (15);
+      state_.receive_policy (policy);
+      state_.receive_context (77);
       state_.audio (true);
       state_.volume (0);
       rig->set (state_, 2);
@@ -189,6 +200,39 @@ public:
       rig->set (state_, ++sequence_);
     }, Qt::BlockingQueuedConnection);
     return !failed_.load ();
+  }
+
+  bool setReceivePolicy (ReceivePolicy policy)
+  {
+    auto done = std::make_shared<std::atomic_bool> (false);
+    QMetaObject::invokeMethod (context_, [this, policy, done] {
+      state_.receive_policy (policy);
+      rig->set (state_, ++sequence_);
+      done->store (true);
+    }, Qt::QueuedConnection);
+    return server.wait_for ([done] { return done->load (); }, 10000) && !failed_.load ();
+  }
+
+  bool setReceiveContext (quint64 context)
+  {
+    auto done = std::make_shared<std::atomic_bool> (false);
+    QMetaObject::invokeMethod (context_, [this, context, done] {
+      state_.receive_context (context);
+      rig->set (state_, ++sequence_);
+      done->store (true);
+    }, Qt::QueuedConnection);
+    return server.wait_for ([done] { return done->load (); }, 10000) && !failed_.load ();
+  }
+
+  bool setBlockSize (qint32 size)
+  {
+    auto done = std::make_shared<std::atomic_bool> (false);
+    QMetaObject::invokeMethod (context_, [this, size, done] {
+      state_.blocksize (size);
+      rig->set (state_, ++sequence_);
+      done->store (true);
+    }, Qt::QueuedConnection);
+    return server.wait_for ([done] { return done->load (); }, 10000) && !failed_.load ();
   }
 
   bool fence ()
@@ -223,6 +267,23 @@ public:
     return sent;
   }
 
+  bool incompleteAudioPacket ()
+  {
+    QByteArray bytes;
+    if (!TciStream::prepare_float_frame (&bytes, 2)) return false;
+    auto * header = TciStream::header (&bytes);
+    header->receiver = 0;
+    header->sampleRate = 48000;
+    header->format = TciStream::Float32Format;
+    header->type = TciStream::RxAudioStream;
+    header->length = 2;
+    header->channels = 2;
+    bytes.chop (sizeof (float));
+    bool const sent = server.send_binary (bytes);
+    server.flush ();
+    return sent && fence ();
+  }
+
   bool feed (std::vector<float> const& pcm, std::vector<int> const& chunks = {4096},
              int receiver = 0)
   {
@@ -243,6 +304,16 @@ public:
     return {storage.d2, storage.d2 + storage.params.kin};
   }
   int notifications () const { return notifications_.load (); }
+  void deliverContinuous () { QCoreApplication::sendPostedEvents (&audioContext_, QEvent::MetaCall); }
+  bool drainContinuous (quint64 request)
+  {
+    QMetaObject::invokeMethod (context_, [this, request] {
+      static_cast<Transceiver *> (rig)->requestContinuousReceiveDrain (request);
+    }, Qt::QueuedConnection);
+    return server.wait_for ([this, request] { return drainedRequest_ == request; }, 10000)
+      && drainedMailbox_ == continuousMailbox;
+  }
+  JttyReceiveMailboxPtr continuousMailbox;
 
   TciSimServer server;
   ReceiveClock clock;
@@ -253,6 +324,8 @@ private:
   QObject * context_ = nullptr;
   QObject audioContext_;
   ReceiveAudioConsumer receiver_;
+  quint64 drainedRequest_ = 0;
+  JttyReceiveMailboxPtr drainedMailbox_;
   Transceiver::TransceiverState state_;
   unsigned sequence_ = 2;
   std::atomic_bool started_ {false}, failed_ {false};
@@ -294,6 +367,131 @@ class TestTciReceiveOwnership : public QObject
 {
   Q_OBJECT
 private Q_SLOTS:
+  void block_size_changes_preserve_captured_partial_audio ()
+  {
+    Harness h;
+    QVERIFY (h.start (ReceivePolicy::ContinuousJtty));
+    QVERIFY (h.feed (signal (100, 0.125f)));
+    h.deliverContinuous ();
+    QVERIFY (h.continuousMailbox);
+    QVERIFY (h.setBlockSize (-1));
+    QVERIFY (h.setBlockSize (0));
+    QVERIFY (h.setBlockSize (7 * 512 + 1));
+    QVERIFY (h.setBlockSize (block));
+    JttyReceiveEvent event;
+    QVERIFY (h.continuousMailbox->take (event));
+    QCOMPARE (event.kind, JttyReceiveEvent::Kind::Begin);
+    auto const firstSession = event.session;
+    QVERIFY (!h.continuousMailbox->take (event));
+    QVERIFY (h.setBlockSize (256));
+    QVERIFY (h.continuousMailbox->take (event));
+    QCOMPARE (event.kind, JttyReceiveEvent::Kind::Samples);
+    QCOMPARE (event.session, firstSession);
+    QCOMPARE (event.samples.size (), std::size_t {100});
+    QVERIFY (std::any_of (event.samples.begin (), event.samples.end (),
+                         [] (short sample) { return sample != 0; }));
+    QVERIFY (h.continuousMailbox->take (event));
+    QCOMPARE (event.kind, JttyReceiveEvent::Kind::End);
+    QCOMPARE (event.firstSample, qint64 {100});
+    QVERIFY (!h.continuousMailbox->take (event));
+    QVERIFY (h.feed (signal (256, 0.25f)));
+    QVERIFY (h.continuousMailbox->take (event));
+    QCOMPARE (event.kind, JttyReceiveEvent::Kind::Begin);
+    QVERIFY (event.session != firstSession);
+    QVERIFY (h.continuousMailbox->take (event));
+    QCOMPARE (event.kind, JttyReceiveEvent::Kind::Samples);
+    QCOMPARE (event.firstSample, qint64 {0});
+    QCOMPARE (event.samples.size (), std::size_t {256});
+    QVERIFY (!h.continuousMailbox->take (event));
+  }
+
+  void continuous_audio_retains_partial_packet_across_clock_wrap ()
+  {
+    Harness h;
+    QVERIFY (h.start (ReceivePolicy::ContinuousJtty));
+    QVERIFY (h.feed (signal (block + 100, 0.125f), {511, 1701, 2047}));
+    h.clock.set (105000);
+    QVERIFY (h.feed (signal (block, 0.25f), {777, 512}));
+    QVERIFY (h.enableAudio (false));
+    h.deliverContinuous ();
+    QVERIFY (h.continuousMailbox);
+    JttyReceiveEvent event;
+    quint64 session = 0;
+    qint64 frames = 0;
+    bool ended = false;
+    while (h.continuousMailbox->take (event))
+      {
+        if (event.kind == JttyReceiveEvent::Kind::Begin)
+          {
+            QCOMPARE (session, quint64 {0});
+            session = event.session;
+          }
+        QCOMPARE (event.session, session);
+        QCOMPARE (event.context, quint64 {77});
+        if (event.kind == JttyReceiveEvent::Kind::Samples)
+          {
+            QCOMPARE (event.firstSample, frames);
+            frames = event.endSample ();
+          }
+        if (event.kind == JttyReceiveEvent::Kind::End)
+          {
+            QCOMPARE (event.firstSample, frames);
+            ended = true;
+          }
+      }
+    QCOMPARE (frames, qint64 (2 * block + 100));
+    QVERIFY (ended);
+    QCOMPARE (h.notifications (), 0);
+    QVERIFY (h.setReceiveContext (88));
+    QVERIFY (h.enableAudio (true));
+    QVERIFY (h.feed (signal (block, 0.125f)));
+    h.deliverContinuous ();
+    QVERIFY (h.continuousMailbox->take (event));
+    QCOMPARE (event.kind, JttyReceiveEvent::Kind::Begin);
+    QCOMPARE (event.context, quint64 {88});
+    QVERIFY (event.session != session);
+    auto const interruptedSession = event.session;
+    QVERIFY (h.continuousMailbox->take (event));
+    QCOMPARE (event.kind, JttyReceiveEvent::Kind::Samples);
+    QVERIFY (!h.continuousMailbox->take (event));
+    QVERIFY (h.feed (signal (25, 0.125f)));
+    QVERIFY (h.incompleteAudioPacket ());
+    QVERIFY (h.continuousMailbox->take (event));
+    QCOMPARE (event.kind, JttyReceiveEvent::Kind::Samples);
+    QCOMPARE (event.samples.size (), std::size_t {25});
+    QVERIFY (h.continuousMailbox->take (event));
+    QCOMPARE (event.kind, JttyReceiveEvent::Kind::End);
+    QCOMPARE (event.reason, JttyReceiveReason::InputError);
+    QVERIFY (!h.continuousMailbox->take (event));
+    QVERIFY (h.feed (signal (block, 0.125f)));
+    QVERIFY (h.continuousMailbox->take (event));
+    QCOMPARE (event.kind, JttyReceiveEvent::Kind::Begin);
+    QVERIFY (event.session != interruptedSession);
+    QCOMPARE (event.firstSample, qint64 {0});
+    QVERIFY (h.enableAudio (false));
+    QVERIFY (h.setReceivePolicy (ReceivePolicy::Timed));
+    QVERIFY (h.drainContinuous (55));
+    QVERIFY (h.enableAudio (true));
+    QVERIFY (h.feed (signal (block, 0.125f)));
+    QCOMPARE (h.snapshot ().size (), std::size_t (block));
+    QCOMPARE (h.notifications (), 1);
+  }
+
+  void continuous_anchor_uses_first_packet_sample_time ()
+  {
+    Harness h;
+    h.clock.set (200000);
+    QVERIFY (h.start (ReceivePolicy::ContinuousJtty));
+    std::vector<float> pcm (4096, 0.125f);
+    QVERIFY (h.feed (pcm));
+    h.deliverContinuous ();
+    QVERIFY (h.continuousMailbox);
+    JttyReceiveEvent event;
+    QVERIFY (h.continuousMailbox->take (event));
+    QCOMPARE (event.kind, JttyReceiveEvent::Kind::Begin);
+    QCOMPARE (event.anchorUtcMs, qint64 {199915});
+  }
+
   void packetization_preserves_audio ()
   {
     Harness h;

@@ -25,16 +25,12 @@
 #include "qmap_ipc.h"
 #include "qmap_decode_record.h"
 #include "validators/LiveCQCallsign.hpp"
+#include "../Network/LiveCQUpload.hpp"
 
 #include <QCoreApplication>  //liveCQ
-#include <QNetworkAccessManager>  //liveCQ
-#include <QNetworkRequest>
-#include <QNetworkReply>
 #include <QUrl>
 #include <QUrlQuery>
-#include <QEventLoop>
 
-#define NFFT 32768
 
 QSharedMemory mem_qmap;                        //Memory segment to be shared (optionally) with WSJT-X
 QMapSharedMemory * ipc_wsjtx {nullptr};
@@ -42,6 +38,23 @@ bool qmap_decoder_region_available {false};
 bool qmap_click_mailbox_available {false};
 
 extern const int RxDataFrequency = 96000;
+
+namespace
+{
+  // Snapshot the part of the datcom_ common block that is in use at the active
+  // sample rate into datcom2_.  The d4, ss and savg arrays are sized for the
+  // highest supported rate, so copying the whole struct would move far more
+  // data than the decoder will ever read.
+  void copyDatcomToDatcom2 ()
+  {
+    memcpy (datcom2_.d4, datcom_.d4, sizeof (float) * 2 * size_t (qmap_runtime::activeNsmax ()));
+    memcpy (datcom2_.ss, datcom_.ss, sizeof (float) * 400 * size_t (qmap_runtime::activeNfft ()));
+    memcpy (datcom2_.savg, datcom_.savg, sizeof (float) * size_t (qmap_runtime::activeNfft ()));
+    constexpr size_t tail = offsetof (decltype (datcom_), fcenter);
+    memcpy (reinterpret_cast<char *> (&datcom2_) + tail,
+            reinterpret_cast<char const *> (&datcom_) + tail, sizeof (datcom_) - tail);
+  }
+}
 
 //-------------------------------------------------- MainWindow constructor
 MainWindow::MainWindow(QWidget *parent) :
@@ -83,7 +96,7 @@ MainWindow::MainWindow(QWidget *parent) :
   ui->actionSave_all->setActionGroup(saveGroup);
   ui->actionSave_decoded->setActionGroup(saveGroup);
 
-  setWindowTitle (branded_program_title ());
+  setWindowTitle (branded_program_title () + QString {"  -  %1 kHz IQ"}.arg (qmap_runtime::activeRateHz () / 1000));
 
   connect(&soundInThread, SIGNAL(readyForFFT(int)), this, SLOT(dataSink(int)));
   connect(&soundInThread, SIGNAL(error(QString)), this, SLOT(showSoundInError(QString)));
@@ -110,6 +123,7 @@ MainWindow::MainWindow(QWidget *parent) :
   m_NB=false;
   m_mode="Q65";
   m_udpPort=50004;
+  m_iqRate=qmap_runtime::BASELINE_RATE;
   m_modeQ65=0;
   m_TRperiod=60;
 
@@ -178,7 +192,7 @@ MainWindow::MainWindow(QWidget *parent) :
   connect(&watcher3, SIGNAL(finished()),this,SLOT(decoderFinished()));
 
 // Assign input device and start input thread
-  soundInThread.setRate(96000.0);
+  soundInThread.setRate(double(qmap_runtime::activeRateHz()));
   soundInThread.setBufSize(10*7056);
   soundInThread.setNetwork(m_network);
   soundInThread.setPort(m_udpPort);
@@ -191,7 +205,7 @@ MainWindow::MainWindow(QWidget *parent) :
   m_tol=500;
   m_wide_graph_window->setTol(m_tol);
   m_wide_graph_window->setFcal(m_fCal);
-  m_wide_graph_window->setFsample(96000);
+  m_wide_graph_window->setFsample(qmap_runtime::activeRateHz());
   QString rev{"QMAP v" + QCoreApplication::applicationVersion() + " " + revision()};
   m_revision=rev;
 
@@ -233,6 +247,7 @@ MainWindow::MainWindow(QWidget *parent) :
   connect (m_wide_graph_window.get (), &WideGraph::freezeDecode2, this, &MainWindow::freezeDecode);
   connect (m_wide_graph_window.get (), &WideGraph::decodeLabelClicked2, this, &MainWindow::decodeLabelClicked);
   connect (m_vert_waterfall_window.get (), &VertWaterfall::decodeLabelClicked2, this, &MainWindow::decodeLabelClicked);
+  connect (ui->decodedTextBrowser, &DisplayText::decodeLineClicked, this, &MainWindow::decodeLabelClicked);
   connect (m_wide_graph_window.get (), &WideGraph::f11f12, this, &MainWindow::bumpDF);
   connect (m_wide_graph_window.get (), &WideGraph::spectrumReady,
            m_vert_waterfall_window.get (), &VertWaterfall::dataSinkVert);
@@ -288,6 +303,7 @@ void MainWindow::writeSettings()
   settings.setValue("paInDevice",m_paInDevice);
   settings.setValue("Scale_dB",m_dB);
   settings.setValue("UDPport",m_udpPort);
+  settings.setValue("IQRate",m_iqRate);
   settings.setValue("PaletteCuteSDR",ui->actionCuteSDR->isChecked());
   settings.setValue("PaletteLinrad",ui->actionLinrad->isChecked());
   settings.setValue("PaletteAFMHot",ui->actionAFMHot->isChecked());
@@ -331,6 +347,8 @@ void MainWindow::readSettings()
   m_network = settings.value("NetworkInput",true).toBool();
   m_dB = settings.value("Scale_dB",0).toInt();
   m_udpPort = settings.value("UDPport",50004).toInt();
+  m_iqRate = settings.value("IQRate",qmap_runtime::BASELINE_RATE).toInt();
+  if(!qmap_runtime::isSupportedRate(m_iqRate)) m_iqRate=qmap_runtime::BASELINE_RATE;
   soundInThread.setScale(m_dB);
   soundInThread.setPort(m_udpPort);
   ui->actionCuteSDR->setChecked(settings.value(
@@ -378,6 +396,10 @@ void MainWindow::readSettings()
   }
   m_w3szUrl=settings.value("w3szUrl",true).toBool();    //liveCQ
   m_otherUrl=settings.value("otherUrl","").toString();  //liveCQ
+  m_livecq = std::make_unique<LiveCQUpload>(this);
+  m_livecq->setUserAgent(http_user_agent().toUtf8());
+  connect(m_livecq.get(), &LiveCQUpload::errorOccurred, this,
+          [](QString const& error) { qDebug() << error; });
   ui->fAddComboBox->setVisible(ui->actionFadd_controls->isChecked());
   ui->fAdd_label->setVisible(ui->actionFadd_controls->isChecked());
   ui->pbSet->setVisible(ui->actionFadd_controls->isChecked());
@@ -387,7 +409,8 @@ void MainWindow::readSettings()
 //-------------------------------------------------------------- dataSink()
 void MainWindow::dataSink(int k)
 {
-  static float s[NFFT],splot[NFFT];
+  static float s[qmap_runtime::MAX_NFFT],splot[qmap_runtime::MAX_NFFT];
+  const int nfft=qmap_runtime::activeNfft();
   static int n=0;
   static int ihsym=0;
   static int ihsym0=0;
@@ -415,7 +438,7 @@ void MainWindow::dataSink(int k)
 // Get power, spectrum, nkhz, and ihsym
   nb=0;
   if(m_NB) nb=1;
-  nfsample=96000;
+  nfsample=qmap_runtime::activeRateHz();
 
   if(m_bWTransmitting) zaptx_(datcom_.d4, &k0, &k);
   k0=k;
@@ -437,7 +460,7 @@ void MainWindow::dataSink(int k)
 
   if(m_bWTransmitting) px=0.0;
   QString t;
-  m_pctZap=nzap/178.3;
+  m_pctZap=qmap_runtime::zapPercent(nzap,qmap_runtime::activeRateHz());
 
   lab2->setText (
         QString {" Rx: %1  %2 % "}
@@ -453,16 +476,16 @@ void MainWindow::dataSink(int k)
 
   //Average over specified number of spectra
   if (n==0) {
-    for (int i=0; i<NFFT; i++)
+    for (int i=0; i<nfft; i++)
       splot[i]=s[i];
   } else {
-    for (int i=0; i<NFFT; i++)
+    for (int i=0; i<nfft; i++)
       splot[i] += s[i];
   }
   n++;
 
   if (n>=m_waterfallAvg) {
-    for (int i=0; i<NFFT; i++) {
+    for (int i=0; i<nfft; i++) {
         splot[i] /= n;                           //Normalize the average
     }
 
@@ -470,7 +493,7 @@ void MainWindow::dataSink(int k)
     qint64 ms = QDateTime::currentMSecsSinceEpoch() % 86400000;
     int ntr = (ms/1000) % m_TRperiod;
     if((m_diskData && ihsym <= m_waterfallAvg) || (!m_diskData && ntr<ntrz)) {
-      for (int i=0; i<NFFT; i++) {
+      for (int i=0; i<nfft; i++) {
         splot[i] = 1.e30;
       }
     }
@@ -520,6 +543,7 @@ void MainWindow::on_actionSettings_triggered()
   dlg.m_fAdd=m_fAdd;
   dlg.m_network=m_network;
   dlg.m_udpPort=m_udpPort;
+  dlg.m_iqRate=m_iqRate;
   dlg.m_dB=m_dB;
   dlg.m_w3szUrl = m_w3szUrl;  //liveCQ
   dlg.m_otherUrl=m_otherUrl;  //liveCQ
@@ -539,6 +563,12 @@ void MainWindow::on_actionSettings_triggered()
     m_wide_graph_window->setFcal(m_fCal);
     m_network=dlg.m_network;
     m_udpPort=dlg.m_udpPort;
+    if(dlg.m_iqRate != m_iqRate) {
+      m_iqRate=dlg.m_iqRate;
+      if(m_iqRate != qmap_runtime::activeRateHz())
+        QMessageBox::information(this, tr("IQ sample rate"),
+          tr("The IQ sample rate will change to %1 kHz when QMAP is restarted.").arg(m_iqRate/1000));
+    }
     m_dB=dlg.m_dB;
     m_w3szUrl=dlg.m_w3szUrl;
     m_otherUrl=dlg.m_otherUrl;
@@ -548,7 +578,7 @@ void MainWindow::on_actionSettings_triggered()
       soundInThread.quit();
       soundInThread.wait(1000);
       soundInThread.setNetwork(m_network);
-      soundInThread.setRate(96000.0);
+      soundInThread.setRate(double(qmap_runtime::activeRateHz()));
       soundInThread.setNrx(1);
       soundInThread.start(QThread::HighestPriority);
     }
@@ -572,6 +602,7 @@ void MainWindow::clearDecodeLabels ()
 {
   if (m_wide_graph_window) m_wide_graph_window->clearDecodeLabels ();
   if (m_vert_waterfall_window) m_vert_waterfall_window->clearDecodeLabels ();
+  ui->decodedTextBrowser->clearDecodeLines ();
 }
 
 void MainWindow::on_stopButton_clicked()                      //stopButton
@@ -680,11 +711,18 @@ void MainWindow::createStatusBar()                           //createStatusBar
   lab2->setFrameStyle(QFrame::Panel | QFrame::Sunken);
   statusBar()->addWidget(lab2);
 
-  lab3 = new QLabel("");
+  lab3 = new QLabel("");                      // Q65 sub-mode, set by the mode handlers
   lab3->setAlignment(Qt::AlignHCenter);
   lab3->setMinimumSize(QSize(50,10));
   lab3->setFrameStyle(QFrame::Panel | QFrame::Sunken);
   statusBar()->addWidget(lab3);
+
+  labRate = new QLabel(QString("%1 kHz IQ").arg(qmap_runtime::activeRateHz()/1000));
+  labRate->setToolTip(tr("IQ sample rate in use. Change it in Setup; it takes effect when QMAP is restarted."));
+  labRate->setAlignment(Qt::AlignHCenter);
+  labRate->setMinimumSize(QSize(70,10));
+  labRate->setFrameStyle(QFrame::Panel | QFrame::Sunken);
+  statusBar()->addWidget(labRate);
 
   lab4 = new QLabel("");
   lab4->setAlignment(Qt::AlignHCenter);
@@ -782,15 +820,36 @@ void MainWindow::on_actionOpen_triggered()                     //Open File
     on_stopButton_clicked();
     clearDecodeLabels ();
     m_diskData=true;
-    int dbDgrd=0;
-    int iret=4;
-    if(m_path.indexOf(".iq")>0) {
-      getfile(fname, dbDgrd);
-    } else {
-      read_qm_(fname.toLatin1(), &iret, fname.length());
-    }
+    int iret=loadDiskFile(fname);
     if(iret > 0) diskDat(iret);
   }
+}
+
+// Read an .iq or .qm file into the data buffer.  Returns a positive code for diskDat() on
+// success.  A file recorded at a different IQ sample rate than the one QMAP is running at
+// cannot be decoded: tell the user, and stop any "decode remaining files" loop.
+int MainWindow::loadDiskFile(QString const& fname)
+{
+  int dbDgrd=0;
+  int iret=4;
+  int fileRate=0;
+  if(m_path.indexOf(".iq")>0) {
+    fileRate=iqFileRate(fname);
+    if(fileRate==0 || fileRate==qmap_runtime::activeRateHz()) getfile(fname, dbDgrd);
+  } else {
+    read_qm_(fname.toLatin1(), &iret, fname.length());
+    if(iret==-3) fileRate=qmap_qm_file_rate();   //The header holds the rate of a file that was refused
+  }
+  if(fileRate!=0 && fileRate!=qmap_runtime::activeRateHz()) {
+    m_loopall=false;
+    QString what=tr("%1 kHz").arg(QString::number(fileRate/1000.0,'g',6));   //"192", or "95.2381" if odd
+    QMessageBox::warning(this, tr("IQ sample rate"),
+      tr("%1 was recorded at %2, but QMAP is running at %3 kHz.\n"
+         "Choose that rate under Setup and restart QMAP to decode it.")
+      .arg(QFileInfo(fname).fileName()).arg(what).arg(qmap_runtime::activeRateHz()/1000));
+    return -3;
+  }
+  return iret;
 }
 
 void MainWindow::on_actionOpen_next_in_directory_triggered()   //Open Next
@@ -818,13 +877,7 @@ void MainWindow::on_actionOpen_next_in_directory_triggered()   //Open Next
       }
       clearDecodeLabels ();
       m_diskData=true;
-      int dbDgrd=0;
-      int iret=4;
-      if(m_path.indexOf(".iq")>0) {
-        getfile(fname, dbDgrd);
-      } else {
-        read_qm_(fname.toLatin1(), &iret, fname.length());
-      }
+      int iret=loadDiskFile(fname);
       if(iret > 0) diskDat(iret);
       return;
     }
@@ -849,10 +902,10 @@ void MainWindow::diskDat(int iret)                                   //diskDat()
   datcom_.newdat=1;
   m_nTx30a=datcom_.ntx30a;
   m_nTx30b=datcom_.ntx30b;
-  hsym=0.15*96000.0;                   //Samples per Q65-30x half-symbol or Q65-60x quarter-symbol
+  hsym=0.15*qmap_runtime::activeRateHz();   //Samples per Q65-30x half-symbol or Q65-60x quarter-symbol
   for(int i=ia; i<ib; i++) {           // Do the half-symbol FFTs
     int k = i*hsym + 0.5;
-    if(k > 60*96000) break;
+    if(k > qmap_runtime::activeNsmax()) break;
     dataSink(k);
     qApp->processEvents();             // Allow the waterfall to update
     while(m_decoderBusy) {
@@ -1027,7 +1080,7 @@ void MainWindow::decode()                                       //decode()
   datcom_.nfshift=nfshift;
   datcom_.ntol=m_tol;
   m_nutc0=datcom_.nutc;
-  datcom_.nfsample=96000;
+  datcom_.nfsample=qmap_runtime::activeRateHz();
   datcom_.nBaseSubmode=m_modeQ65;
   datcom_.max_drift=ui->sbMaxDrift->value();
   datcom_.offset=ui->sbOffset->value();
@@ -1059,9 +1112,7 @@ void MainWindow::decode()                                       //decode()
   datcom_.ndop00=m_dop00;
   datcom_.ndop58=m_dop58;
 
-  char *to = (char*) datcom2_.d4;
-  char *from = (char*) datcom_.d4;
-  memcpy(to, from, sizeof(datcom_));    //Copy the full datcom_ common block into datcom2_
+  copyDatcomToDatcom2();                //Snapshot the in-use part of the datcom_ common block into datcom2_
 
   datcom_.ndiskdat=0;
 
@@ -1108,6 +1159,7 @@ void MainWindow::decode()                                       //decode()
 void MainWindow::on_EraseButton_clicked()
 {
   ui->decodedTextBrowser->clear();
+  ui->decodedTextBrowser->clearDecodeLines();
   lab4->clear();
   m_nline=0;
 }
@@ -1133,13 +1185,19 @@ void MainWindow::CreateLiveCQ(QStringList cqliveText)
   QStringList bandInfo;
   bandInfo = ui->labFreq->text().split(".",SkipEmptyParts);
   QString bandFreq = bandInfo.at(0);
-  QString theDate = ui->labUTC->text().trimmed().mid(0,12);
+  auto const nowUtc = QDateTime::currentDateTimeUtc();
   QList<QStringList> decodeList;
 
   for (const QString &item : cqliveText) {
     QStringList const thePieces = item.split(" ",SkipEmptyParts);
     QMapLiveCQ::Record record;
     if (!QMapLiveCQ::parse(thePieces, freqOffset, record)) {
+      continue;
+    }
+    // Built from numbers only: going through the month name shown in labUTC
+    // failed on non-English Windows and uploaded an empty date.
+    auto const spotTime = QMapLiveCQ::spotTime(thePieces.at(0), nowUtc);
+    if (!spotTime.isValid()) {
       continue;
     }
     qDebug () << "item is: " << item;
@@ -1162,7 +1220,7 @@ void MainWindow::CreateLiveCQ(QStringList cqliveText)
       thePostLine.insert(8, theCall); //dx call
       thePostLine.insert(9, theGrid); //dx grid
       thePostLine.insert(10, m_myGrid.toUpper()); //myGrid
-      thePostLine.insert(11, theDate);  //the date
+      thePostLine.insert(11, spotTime.toString("yyyy-MM-ddTHH:mm:ss") + "Z");  //utc date and time
       thePostLine.insert(12, m_myCall.toUpper()); //myCall
       thePostLine.insert(13, "--"); //txpol
       decodeList.append(thePostLine);
@@ -1184,62 +1242,30 @@ void MainWindow::sendLiveCQData(QList<QStringList>decodeList)
     theUrl = m_otherUrl;
   }
 
-  QNetworkAccessManager *manager = new QNetworkAccessManager(this);
-  QUrl url(theUrl);
-  QNetworkRequest request(url);
-  QByteArray userAgent = (QCoreApplication::applicationName() + " v"
-                          + QCoreApplication::applicationVersion()).toUtf8();
-  request.setRawHeader("User-Agent", userAgent);
-  request.setRawHeader("X-Custom-User-Agent", userAgent);
-  request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
+  if (!m_livecq->setEndpoint(QUrl {theUrl})) return;
 
   for (const QStringList &thePostLine : decodeList) {
 
-    QString utcdatetimestringOriginal = thePostLine.at(11) + " " + thePostLine.at(3);
-    QDateTime utcdatetimeUTC = QDateTime::fromString(utcdatetimestringOriginal, "yyyy MMM dd  HHmmss");
-    utcdatetimeUTC.setTimeSpec((Qt::UTC));
-    QString utcdatetimeUTCString = utcdatetimeUTC.toString("yyyy-MM-ddTHH:mm:ss");
-    utcdatetimeUTCString = utcdatetimeUTCString + "Z";
+    QString utcdatetimeUTCString = thePostLine.at(11);
 
-    QString postString =  "skedfreq=" + thePostLine.at(0) + "&rxfreq=" + thePostLine.at(1) + "&rpol=" + thePostLine.at(2) + "&dt="  +  thePostLine.at(4) + "&dB="  + thePostLine.at(5) + "&msgtype="  +  thePostLine.at(7) + "&callsign="  +  thePostLine.at(8) + "&grid="  +  thePostLine.at(9) + "&mode="  +  thePostLine.at(6) + "&utcdatetime="  +  utcdatetimeUTCString + "&spotter="  +  thePostLine.at(12) + "&spottergrid=" +  thePostLine.at(10)  + "&txpol=" + thePostLine.at(13) + "&apptype=QMAP";
+    QUrlQuery query;
+    query.addQueryItem("skedfreq", thePostLine.at(0));
+    query.addQueryItem("rxfreq", thePostLine.at(1));
+    query.addQueryItem("rpol", thePostLine.at(2));
+    query.addQueryItem("dt", thePostLine.at(4));
+    query.addQueryItem("dB", thePostLine.at(5));
+    query.addQueryItem("msgtype", thePostLine.at(7));
+    query.addQueryItem("callsign", thePostLine.at(8));
+    query.addQueryItem("grid", thePostLine.at(9));
+    query.addQueryItem("mode", thePostLine.at(6));
+    query.addQueryItem("utcdatetime", utcdatetimeUTCString);
+    query.addQueryItem("spotter", thePostLine.at(12));
+    query.addQueryItem("spottergrid", thePostLine.at(10));
+    query.addQueryItem("txpol", thePostLine.at(13));
+    query.addQueryItem("apptype", "QMAP");
 
-    QByteArray postByteArray = postString.toUtf8();
-    request.setRawHeader("Content-Length",QByteArray::number(postByteArray.size()));
-
-
-    try {
-	  QNetworkReply *reply = manager->post(request,postByteArray);		
-	  QObject::connect(reply, &QNetworkReply::finished, this, &MainWindow::handleReply);
-    }
-    catch (const std::exception& e) {
-        // Handle standard C++ exceptions
-        QMessageBox::critical(this, "Exception", "Exception at line 1165 MainWindow::sendLiveCQData " + QString::fromStdString(e.what()));   
-    }
-    catch (...) {
-        // Handle any other type of exception
-        QMessageBox::critical(this, "Exception", "Unknown Exception at line 1170 MainWindow::sendLiveCQData");   
-    }
+    m_livecq->postSpot(query);
   }
-}
-
-void MainWindow::handleReply()
-{
-  try {
-    QNetworkReply *reply = qobject_cast<QNetworkReply*>(sender());
-    if (reply->error() == QNetworkReply::NoError) {
-		qDebug() << reply->readAll();
-    } else {
-		qDebug() << reply->errorString();
-    }
-  }
-    catch (const std::exception& e) {
-        // Handle standard C++ exceptions
-        QMessageBox::critical(this, "Exception", "Exception at line 1188 MainWindow::handleReply " + QString::fromStdString(e.what()));   
-    }
-    catch (...) {
-        // Handle any other type of exception
-        QMessageBox::critical(this, "Exception", "Unknown Exception at line 1193 MainWindow::handleReply");   
-    }
 }
 
 
@@ -1264,9 +1290,16 @@ void MainWindow::guiUpdate()
   }
 
   m_wide_graph_window->updateFreqLabel();
+  // A jump of a MHz or more in the centre frequency is a band change (Fadd
+  // or Linrad retune); decodes from the old band must stop being clickable.
+  if (std::fabs (datcom_.fcenter - m_lastCentreMHz) >= 1.0) {
+    if (m_lastCentreMHz >= 0.0) clearDecodeLabels ();
+    m_lastCentreMHz = datcom_.fcenter;
+  }
   if (!m_diskData) {
     m_wide_graph_window->pruneDecodeLabels(nsec);
     if (m_vert_waterfall_window) m_vert_waterfall_window->pruneDecodeLabels(nsec);
+    ui->decodedTextBrowser->pruneDecodeLines(nsec);
   }
 
   if(m_startAnother and !m_bDiskDatBusy) {
@@ -1285,13 +1318,14 @@ void MainWindow::guiUpdate()
       QString t2=QString::fromLatin1(live_cq_row,
         static_cast<int>(qmap_decode_ipc::text_length(live_cq_row)));
 
-      if (m_vert_waterfall_window || m_wide_graph_window) {
-        auto const record = parseQMapDecodeRecord (
-          QByteArray {decodes_.result[m_fetched], static_cast<int> (QMapDecodeRowSize)});
-        if (record && LiveCQ::isValidCallsign (record->callsign)) {
-          if (m_vert_waterfall_window) m_vert_waterfall_window->addDecodeLabel(*record);
-          if (m_wide_graph_window) m_wide_graph_window->addDecodeLabel(*record);
-        }
+      // A decode with a valid callsign becomes clickable on the waterfalls
+      // and in the decoded-text window; all three send the same raw row.
+      auto record = parseQMapDecodeRecord (
+        QByteArray {decodes_.result[m_fetched], static_cast<int> (QMapDecodeRowSize)});
+      if (record && !LiveCQ::isValidCallsign (record->callsign)) record.reset ();
+      if (record) {
+        if (m_vert_waterfall_window) m_vert_waterfall_window->addDecodeLabel(*record);
+        if (m_wide_graph_window) m_wide_graph_window->addDecodeLabel(*record);
       }
 
       if(m_UTC0!="" and m_UTC0!=t.left(4)) {
@@ -1309,6 +1343,7 @@ void MainWindow::guiUpdate()
       QString t3 = t + " " + t2;  //liveCQ
       cqliveText.append(t3);      //liveCQ
       ui->decodedTextBrowser->append(t);
+      if (record) ui->decodedTextBrowser->setLastLineDecode(*record);
       m_fetched++;
       m_nline++;
       QTextCursor cursor(ui->decodedTextBrowser->document()->findBlockByLineNumber(m_nline-1));

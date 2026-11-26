@@ -18,6 +18,7 @@ subroutine q65_loops(workspace,c00,npts2,nsps2,nsubmode,ndepth,jpk0,    &
 
   LL=64*(mode_q65+2)
   call workspace%ensure(npts2,LL)
+  call workspace%prepare_fft(nsps2)
   idec=-1
   ircbest=9999
   irc=-99
@@ -61,8 +62,9 @@ subroutine q65_loops(workspace,c00,npts2,nsps2,nsubmode,ndepth,jpk0,    &
         jpk=max(0,jpk)
         jpk=min(29000,jpk)
         call spec64(workspace%c0(0:npts2-1),workspace%cs,npts2,nsps2,  &
-             mode_q65,jpk,workspace%s3(1:LL*NN),LL,NN)
+             mode_q65,jpk,workspace%s3(1:LL*NN),LL,NN,workspace%plan)
         call pctile(workspace%s3(1:LL*NN),LL*NN,40,base)
+        if(base<=0.) cycle
         workspace%s3(1:LL*NN)=workspace%s3(1:LL*NN)/base
         where(workspace%s3(1:LL*NN)>s3lim) workspace%s3(1:LL*NN)=s3lim
         call q65_bzap(workspace%s3(1:LL*NN),LL) !Zap birdies

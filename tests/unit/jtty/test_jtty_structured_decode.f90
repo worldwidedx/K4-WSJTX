@@ -1,9 +1,10 @@
 program test_jtty_structured_decode
 
   use iso_c_binding, only: c_int,c_char,c_null_char,c_sizeof
-  use iso_fortran_env, only: int16,int32
+  use iso_fortran_env, only: int16,int32,real32
   use jtty_fec, only: is13,PAYLOAD_BITS,TOTAL_K,tbcc_encode
   use jtty_tbcc_code_profiles
+  use jtty_tbcc_decoder, only: jtty_tbcc_decode
   use jtty_mdec, only: npending,pending_updates,nactive,discard_pending_updates,display_message_text
   use jtty_mod, only: jtty_source_atom,jtty_source_atom_c,jtty_call_atom, &
        jtty_exch_num_atom,unpack_jtty,MAX_FRAMES,JTTY_CALL_CALL,JTTY_ROLE_FULL, &
@@ -25,11 +26,10 @@ program test_jtty_structured_decode
        integer(c_int), intent(out) :: tones(*),nsym
        integer(c_int) :: status
      end function jtty_cpp_n1mm_smoke
-     function jtty_cpp_cq_smoke(tones,nsym,text,chained) result(status) bind(C)
+     function jtty_cpp_cq_smoke(tones,nsym,text) result(status) bind(C)
        import :: c_int,c_char
        integer(c_int), intent(out) :: tones(*),nsym
        character(kind=c_char), intent(out) :: text(*)
-       integer(c_int), value :: chained
        integer(c_int) :: status
      end function jtty_cpp_cq_smoke
      function jtty_cpp_rtty_smoke(tones,nsym) result(status) bind(C)
@@ -37,6 +37,15 @@ program test_jtty_structured_decode
        integer(c_int), intent(out) :: tones(*),nsym
        integer(c_int) :: status
      end function jtty_cpp_rtty_smoke
+     function jtty_cpp_rtty_line_refused() result(refused) bind(C)
+       import :: c_int
+       integer(c_int) :: refused
+     end function jtty_cpp_rtty_line_refused
+     function jtty_cpp_rtty_line_tones(tones,nsym) result(planned) bind(C)
+       import :: c_int
+       integer(c_int), intent(out) :: tones(*),nsym
+       integer(c_int) :: planned
+     end function jtty_cpp_rtty_line_tones
      subroutine genjtty_atoms(atoms,natoms,itone,nsym)
        use jtty_mod, only: jtty_source_atom
        type(jtty_source_atom), intent(in) :: atoms(:)
@@ -59,9 +68,13 @@ program test_jtty_structured_decode
   call decode_native_call_and_serial(failures)
   call decode_c_adapter_atoms(failures)
   call reject_invalid_c_descriptors(failures)
+  call reject_invalid_c_batch(failures)
   call decode_cpp_compiled_n1mm(failures)
   call decode_compact_text(failures)
   call decode_profile_text(failures)
+  call expect(jtty_cpp_rtty_line_refused().eq.1, &
+       'an RTTY line whose serial does not fit is refused, not split',failures)
+  call decode_accepted_rtty_line(failures)
 
   if(failures.ne.0) then
      write(*,'(a,i0)') 'test_jtty_structured_decode: failures=',failures
@@ -79,13 +92,7 @@ contains
     call expect(status.eq.JTTY_ENCODE_OK .and. nsymbols.eq.frame_symbols, &
          'C++ RTTY profile text matches native F8 while unknown text uses two frames',count)
     if(status.ne.JTTY_ENCODE_OK .or. nsymbols.ne.frame_symbols) return
-    call decode_waveform(tones,int(nsymbols))
-    call expect(npending.eq.1,'RTTY serial text produces one update',count)
-    if(npending.eq.1) then
-       call expect(trim(normalized(pending_updates(1)%decoded)).eq.'599 123' .and. &
-            pending_updates(1)%complete .and. nactive.eq.0, &
-            'RTTY serial text uses canonical rendering and completes',count)
-    endif
+    call expect_noiseless_message(tones,int(nsymbols),'599 123','RTTY serial text',count)
   end subroutine decode_profile_text
 
   subroutine decode_compact_text(count)
@@ -93,29 +100,21 @@ contains
     integer(c_int) :: native_tones(MAX_FRAMES*frame_symbols),native_nsymbols,status
     character(kind=c_char) :: c_text(80)
     character(len=80) :: text
-    integer :: tones(MAX_FRAMES*frame_symbols),nsymbols,chained,i
+    integer :: tones(MAX_FRAMES*frame_symbols),nsymbols,i
 
-    do chained=0,1
-       status=jtty_cpp_cq_smoke(native_tones,native_nsymbols,c_text,int(chained,c_int))
-       call expect(status.eq.JTTY_ENCODE_OK .and. native_nsymbols.eq.frame_symbols, &
-            'native F1 generates one frame',count)
-       if(status.ne.JTTY_ENCODE_OK .or. native_nsymbols.ne.frame_symbols) return
-       do i=1,len(text)
-          text(i:i)=c_text(i)
-       enddo
-       call genjtty(text,tones,nsymbols)
-       call expect(nsymbols.eq.native_nsymbols,'GUI CQ text generates one frame',count)
-       if(nsymbols.ne.native_nsymbols) return
-       call expect(all(tones(1:nsymbols).eq.native_tones(1:nsymbols)), &
-            'GUI CQ text and native F1 generate identical channel symbols',count)
+    status=jtty_cpp_cq_smoke(native_tones,native_nsymbols,c_text)
+    call expect(status.eq.JTTY_ENCODE_OK .and. native_nsymbols.eq.frame_symbols, &
+         'native F1 generates one frame',count)
+    if(status.ne.JTTY_ENCODE_OK .or. native_nsymbols.ne.frame_symbols) return
+    do i=1,len(text)
+       text(i:i)=c_text(i)
     enddo
-    call decode_waveform(tones,nsymbols)
-    call expect(npending.eq.1,'compact CQ produces one update',count)
-    if(npending.eq.1) then
-       call expect(trim(normalized(pending_updates(1)%decoded)).eq.'CQ K1ABC CQ' .and. &
-            pending_updates(1)%complete .and. nactive.eq.0, &
-            'compact CQ preserves text and completes',count)
-    endif
+    call genjtty(text,tones,nsymbols)
+    call expect(nsymbols.eq.native_nsymbols,'GUI CQ text generates one frame',count)
+    if(nsymbols.ne.native_nsymbols) return
+    call expect(all(tones(1:nsymbols).eq.native_tones(1:nsymbols)), &
+         'GUI CQ text and native F1 generate identical channel symbols',count)
+    call expect_noiseless_message(native_tones,int(native_nsymbols),'CQ K1ABC CQ','compact CQ',count)
 
     text='TEST WB9XYZ 599 123 QSL TU'
     call genjtty(text,tones,nsymbols)
@@ -138,7 +137,7 @@ contains
     call expect(status.eq.JTTY_ENCODE_OK .and. nsymbols.eq.2*frame_symbols, &
          'C++ compiled descriptors cross the native encoder ABI',count)
     if(status.ne.JTTY_ENCODE_OK .or. nsymbols.ne.2*frame_symbols) return
-    call decode_waveform(tones,int(nsymbols))
+    call decode_waveform(tones,int(nsymbols),10.0)
     call expect(npending.eq.1,'C++ compiled N1MM message produces one update',count)
     if(npending.ne.1) return
     call expect(trim(normalized(pending_updates(1)%decoded)).eq.'W9XYZ 32D EMA' .and. &
@@ -159,20 +158,12 @@ contains
          'native call plus serial generates two frames',count)
     if(nsymbols.le.0) return
 
-    call decode_waveform(tones,nsymbols)
-
-    call expect(npending.eq.1, &
-         'native call plus serial produces one update',count)
-    if(npending.ne.1) return
-    call expect(trim(normalized(pending_updates(1)%decoded)).eq.'WB9XYZ 599 1234', &
-         'merged native atoms use canonical call and serial rendering',count)
-    call expect(pending_updates(1)%complete .and. nactive.eq.0, &
-         'final native atom completes and releases the message',count)
+    call expect_noiseless_message(tones,nsymbols,'WB9XYZ 599 1234','native call plus serial',count)
   end subroutine decode_native_call_and_serial
 
   subroutine decode_c_adapter_atoms(count)
     integer, intent(inout) :: count
-    type(jtty_source_atom_c) :: atoms(6)
+    type(jtty_source_atom_c) :: atoms(7)
     integer(c_int) :: tones(MAX_FRAMES*frame_symbols),nsymbols,status
 
     call expect(c_sizeof(atoms(1)).eq.20,'C atom descriptor remains 20 bytes',count)
@@ -183,27 +174,25 @@ contains
          JTTY_ROLE_FULL,0,'CA')
     call initialize_c_atom(atoms(4),JTTY_ATOM_EXCH_PAIR,JTTY_PAIR_CLASS_SECTION, &
          3,1,'EMA')
-    call initialize_c_atom(atoms(5),JTTY_ATOM_GRID4,0,JTTY_ROLE_FIELD_ONLY,0,'FN42')
-    call initialize_c_atom(atoms(6),JTTY_ATOM_CONTROL,JTTY_CONTROL_QSL_TU,0,0,'')
+    call initialize_c_atom(atoms(5),JTTY_ATOM_EXCH_PAIR,JTTY_PAIR_CLASS_SECTION,0,10,'CT')
+    atoms(5)%text(3)=' '
+    call initialize_c_atom(atoms(6),JTTY_ATOM_GRID4,0,JTTY_ROLE_FIELD_ONLY,0,'FN42')
+    call initialize_c_atom(atoms(7),JTTY_ATOM_CONTROL,JTTY_CONTROL_QSL_TU,0,0,'')
     call genjtty_atoms_c(atoms,size(atoms),tones,nsymbols,status)
     call expect(nsymbols.eq.size(atoms)*frame_symbols, &
          'C adapter generates serial/state/FD/grid/control frames',count)
     call expect(status.eq.JTTY_ENCODE_OK,'C adapter reports successful encoding',count)
     if(nsymbols.le.0) return
 
-    call decode_waveform(tones,int(nsymbols))
-    call expect(npending.eq.1,'C adapter atoms produce one update',count)
-    if(npending.ne.1) return
-    call expect(trim(normalized(pending_updates(1)%decoded)).eq. &
-         'K1ABC 599 012 599 CA 1D EMA FN42 QSL TU', &
-         'C adapter atoms retain canonical structured rendering',count)
-    call expect(pending_updates(1)%complete .and. nactive.eq.0, &
-         'final C adapter atom completes and releases the message',count)
+    call expect_noiseless_message(tones,int(nsymbols), &
+         'K1ABC 599 012 599 CA 1D EMA 10A CT FN42 QSL TU','C adapter atoms',count)
   end subroutine decode_c_adapter_atoms
 
   subroutine reject_invalid_c_descriptors(count)
     integer, intent(inout) :: count
     type(jtty_source_atom_c) :: atom(1)
+    character(len=4), parameter :: invalid_sections(*)=['ZZZ ','EMAX','CT X']
+    integer :: i
     integer(c_int) :: tones(frame_symbols),nsymbols,status
 
     call initialize_c_atom(atom(1),JTTY_ATOM_EXCH_LOC,JTTY_LOC_STATE_PROVINCE,1,0,'CA')
@@ -218,11 +207,13 @@ contains
     call genjtty_atoms_c(atom,1,tones,nsymbols,status)
     call expect(nsymbols.eq.0,'C adapter rejects unterminated text',count)
 
-    call initialize_c_atom(atom(1),JTTY_ATOM_EXCH_PAIR,JTTY_PAIR_CLASS_SECTION,0,1,'ZZZ')
-    call genjtty_atoms_c(atom,1,tones,nsymbols,status)
-    call expect(nsymbols.eq.0,'C adapter rejects unknown Field Day section',count)
-    call expect(status.eq.JTTY_ENCODE_UNKNOWN_SECTION, &
-         'C adapter identifies unknown Field Day section',count)
+    do i=1,size(invalid_sections)
+       call initialize_c_atom(atom(1),JTTY_ATOM_EXCH_PAIR,JTTY_PAIR_CLASS_SECTION,0,1,invalid_sections(i))
+       call genjtty_atoms_c(atom,1,tones,nsymbols,status)
+       call expect(nsymbols.eq.0,'C adapter rejects unknown Field Day section '//trim(invalid_sections(i)),count)
+       call expect(status.eq.JTTY_ENCODE_UNKNOWN_SECTION, &
+            'C adapter identifies unknown Field Day section '//trim(invalid_sections(i)),count)
+    enddo
 
     call initialize_c_atom(atom(1),JTTY_ATOM_EXCH_PAIR,0,0,1,'EMA')
     call genjtty_atoms_c(atom,1,tones,nsymbols,status)
@@ -236,6 +227,29 @@ contains
     call genjtty_atoms_c(atom,1,tones,nsymbols,status)
     call expect(nsymbols.eq.0,'C adapter rejects unassigned control phrase',count)
   end subroutine reject_invalid_c_descriptors
+
+  subroutine reject_invalid_c_batch(count)
+    integer, intent(inout) :: count
+    type(jtty_source_atom_c) :: atoms(3)
+    integer(c_int) :: tones(3*frame_symbols),nsymbols,status
+
+    call initialize_c_atom(atoms(1),JTTY_ATOM_CALL,JTTY_CALL_CALL,0,0,'K1ABC')
+    call initialize_c_atom(atoms(2),JTTY_ATOM_EXCH_PAIR,JTTY_PAIR_CLASS_SECTION,0,1,'EMAX')
+    call initialize_c_atom(atoms(3),JTTY_ATOM_CONTROL,JTTY_CONTROL_QSL_TU,0,0,'')
+    call genjtty_atoms_c(atoms,size(atoms),tones,nsymbols,status)
+    call expect(nsymbols.eq.0 .and. status.eq.JTTY_ENCODE_UNKNOWN_SECTION, &
+         'invalid section rejects the whole descriptor batch',count)
+
+    call initialize_c_atom(atoms(2),JTTY_ATOM_EXCH_NUM,JTTY_NUM_SERIAL,JTTY_ROLE_FULL,131072,'')
+    call genjtty_atoms_c(atoms,size(atoms),tones,nsymbols,status)
+    call expect(nsymbols.eq.0 .and. status.eq.JTTY_ENCODE_INVALID_DESCRIPTOR, &
+         'invalid source atom rejects the whole descriptor batch',count)
+
+    call initialize_c_atom(atoms(2),JTTY_ATOM_EXCH_PAIR,JTTY_PAIR_CLASS_SECTION,0,1,'EMA')
+    call genjtty_atoms_c(atoms,size(atoms),tones,nsymbols,status)
+    call expect(nsymbols.eq.size(atoms)*frame_symbols .and. status.eq.JTTY_ENCODE_OK, &
+         'valid descriptor batch encodes after a rejected batch',count)
+  end subroutine reject_invalid_c_batch
 
   subroutine initialize_c_atom(atom,kind,subtype,role,value,text)
     type(jtty_source_atom_c), intent(out) :: atom
@@ -280,6 +294,45 @@ contains
          'CRC/FEC-valid source-invalid frame creates no message or update',count)
   end subroutine reject_reserved_struct_family
 
+  subroutine expect_noiseless_message(tones,nsymbols,expected,description,count)
+    integer, intent(in) :: tones(:),nsymbols
+    character(len=*), intent(in) :: expected,description
+    integer, intent(inout) :: count
+    complex(real32) :: correlations(0:3,TOTAL_K),halves(0:3,TOTAL_K)
+    integer(int32) :: payload(PAYLOAD_BITS)
+    character(len=34) :: frames(MAX_FRAMES)
+    character(len=80) :: decoded
+    integer :: iframe,nframes,offset,symbol
+    logical :: success,source_valid,is_last_frame
+
+    nframes=nsymbols/frame_symbols
+    call expect(nframes.ge.1 .and. nframes.le.MAX_FRAMES .and. &
+         nsymbols.eq.nframes*frame_symbols,description//': complete channel frames',count)
+    if(nframes.lt.1 .or. nframes.gt.MAX_FRAMES .or. nsymbols.ne.nframes*frame_symbols) return
+    frames=''
+    halves=cmplx(0.0_real32,0.0_real32,real32)
+    do iframe=1,nframes
+       offset=(iframe-1)*frame_symbols
+       call expect(all(tones(offset+1:offset+size(is13)).eq.is13),description//': sync symbols',count)
+       offset=offset+size(is13)
+       call expect(all(tones(offset+1:offset+TOTAL_K).ge.0) .and. &
+            all(tones(offset+1:offset+TOTAL_K).le.3),description//': payload tones',count)
+       if(any(tones(offset+1:offset+TOTAL_K).lt.0) .or. any(tones(offset+1:offset+TOTAL_K).gt.3)) return
+       correlations=cmplx(0.0_real32,0.0_real32,real32)
+       do symbol=1,TOTAL_K
+          correlations(tones(offset+symbol),symbol)=cmplx(100.0_real32,0.0_real32,real32)
+       enddo
+       call jtty_tbcc_decode(correlations,halves,payload,success)
+       call expect(success,description//': TBCC payload recovery',count)
+       if(.not.success) return
+       write(frames(iframe),'(34i1)') payload
+       call unpack_jtty(frames,iframe,decoded,is_last_frame=is_last_frame,source_valid=source_valid)
+       call expect(source_valid,description//': source-valid prefix',count)
+       call expect(is_last_frame.eqv.(iframe.eq.nframes),description//': final-frame marker',count)
+    enddo
+    call expect(trim(normalized(decoded)).eq.expected,description//': canonical text and ordering',count)
+  end subroutine expect_noiseless_message
+
   subroutine decode_waveform(tones,nsymbols,channel_width)
     integer, intent(in) :: tones(:),nsymbols
     real, intent(in), optional :: channel_width
@@ -309,6 +362,23 @@ contains
 
     deallocate(pcm,wave,complex_wave)
   end subroutine decode_waveform
+
+  subroutine decode_accepted_rtty_line(count)
+    integer, intent(inout) :: count
+    integer(c_int) :: tones(MAX_FRAMES*frame_symbols),nsymbols
+    character(len=80) :: expected
+
+    expected=repeat('A',72)//' 599 005'
+    call expect(jtty_cpp_rtty_line_tones(tones,nsymbols).eq.1, &
+         'the longest RTTY line that fits is one segment',count)
+    if(nsymbols.le.0) return
+    call decode_waveform(tones,int(nsymbols),10.0)
+    call expect(npending.ge.1,'the accepted RTTY line produces updates',count)
+    if(npending.lt.1) return
+    call expect(trim(normalized(pending_updates(npending)%decoded)).eq.trim(expected) .and. &
+         pending_updates(npending)%complete .and. nactive.eq.0, &
+         'the accepted RTTY line arrives whole, serial included',count)
+  end subroutine decode_accepted_rtty_line
 
   function normalized(value) result(result_value)
     character(len=*), intent(in) :: value

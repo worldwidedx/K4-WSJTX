@@ -9,7 +9,7 @@ on:
       release_channel:
         required: true
         type: string
-      rc_number:
+      prerelease_number:
         required: false
         type: string
         default: ""
@@ -28,7 +28,7 @@ jobs:
       version: ${{ inputs.version }}
       hamlib_branch: "4.7.2"
       release_channel: ${{ inputs.release_channel }}
-      rc_number: ${{ inputs.rc_number }}
+      prerelease_number: ${{ inputs.prerelease_number }}
 
   sign:
     if: inputs.windows_signing != 'unsigned'
@@ -45,12 +45,12 @@ jobs:
         env:
           VERSION: ${{ inputs.version }}
           CHANNEL: ${{ inputs.release_channel }}
-          RC_NUMBER: ${{ inputs.rc_number }}
+          RC_NUMBER: ${{ inputs.prerelease_number }}
         run: |
           set -euo pipefail
           IDENTITY=$(python3 .github/scripts/release-policy.py classify "$VERSION")
           test "$(jq -r .channel <<<"$IDENTITY")" = "$CHANNEL"
-          test "$(jq -r .rc_number <<<"$IDENTITY")" = "$RC_NUMBER"
+          test "$(jq -r .prerelease_number <<<"$IDENTITY")" = "$RC_NUMBER"
           test "$GITHUB_REPOSITORY" = WSJTX/wsjtx
       - name: Submit release signing request to SignPath
         id: signpath

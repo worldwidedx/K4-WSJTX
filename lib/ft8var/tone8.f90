@@ -1,4 +1,8 @@
-subroutine tone8(lmycallstd,lhiscallstd)
+subroutine tone8(lmycallstd,lhiscallstd,knowledge)
+
+  use packjt77, only: pack77_state
+  use ft8_codec_context, only: get_ft8_codec_state
+  use ft8var_codec_context, only: genft8var_for_state
 
   use ft8_mod1, only : itone56,idtone56,msg,csynce,mycall,hiscall,idtonecqdxcns,idtonedxcns73,mybcall,hisbcall,lhound, &
                        idtone56_valid, &
@@ -9,6 +13,8 @@ subroutine tone8(lmycallstd,lhiscallstd)
   integer itone(79),itone1(79)
   integer*1 msgbits(77)
   logical(1), intent(in) :: lmycallstd,lhiscallstd
+  type(pack77_state), target, optional, intent(inout) :: knowledge
+  type(pack77_state), pointer :: codec
   logical(1) valid_first
 
   data rpt/'-01 ','-02 ','-03 ','-04 ','-05 ','-06 ','-07 ','-08 ','-09 ','-10 ', &
@@ -22,6 +28,8 @@ subroutine tone8(lmycallstd,lhiscallstd)
 !    integer itone56(56,79),idtone56(56,58)
 !    character*37 msg(56)
 
+  codec => get_ft8_codec_state()
+  if(present(knowledge)) codec => knowledge
   idtone56(1:56,1:58)=0
   itone56(1:56,1:79)=0
   idtone56_valid(1:56)=.false.
@@ -30,12 +38,12 @@ subroutine tone8(lmycallstd,lhiscallstd)
   if(lhound .and. len_trim(mybcall).gt.2 .and. len_trim(hisbcall).gt.2) then
     msg37=''; msg37=trim(mybcall)//' '//trim(hisbcall)//' RR73'
     i3=-1; n3=-1
-    call genft8var(msg37,i3,n3,0,msgsent37,msgbits,itone)
+    call genft8var_for_state(codec,msg37,i3,n3,0,msgsent37,msgbits,itone)
     idtonefox73(1:29)=itone(8:36)
     idtonefox73(30:58)=itone(44:72)
     msg37=''; msg37=trim(mybcall)//' RR73; '//trim(mybcall)//' <'//trim(hiscall)//'> -12'
     i3=-1; n3=-1
-    call genft8var(msg37,i3,n3,0,msgsent37,msgbits,itone)
+    call genft8var_for_state(codec,msg37,i3,n3,0,msgsent37,msgbits,itone)
     idtonespec(1:29)=itone(8:36)
     idtonespec(30:58)=itone(44:72)
   endif
@@ -43,12 +51,12 @@ subroutine tone8(lmycallstd,lhiscallstd)
   if(.not.lhiscallstd .and. len(trim(hiscall)).gt.2) then
     msg37=''; msg37='CQ '//trim(hiscall)
     i3=-1; n3=-1
-    call genft8var(msg37,i3,n3,0,msgsent37,msgbits,itone)
+    call genft8var_for_state(codec,msg37,i3,n3,0,msgsent37,msgbits,itone)
     idtonecqdxcns(1:29)=itone(8:36)
     idtonecqdxcns(30:58)=itone(44:72)
     msg37=''; msg37='<AA1AAA> '//trim(hiscall)//' 73'
     i3=-1; n3=-1
-    call genft8var(msg37,i3,n3,0,msgsent37,msgbits,itone)
+    call genft8var_for_state(codec,msg37,i3,n3,0,msgsent37,msgbits,itone)
     idtonedxcns73(1:29)=itone(8:36)
     idtonedxcns73(30:58)=itone(44:72)
   endif
@@ -64,7 +72,7 @@ subroutine tone8(lmycallstd,lhiscallstd)
       msg37=''; msg37=trim(mycall)//' '//trim(hiscall)//' '//trim(rpt(i))
       msg(i)=msg37
       i3=-1; n3=-1
-      call genft8var(msg37,i3,n3,0,msgsent37,msgbits,itone)
+      call genft8var_for_state(codec,msg37,i3,n3,0,msgsent37,msgbits,itone)
       call store_tone_slot(i,itone,i3.ge.0,i.eq.1)
     enddo
     go to 2
@@ -74,7 +82,7 @@ subroutine tone8(lmycallstd,lhiscallstd)
     do i=1,52
       msg37=''; msg37=trim(mycall)//' '//trim(hiscall14)//' '//trim(rpt(i))
       i3=-1; n3=-1
-      call genft8var(msg37,i3,n3,0,msgsent37,msgbits,itone)
+      call genft8var_for_state(codec,msg37,i3,n3,0,msgsent37,msgbits,itone)
       call store_tone_slot(i,itone,i3.ge.0,i.eq.1)
       msg37=''; msg37=trim(mycall)//' '//trim(hiscall)//' '//trim(rpt(i))
       msg(i)=msg37
@@ -82,7 +90,7 @@ subroutine tone8(lmycallstd,lhiscallstd)
     do i=54,56
       msg37=''; msg37=trim(mycall14)//' '//trim(hiscall)//' '//trim(rpt(i))
       i3=-1; n3=-1
-      call genft8var(msg37,i3,n3,0,msgsent37,msgbits,itone)
+      call genft8var_for_state(codec,msg37,i3,n3,0,msgsent37,msgbits,itone)
       call store_tone_slot(i,itone,i3.ge.0,.false.)
       msg37=''; msg37=trim(mycall)//' '//trim(hiscall)//' '//trim(rpt(i))
       msg(i)=msg37
@@ -90,7 +98,7 @@ subroutine tone8(lmycallstd,lhiscallstd)
     msg37=''; msg37=trim(mycall14)//' '//trim(hiscall)
     msg(53)=msg37
     i3=-1; n3=-1
-    call genft8var(msg37,i3,n3,0,msgsent37,msgbits,itone)
+    call genft8var_for_state(codec,msg37,i3,n3,0,msgsent37,msgbits,itone)
     call store_tone_slot(53,itone,i3.ge.0,.false.)
     go to 2
   endif
@@ -99,7 +107,7 @@ subroutine tone8(lmycallstd,lhiscallstd)
     do i=1,52
       msg37=''; msg37=trim(mycall14)//' '//trim(hiscall)//' '//trim(rpt(i))
       i3=-1; n3=-1
-      call genft8var(msg37,i3,n3,0,msgsent37,msgbits,itone)
+      call genft8var_for_state(codec,msg37,i3,n3,0,msgsent37,msgbits,itone)
       call store_tone_slot(i,itone,i3.ge.0,i.eq.1)
       msg37=''; msg37=trim(mycall)//' '//trim(hiscall)//' '//trim(rpt(i))
       msg(i)=msg37
@@ -107,7 +115,7 @@ subroutine tone8(lmycallstd,lhiscallstd)
     do i=54,56
       msg37=''; msg37=trim(mycall)//' '//trim(hiscall14)//' '//trim(rpt(i))
       i3=-1; n3=-1
-      call genft8var(msg37,i3,n3,0,msgsent37,msgbits,itone)
+      call genft8var_for_state(codec,msg37,i3,n3,0,msgsent37,msgbits,itone)
       call store_tone_slot(i,itone,i3.ge.0,.false.)
       msg37=''; msg37=trim(mycall)//' '//trim(hiscall)//' '//trim(rpt(i))
       msg(i)=msg37
@@ -115,7 +123,7 @@ subroutine tone8(lmycallstd,lhiscallstd)
     msg37=''; msg37=trim(mycall14)//' '//trim(hiscall)
     msg(53)=msg37
     i3=-1; n3=-1
-    call genft8var(msg37,i3,n3,0,msgsent37,msgbits,itone)
+    call genft8var_for_state(codec,msg37,i3,n3,0,msgsent37,msgbits,itone)
     call store_tone_slot(53,itone,i3.ge.0,.false.)
     go to 2
   endif

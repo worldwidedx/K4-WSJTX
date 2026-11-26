@@ -1,147 +1,130 @@
-// q65_subs.c
+/* Owned and legacy Fortran interfaces for the Q65 codec. */
 
-/* Fortran interface for Q65 codec
-
-   To encode a Q65 message:
-   
-   integer x(13)        !Message payload, 78 bits as 13 six-bit integers
-   integer y(63)        !Codeword, 63 six-bit integers
-   call q65_enc(imsg,icodeword)
-
-   To decode a Q65 message:
-
-   parameter (LL=64,NN=63)
-   real s3(LL,NN)        !Received energies
-   real s3prob(LL,NN)    !Symbol-value probabilities
-   integer APmask(13)
-   integer APsymbols(13)
-   real snr2500
-   integer xdec(13)      !Decoded 78-bit message as 13 six-bit integers
-   integer irc           !Return code from q65_decode()
-
-   call q65_dec(s3,APmask,APsymbols,s3prob,snr2500,xdec,irc)
-*/
-
-#include "qra15_65_64_irr_e23.h"	// QRA code used by Q65
+#include "qra15_65_64_irr_e23.h"
 #include "q65.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
-static q65_codec_ds codec;
+void *q65_codec_create(void)
+{
+  q65_codec_ds *codec = calloc(1, sizeof(*codec));
+  if (!codec) return NULL;
+  if (q65_init(codec, &qra15_65_64_irr_e23) < 0) {
+    free(codec);
+    return NULL;
+  }
+  return codec;
+}
+
+void q65_codec_destroy(void *handle)
+{
+  if (!handle) return;
+  q65_free(handle);
+  free(handle);
+}
+
+int q65_codec_encode(void *handle, const int *x, int *y)
+{
+  memset(y, 0, 63 * sizeof(*y));
+  if (!handle) return -1;
+  return q65_encode(handle, y, x) < 0 ? -1 : 0;
+}
+
+int q65_codec_intrinsics(void *handle, const float *s3, int submode,
+                         float b90ts, int fading_model, float *prob)
+{
+  memset(prob, 0, 64 * 63 * sizeof(*prob));
+  if (!handle) return -1;
+  return q65_intrinsics_fastfading(handle, prob, s3, submode, b90ts,
+                                    fading_model) < 0 ? -1 : 0;
+}
+
+int q65_codec_decode(void *handle, const float *s3, const float *prob,
+                     const int *mask, const int *symbols, int maxiters,
+                     float *esnodb, int *xdec, int *decode_rc)
+{
+  int ydec[63];
+  *esnodb = 0;
+  *decode_rc = Q65_DECODE_INVPARAMS;
+  memset(xdec, 0, 13 * sizeof(*xdec));
+  if (!handle) return -1;
+  *decode_rc = q65_decode(handle, ydec, xdec, prob, mask, symbols, maxiters);
+  if (*decode_rc == Q65_DECODE_INVPARAMS) return -1;
+  if (*decode_rc < 0) return 0;
+  if (q65_esnodb_fastfading(handle, esnodb, ydec, s3) < 0) {
+    *decode_rc = Q65_DECODE_INVPARAMS;
+    *esnodb = 0;
+    return -1;
+  }
+  return 0;
+}
+
+int q65_codec_decode_fullaplist(void *handle, const float *s3, const float *prob,
+                                const int *codewords, int ncw, float *esnodb,
+                                int *xdec, float *plog, int *decode_rc)
+{
+  int ydec[63];
+  *esnodb = 0;
+  *plog = 0;
+  *decode_rc = Q65_DECODE_INVPARAMS;
+  memset(xdec, 0, 13 * sizeof(*xdec));
+  if (!handle) return -1;
+  *decode_rc = q65_decode_fullaplist(handle, ydec, xdec, prob, codewords, ncw);
+  if (*decode_rc == Q65_DECODE_INVPARAMS) return -1;
+  *plog = q65_llh;
+  if (*decode_rc < 0) return 0;
+  if (q65_esnodb_fastfading(handle, esnodb, ydec, s3) < 0) {
+    *decode_rc = Q65_DECODE_INVPARAMS;
+    *esnodb = 0;
+    return -1;
+  }
+  return 0;
+}
+
+static q65_codec_ds *legacy_codec(void)
+{
+  static q65_codec_ds *codec;
+  if (!codec) {
+    codec = q65_codec_create();
+    if (!codec) {
+      fputs("Unable to initialize Q65 codec\n", stderr);
+      exit(EXIT_FAILURE);
+    }
+  }
+  return codec;
+}
+
+static void check_legacy_status(int status)
+{
+  if (status < 0) {
+    fputs("Q65 codec operation failed\n", stderr);
+    exit(EXIT_FAILURE);
+  }
+}
 
 void q65_enc_(int x[], int y[])
 {
-
-  static int first=1;
-  if (first) {
-    // Set the QRA code, allocate memory, and initialize
-    int rc = q65_init(&codec,&qra15_65_64_irr_e23);
-    if (rc<0) {
-      printf("error in q65_init()\n");
-      exit(0);
-    }
-    first=0;
-  }
-  // Encode message x[13], producing codeword y[63]
-  q65_encode(&codec,y,x);
+  check_legacy_status(q65_codec_encode(legacy_codec(), x, y));
 }
 
-void q65_intrinsics_ff_(float s3[], int* submode, float* B90Ts,
-			int* fadingModel, float s3prob[])
+void q65_intrinsics_ff_(float s3[], int *submode, float *b90ts,
+                        int *fading_model, float prob[])
 {
-
-/* Input:   s3[LL,NN]       Received energies
- *          submode         0=A, 4=E
- *          B90             Spread bandwidth, 90% fractional energy
- *          fadingModel     0=Gaussian, 1=Lorentzian
- * Output:  s3prob[LL,NN]   Symbol-value intrinsic probabilities
- */
-
-  int rc;
-  static int first=1;
-
-  if (first) {
-    // Set the QRA code, allocate memory, and initialize
-    int rc = q65_init(&codec,&qra15_65_64_irr_e23);
-    if (rc<0) {
-      printf("error in q65_init()\n");
-      exit(0);
-    }
-    first=0;
-  }
-  rc = q65_intrinsics_fastfading(&codec,s3prob,s3,*submode,*B90Ts,*fadingModel);
-  if(rc<0) {
-    printf("error in q65_intrinsics()\n");
-    exit(0);
-  }
-}
-		
-void q65_dec_(float s3[], float s3prob[], int APmask[], int APsymbols[],
-	      int* maxiters0, float* esnodb0, int xdec[], int* rc0)
-{
-
-/* Input:   s3[LL,NN]       Symbol spectra
- *          s3prob[LL,NN]   Symbol-value intrinsic probabilities
- *          APmask[13]      AP information to be used in decoding
- *          APsymbols[13]   Available AP informtion
- * Output:  
- *          esnodb0         Estimated Es/No (dB)
- *          xdec[13]        Decoded 78-bit message as 13 six-bit integers
- *          rc0             Return code from q65_decode()
- */
-
-  int rc;
-  int ydec[63];
-  float esnodb;
-  int maxiters=*maxiters0;
-
-  rc = q65_decode(&codec,ydec,xdec,s3prob,APmask,APsymbols,maxiters);
-  *rc0=rc;
-  // rc = -1:  Invalid params
-  // rc = -2:  Decode failed
-  // rc = -3:  CRC mismatch
-  *esnodb0 = 0.0;             //Default Es/No for a failed decode
-  if(rc<0) return;
-
-  rc = q65_esnodb_fastfading(&codec,&esnodb,ydec,s3);
-  if(rc<0) {
-    printf("error in q65_esnodb_fastfading()\n");
-    exit(0);
-  }
-  *esnodb0 = esnodb;
+  check_legacy_status(q65_codec_intrinsics(legacy_codec(), s3, *submode,
+                                           *b90ts, *fading_model, prob));
 }
 
-void q65_dec_fullaplist_(float s3[], float s3prob[], int codewords[],
-	    int* ncw, float* esnodb0, int xdec[], float* plog, int* rc0)
+void q65_dec_(float s3[], float prob[], int mask[], int symbols[],
+              int *maxiters, float *esnodb, int xdec[], int *rc)
 {
-/* Input:   s3[LL,NN]         Symbol spectra
- *          s3prob[LL,NN]     Symbol-value intrinsic probabilities
- *          codewords[63,ncw] Full codewords to search for
- *          ncw               Number of codewords
- * Output:  
- *          esnodb0           Estimated Es/No (dB)
- *          xdec[13]          Decoded 78-bit message as 13 six-bit integers
- *          rc0               Return code from q65_decode()
- */
+  q65_codec_decode(legacy_codec(), s3, prob, mask, symbols,
+                   *maxiters, esnodb, xdec, rc);
+}
 
-  int rc;
-  int ydec[63];
-  float esnodb;
-
-  rc = q65_decode_fullaplist(&codec,ydec,xdec,s3prob,codewords,*ncw);
-  *plog=q65_llh;
-  *rc0=rc;
-  
-  // rc = -1:  Invalid params
-  // rc = -2:  Decode failed
-  // rc = -3:  CRC mismatch
-  *esnodb0 = 0.0;             //Default Es/No for a failed decode
-  if(rc<0) return;
-
-  rc = q65_esnodb_fastfading(&codec,&esnodb,ydec,s3);
-  if(rc<0) {
-    printf("error in q65_esnodb_fastfading()\n");
-    exit(0);
-  }
-  *esnodb0 = esnodb;
+void q65_dec_fullaplist_(float s3[], float prob[], int codewords[],
+                         int *ncw, float *esnodb, int xdec[], float *plog, int *rc)
+{
+  q65_codec_decode_fullaplist(legacy_codec(), s3, prob, codewords,
+                              *ncw, esnodb, xdec, plog, rc);
 }

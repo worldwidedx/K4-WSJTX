@@ -1,4 +1,9 @@
-subroutine osd240_101(llr,k,apmask,ndeep,message101,cw,nhardmin,dmin)
+module osd240_101_module
+   use fst4_osd_workspace, only: fst4_osd_workspace_type
+   private
+   public :: osd240_101_owned
+contains
+subroutine osd240_101_owned(work,llr,k,apmask,ndeep,message101,cw,nhardmin,dmin)
 !
 ! An ordered-statistics decoder for the (240,101) code.
 ! Message payload is 77 bits. Any or all of a 24-bit CRC can be
@@ -12,29 +17,38 @@ subroutine osd240_101(llr,k,apmask,ndeep,message101,cw,nhardmin,dmin)
 !
 ! Valid values for k are in the range [77,101].
 !
+   type(fst4_osd_workspace_type), intent(inout), target :: work
+   integer :: iscratch,jscratch
    character*24 c24
    integer, parameter:: N=240
    integer*1 apmask(N),apmaskr(N)
-   integer*1, allocatable, save :: gen(:,:)
-   integer*1, allocatable :: genmrb(:,:),g2(:,:)
-   integer*1, allocatable :: temp(:),m0(:),me(:),mi(:),misub(:),e2sub(:),e2(:),ui(:)
-   integer*1, allocatable :: r2pat(:)
+   integer*1, pointer, contiguous :: gen(:,:)
+   integer*1, pointer, contiguous :: genmrb(:,:),g2(:,:)
+   integer*1, pointer, contiguous :: temp(:),m0(:),me(:),mi(:),misub(:),e2sub(:),e2(:),ui(:)
+   integer*1, pointer, contiguous :: r2pat(:)
    integer indices(N),nxor(N)
    integer*1 cw(N),ce(N),c0(N),hdec(N)
-   integer*1, allocatable :: decoded(:)
+   integer*1, pointer, contiguous :: decoded(:)
    integer*1 message101(101)
    integer indx(N)
    real llr(N),rx(N),absrx(N)
 
-   logical first,reset
-   data first/.true./
-   save first
+   logical reset
 
-   allocate( genmrb(k,N), g2(N,k) )
-   allocate( temp(k), m0(k), me(k), mi(k), misub(k), e2sub(N-k), e2(N-k), ui(N-k) )
-   allocate( r2pat(N-k), decoded(k) )
-
-   if( first ) then ! fill the generator matrix
+   call work%ensure()
+   genmrb(1:k,1:N)=>work%matrix(1:k*N)
+   g2(1:N,1:k)=>work%transpose_matrix(1:k*N)
+   temp=>work%vectors(1:k,1)
+   m0=>work%vectors(1:k,2)
+   me=>work%vectors(1:k,3)
+   mi=>work%vectors(1:k,4)
+   misub=>work%vectors(1:k,5)
+   e2sub=>work%vectors(1:N-k,6)
+   e2=>work%vectors(1:N-k,7)
+   ui=>work%vectors(1:N-k,8)
+   r2pat=>work%vectors(1:N-k,9)
+   decoded=>work%vectors(1:k,10)
+   if(.not.allocated(work%generator(k)%matrix)) then ! fill the generator matrix
 !
 ! Create generator matrix for partial CRC cascaded with LDPC code.
 ! 
@@ -44,7 +58,8 @@ subroutine osd240_101(llr,k,apmask,ndeep,message101,cw,nhardmin,dmin)
 ! 
 ! The first p1=k-77 CRC24 bits will be used for error detection.
 !
-      allocate( gen(k,N) )
+      allocate(work%generator(k)%matrix(k,N))
+      gen=>work%generator(k)%matrix
       gen=0
       do i=1,k
          message101=0
@@ -59,8 +74,9 @@ subroutine osd240_101(llr,k,apmask,ndeep,message101,cw,nhardmin,dmin)
          gen(i,:)=cw
       enddo
 
-      first=.false.
    endif
+
+   gen=>work%generator(k)%matrix
 
    rx=llr
    apmaskr=apmask
@@ -75,7 +91,9 @@ subroutine osd240_101(llr,k,apmask,ndeep,message101,cw,nhardmin,dmin)
 
 ! Re-order the columns of the generator matrix in order of decreasing reliability.
    do i=1,N
-      genmrb(1:k,i)=gen(1:k,indx(N+1-i))
+      do jscratch=1,k
+         genmrb(jscratch,i)=gen(jscratch,indx(N+1-i))
+      enddo
       indices(i)=indx(N+1-i)
    enddo
 
@@ -87,16 +105,20 @@ subroutine osd240_101(llr,k,apmask,ndeep,message101,cw,nhardmin,dmin)
          if( genmrb(id,icol) .eq. 1 ) then
             iflag=1
             if( icol .ne. id ) then ! reorder column
-               temp(1:k)=genmrb(1:k,id)
-               genmrb(1:k,id)=genmrb(1:k,icol)
-               genmrb(1:k,icol)=temp(1:k)
+               do jscratch=1,k
+                  temp(jscratch)=genmrb(jscratch,id)
+                  genmrb(jscratch,id)=genmrb(jscratch,icol)
+                  genmrb(jscratch,icol)=temp(jscratch)
+               enddo
                itmp=indices(id)
                indices(id)=indices(icol)
                indices(icol)=itmp
             endif
             do ii=1,k
                if( ii .ne. id .and. genmrb(ii,id) .eq. 1 ) then
-                  genmrb(ii,1:N)=ieor(genmrb(ii,1:N),genmrb(id,1:N))
+                  do jscratch=1,N
+                     genmrb(ii,jscratch)=ieor(genmrb(ii,jscratch),genmrb(id,jscratch))
+                  enddo
                endif
             enddo
             exit
@@ -104,7 +126,11 @@ subroutine osd240_101(llr,k,apmask,ndeep,message101,cw,nhardmin,dmin)
       enddo
    enddo
 
-   g2=transpose(genmrb)
+   do iscratch=1,k
+      do jscratch=1,N
+         g2(jscratch,iscratch)=genmrb(iscratch,jscratch)
+      enddo
+   enddo
 
 ! The hard decisions for the k MRB bits define the order 0 message, m0.
 ! Encode m0 using the modified generator matrix to find the "order 0" codeword.
@@ -187,19 +213,27 @@ subroutine osd240_101(llr,k,apmask,ndeep,message101,cw,nhardmin,dmin)
          endif
          d1=0.
          do n1=iflag,iend,-1
-            mi=misub
+            do iscratch=1,k
+               mi(iscratch)=misub(iscratch)
+            enddo
             mi(n1)=1
             if(any(iand(apmaskr(1:k),mi).eq.1)) cycle
             ntotal=ntotal+1
-            me=ieor(m0,mi)
+            do iscratch=1,k
+               me(iscratch)=ieor(m0(iscratch),mi(iscratch))
+            enddo
             if(n1.eq.iflag) then
                call mrbencode101(me,ce,g2,N,k)
                e2sub=ieor(ce(k+1:N),hdec(k+1:N))
-               e2=e2sub
+               do iscratch=1,N-k
+                  e2(iscratch)=e2sub(iscratch)
+               enddo
                nd1kpt=sum(e2sub(1:nt))+1
                d1=sum(ieor(me(1:k),hdec(1:k))*absrx(1:k))
             else
-               e2=ieor(e2sub,g2(k+1:N,n1))
+               do iscratch=1,N-k
+                  e2(iscratch)=ieor(e2sub(iscratch),g2(k+iscratch,n1))
+               enddo
                nd1kpt=sum(e2(1:nt))+2
             endif
             if(nd1kpt .le. ntheta) then
@@ -232,8 +266,10 @@ subroutine osd240_101(llr,k,apmask,ndeep,message101,cw,nhardmin,dmin)
       do i1=k,1,-1
          do i2=i1-1,1,-1
             ntotal=ntotal+1
-            mi(1:ntau)=ieor(g2(k+1:k+ntau,i1),g2(k+1:k+ntau,i2))
-            call boxit101(reset,mi(1:ntau),ntau,ntotal,i1,i2)
+            do iscratch=1,ntau
+               mi(iscratch)=ieor(g2(k+iscratch,i1),g2(k+iscratch,i2))
+            enddo
+            call boxit101(work,reset,mi(1:ntau),ntau,ntotal,i1,i2)
          enddo
       enddo
 
@@ -245,23 +281,31 @@ subroutine osd240_101(llr,k,apmask,ndeep,message101,cw,nhardmin,dmin)
       misub(k-nord+1:k)=1
       iflag=k-nord+1
       do while(iflag .ge.0)
-         me=ieor(m0,misub)
+         do iscratch=1,k
+            me(iscratch)=ieor(m0(iscratch),misub(iscratch))
+         enddo
          call mrbencode101(me,ce,g2,N,k)
          e2sub=ieor(ce(k+1:N),hdec(k+1:N))
          do i2=0,ntau
             ntotal2=ntotal2+1
             ui=0
             if(i2.gt.0) ui(i2)=1
-            r2pat=ieor(e2sub,ui)
+            do iscratch=1,N-k
+               r2pat(iscratch)=ieor(e2sub(iscratch),ui(iscratch))
+            enddo
 778         continue
-            call fetchit101(reset,r2pat(1:ntau),ntau,in1,in2)
+            call fetchit101(work,reset,r2pat(1:ntau),ntau,in1,in2)
             if(in1.gt.0.and.in2.gt.0) then
                ncount2=ncount2+1
-               mi=misub
+               do iscratch=1,k
+                  mi(iscratch)=misub(iscratch)
+               enddo
                mi(in1)=1
                mi(in2)=1
                if(sum(mi).lt.nord+npre1+npre2.or.any(iand(apmaskr(1:k),mi).eq.1)) cycle
-               me=ieor(m0,mi)
+               do iscratch=1,k
+                  me(iscratch)=ieor(m0(iscratch),mi(iscratch))
+               enddo
                call mrbencode101(me,ce,g2,N,k)
                nxor=ieor(ce,hdec)
                dd=sum(nxor*absrx)
@@ -286,7 +330,7 @@ subroutine osd240_101(llr,k,apmask,ndeep,message101,cw,nhardmin,dmin)
    if(nbadcrc.ne.0) nhardmin=-nhardmin
 
    return
-end subroutine osd240_101
+end subroutine osd240_101_owned
 
 subroutine mrbencode101(me,codeword,g2,N,K)
    integer*1 me(K),codeword(N),g2(N,K)
@@ -301,7 +345,7 @@ subroutine mrbencode101(me,codeword,g2,N,K)
 end subroutine mrbencode101
 
 subroutine nextpat101(mi,k,iorder,iflag)
-   integer*1 mi(k),ms(k)
+   integer*1 mi(k),ms(101)
 ! generate the next test error pattern
    ind=-1
    do i=1,k-1
@@ -319,7 +363,7 @@ subroutine nextpat101(mi,k,iorder,iflag)
       nz=iorder-sum(ms)
       ms(k-nz+1:k)=1
    endif
-   mi=ms
+   mi=ms(1:k)
    do i=1,k  ! iflag will point to the lowest-index 1 in mi
       if(mi(i).eq.1) then
          iflag=i
@@ -329,23 +373,21 @@ subroutine nextpat101(mi,k,iorder,iflag)
    return
 end subroutine nextpat101
 
-subroutine boxit101(reset,e2,ntau,npindex,i1,i2)
+subroutine boxit101(work,reset,e2,ntau,npindex,i1,i2)
+   type(fst4_osd_workspace_type), intent(inout) :: work
    integer*1 e2(1:ntau)
-   integer   indexes(5000,2),fp(0:525000),np(5000)
    logical reset
-   common/boxes/indexes,fp,np
 
+   call work%ensure_boxes()
    if(reset) then
-      patterns=-1
-      fp=-1
-      np=-1
-      sc=-1
-      indexes=-1
+      work%box_first=-1
+      work%box_next=-1
+      work%box_indices=-1
       reset=.false.
    endif
 
-   indexes(npindex,1)=i1
-   indexes(npindex,2)=i2
+   work%box_indices(npindex,1)=i1
+   work%box_indices(npindex,2)=i2
    ipat=0
    do i=1,ntau
       if(e2(i).eq.1) then
@@ -353,28 +395,25 @@ subroutine boxit101(reset,e2,ntau,npindex,i1,i2)
       endif
    enddo
 
-   ip=fp(ipat)   ! see what's currently stored in fp(ipat)
+   ip=work%box_first(ipat)   ! see what's currently stored in work%box_first(ipat)
    if(ip.eq.-1) then
-      fp(ipat)=npindex
+      work%box_first(ipat)=npindex
    else
-      do while (np(ip).ne.-1)
-         ip=np(ip)
+      do while (work%box_next(ip).ne.-1)
+         ip=work%box_next(ip)
       enddo
-      np(ip)=npindex
+      work%box_next(ip)=npindex
    endif
    return
 end subroutine boxit101
 
-subroutine fetchit101(reset,e2,ntau,i1,i2)
-   integer   indexes(5000,2),fp(0:525000),np(5000)
-   integer   lastpat
+subroutine fetchit101(work,reset,e2,ntau,i1,i2)
+   type(fst4_osd_workspace_type), intent(inout) :: work
    integer*1 e2(ntau)
    logical reset
-   common/boxes/indexes,fp,np
-   save lastpat,inext
 
    if(reset) then
-      lastpat=-1
+      work%last_pattern=-1
       reset=.false.
    endif
 
@@ -384,21 +423,32 @@ subroutine fetchit101(reset,e2,ntau,i1,i2)
          ipat=ipat+ishft(1,ntau-i)
       endif
    enddo
-   index=fp(ipat)
+   index=work%box_first(ipat)
 
-   if(lastpat.ne.ipat .and. index.gt.0) then ! return first set of indices
-      i1=indexes(index,1)
-      i2=indexes(index,2)
-      inext=np(index)
-   elseif(lastpat.eq.ipat .and. inext.gt.0) then
-      i1=indexes(inext,1)
-      i2=indexes(inext,2)
-      inext=np(inext)
+   if(work%last_pattern.ne.ipat .and. index.gt.0) then ! return first set of indices
+      i1=work%box_indices(index,1)
+      i2=work%box_indices(index,2)
+      work%next_index=work%box_next(index)
+   elseif(work%last_pattern.eq.ipat .and. work%next_index.gt.0) then
+      i1=work%box_indices(work%next_index,1)
+      i2=work%box_indices(work%next_index,2)
+      work%next_index=work%box_next(work%next_index)
    else
       i1=-1
       i2=-1
-      inext=-1
+      work%next_index=-1
    endif
-   lastpat=ipat
+   work%last_pattern=ipat
    return
 end subroutine fetchit101
+
+end module osd240_101_module
+
+subroutine osd240_101(llr,k,apmask,ndeep,message101,cw,nhardmin,dmin)
+   use osd240_101_module, only: osd240_101_owned
+   use fst4_osd_workspace, only: fst4_osd_workspace_type
+   type(fst4_osd_workspace_type), save :: legacy
+   real llr(240),dmin
+   integer*1 apmask(240),message101(101),cw(240)
+   call osd240_101_owned(legacy,llr,k,apmask,ndeep,message101,cw,nhardmin,dmin)
+end subroutine

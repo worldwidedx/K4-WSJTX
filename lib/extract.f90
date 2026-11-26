@@ -27,6 +27,7 @@ subroutine extract(s3,nadd,mode65,ntrials,naggressive,ndepth,nflip,     &
   integer apsymbols(7,12),ap(12)
   integer nappasses(0:5)  ! the number of decoding passes to use for each QSO state
   integer naptypes(0:5,4) ! (nQSOProgress, decoding pass)  maximum of 4 passes for now 
+  integer :: cache_epoch=-1
   integer dat4(12)
   integer mrsym(63),mr2sym(63),mrprob(63),mr2prob(63)
   integer correct(63),tmp(63)
@@ -36,7 +37,11 @@ subroutine extract(s3,nadd,mode65,ntrials,naggressive,ndepth,nflip,     &
   save
   
   if(mode65.eq.-99) stop                   !Silence compiler warning
-  if(first) then
+  if(first.or.cache_epoch/=jt65_ap_epoch) then
+     mycall0=''
+     hiscall0=''
+     hisgrid0=''
+     cache_epoch=jt65_ap_epoch
 
 ! aptype
 !------------------------
@@ -68,6 +73,7 @@ subroutine extract(s3,nadd,mode65,ntrials,naggressive,ndepth,nflip,     &
      apsymbols=-1
      mycall0=mycall
      hiscall0=hiscall
+     hisgrid0=hisgrid
      ap=-1
      apsymbols(1,1:4)=(/62,32,32,49/) ! CQ
      if(len_trim(mycall).gt.0) then
@@ -108,6 +114,10 @@ subroutine extract(s3,nadd,mode65,ntrials,naggressive,ndepth,nflip,     &
   nfail=0
   decoded='                      '
   call pctile(s3,4032,npct,base)
+  ncount=-1
+  nhist=0
+  ltext=.false.
+  if(base<=0.) return
   s3=s3/base
   s3a=s3                                            !###
 

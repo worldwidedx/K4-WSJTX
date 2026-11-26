@@ -114,7 +114,10 @@ QString program_title (QString const& revision)
 QString branded_program_title (QString const& revision)
 {
   // applicationName() itself must stay plain ASCII -- it also names the jt9 shared-memory key and settings/lock/temp paths.
-  QString id {QCoreApplication::applicationName () + "™   v" + QCoreApplication::applicationVersion ()};
+  QString name {QCoreApplication::applicationName ()};
+  auto const instance_separator = name.indexOf (" - ");
+  name.insert (instance_separator < 0 ? name.size () : instance_separator, "™");
+  QString id {name + "   v" + QCoreApplication::applicationVersion ()};
   return id + " " + revision ;
 }
 

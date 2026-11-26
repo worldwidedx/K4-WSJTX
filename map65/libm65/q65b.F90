@@ -1,13 +1,65 @@
 ! This routine provides an interface between MAP65 and the Q65 decoder
 ! in WSJT-X.  All arguments are input data obtained from the MAP65 GUI.
-! Raw Rx data are available as the 96 kHz complex spectrum ca(MAXFFT1)
-! in cacb_mod.  If xpol is true, we also have cb(MAXFFT1) for the
-! orthogonal polarization.  Decoded messages are sent back to the GUI
-! on stdout.
+! Raw Rx data are available as the complex spectrum ca(1:nfft1) in
+! cacb_mod, where nfft1 is 56 times the sample rate.  If xpol is true, we
+! also have cb for the orthogonal polarization.  Decoded messages are sent
+! back to the GUI on stdout.
 
       module q65b_mod
+      use iso_fortran_env, only: int16, real64
       implicit none
+      integer, parameter, private :: MAXFFT2 = 336000*2
       contains
+
+   subroutine build_q65_samples(k0, nfft2, df, xpol, configured_dphi_deg, combine_poldeg, iwave)
+      use cacb_mod, only: ca, cb
+      use four2a_mod, only: four2a
+      integer, intent(in) :: k0, nfft2, configured_dphi_deg
+      real, intent(in) :: df, combine_poldeg
+      logical, intent(in) :: xpol
+      integer(int16), intent(out) :: iwave(:)
+      real(real64), parameter :: RAD = 57.2957795
+      complex :: cx(0:MAXFFT2-1), cy(0:MAXFFT2-1), cz(0:MAXFFT2)
+      save cx, cy, cz
+      integer :: i, j, ja, jb
+      real :: dphi, fac, r
+
+      fac = 1.0/nfft2
+      cx(0:nfft2 - 1) = ca(k0:k0 + nfft2 - 1)
+      cx = fac*cx
+      if (xpol) then
+         cy(0:nfft2 - 1) = cb(k0:k0 + nfft2 - 1)
+         cy = fac*cy
+         if (configured_dphi_deg .ne. 0) then
+            dphi = configured_dphi_deg/RAD
+            cy(0:nfft2 - 1) = cmplx(cos(dphi), sin(dphi))*cy(0:nfft2 - 1)
+         endif
+      endif
+
+      if (xpol) then
+         cz(0:MAXFFT2 - 1) = cos(combine_poldeg/RAD)*cx + sin(combine_poldeg/RAD)*cy
+      else
+         cz(0:MAXFFT2 - 1) = cx
+      endif
+
+      cz(MAXFFT2) = 0.
+      ja = nint(500.0/df)
+      jb = nint(2500.0/df)
+      do i = 0, ja
+         r = 0.5*(1.0 + cos(i*3.14159/ja))
+         cz(ja - i) = r*cz(ja - i)
+         cz(jb + i) = r*cz(jb + i)
+      enddo
+      cz(ja + jb + 1:) = 0.
+
+      call four2a(cz, 2*nfft2, 1, 1, -1)
+      do i = 0, nfft2 - 1
+         j = nfft2 - 1 - i
+         iwave(2*i + 2) = int(max(-32768, min(32767, nint(real(cz(j))))), kind=2)
+         iwave(2*i + 1) = int(max(-32768, min(32767, nint(aimag(cz(j))))), kind=2)
+      enddo
+      iwave(2*nfft2 + 1:) = 0
+   end subroutine build_q65_samples
 
    subroutine write_wav_header(unit, nsamp, fs)
       integer, intent(in) :: unit, nsamp, fs
@@ -41,6 +93,7 @@
       use timer_module, only: timer
       use debug_log
       use stdout_channel_mod, only: write_stdout
+      use message_history_mod, only: append_message
       use decodes_mod,  only: ldecoded, ndecodes
       use cacb_mod
       use four2a_mod
@@ -48,7 +101,7 @@
       use iso_fortran_env, only: real64, int16
       use map65_mmdec_mod
       use npar_ptrs_mod, only: nrate_active, nfft_big_active, nfft_active, t_start, abort_decode, &
-                               manualDecodeFlag, ndepth
+                               manualDecodeFlag, ndepthq65
       use sec_midn_mod, only: sec_midn
 
       implicit none
@@ -81,16 +134,13 @@
 
       !==== Local parameters ====================================================
       ! MAXFFT1/2 are *max* sizes; actual runtime sizes are derived below.
-      ! MAXFFT1 must be = nfft_big_active; MAXFFT2 must be = the
-      ! downsampled-FFT length at the highest supported rate.
-      integer, parameter :: MAXFFT1 = 56*192000
-      integer, parameter :: MAXFFT2 = 336000*2
+      ! MAXFFT1 bounds nfft_big_active at the highest supported rate; MAXFFT2
+      ! must be = the downsampled-FFT length at that rate.
+      integer, parameter :: MAXFFT1 = 56*256000
       integer, parameter :: NMAX    = 60*12000
-      real(real64), parameter  :: RAD     = 57.2957795
 
       !==== Local variables =====================================================
       integer(int16) :: iwave(300*12000)
-      complex   :: cx(0:MAXFFT2-1), cy(0:MAXFFT2-1), cz(0:MAXFFT2)
       integer   :: ipk1(1)
       ! Small, fixed bin radius for the automatic-candidate ipk search (see
       ! the note below at "for a wideband candidate"). Deliberately
@@ -98,13 +148,13 @@
       ! wb_sync's own low-SNR bin-selection noise, not accommodate arbitrary
       ! user-configured search widths.
       integer, parameter :: IPK_LOCAL_BINS = 5
-      integer   :: i, ia, ib, ifreq, ikhz1, ipk, ipol
-      integer   :: j, ja, jb, k0, mhz, ndf, nfft1, nfft2
+      integer   :: ia, ib, ifreq, ikhz1, ipk, ipol
+      integer   :: k0, mhz, ndf, nfft1, nfft2
       integer   :: npol, nq65df, nsubmode, ntxpol, nutc00, nh
       integer   :: nfa, nfb
       integer   :: k0_click, mousedf_gate
-      real      :: df, df3, dphi, f_ipk, f_mouse, fac
-      real      :: combine_poldeg, freq1_00, frx, fsked, poldeg, r, snr1
+      real      :: df, df3, f_ipk, f_mouse
+      real      :: combine_poldeg, freq1_00, frx, fsked, poldeg, snr1
       real(real64)    :: freq0, freq1
       character(len=12) :: mycall, hiscall
       character(len=4)  :: grid4
@@ -112,6 +162,7 @@
       character(len=1)  :: cp
       character(len=2)  :: cmode
       character(len=256) :: linenew
+      character(len=83) :: history_line
 
       integer :: t_now, t_rate
       logical :: search_cursor
@@ -143,9 +194,10 @@
       return
     endif
 
-      ! ca/cb storage is sized at MAXFFT1 in cacb_mod; the *active* big FFT
-      ! length is nfft_big_active, set from C++ via set_runtime_params_().
-      call init_cacb(MAXFFT1)
+      ! ca/cb storage in cacb_mod is sized for the active big FFT
+      ! (nfft_big_active, set from C++ via set_runtime_params_()), not for
+      ! the largest supported rate. The rate only changes on restart.
+      call init_cacb(min(nfft_big_active, MAXFFT1))
       
       ! wideband_sync expects the active symspec FFT length
       call init_wideband_sync()
@@ -186,12 +238,6 @@
       endif
       snr1 = sync(ipk)%ccfmax
 
-      ! TEMP diagnostic 2026-09-09 for the two-close-Q65-signals investigation.
-      call dbg('q65b: ipk check at t=' // rtoa(sec_midn()) // &
-               ' nqd=' // itoa(nqd) // ' f0=' // rtoa(real(f0)) // ' ntol=' // itoa(ntol) // &
-               ' ifreq=' // itoa(ifreq) // ' ipk=' // itoa(ipk) // &
-               ' ldecoded(ipk)=' // itoa(merge(1,0,ldecoded(ipk))) // &
-               ' manualDecodeFlag=' // itoa(manualDecodeFlag) // ' nagain=' // itoa(nagain))
       ! ldecoded(ipk) exists to keep the wideband scan from repeatedly
       ! re-decoding a bin it already got a result from. A manual click is a
       ! deliberate, targeted request to decode at this exact bin, so it must
@@ -256,8 +302,8 @@
       ! loop decode the same narrow window near the cursor instead of its
       ! own frequency. The one nagain=1 case where f0 genuinely comes from
       ! mousefqso (the "no candidate found" fallback in map65a.f90) already
-      ! sets f0 = mousefqso + mousedf directly, so the default k0 below
-      ! lands on the same point anyway.
+      ! sets f0 to the cursor in the spectrum frame (q65_cursor_f0), so the
+      ! default k0 below lands on the same point anyway.
       if (manualDecodeFlag .ne. 0) k0 = nint((f_mouse - 1000.0)/df)
 
       if (k0 .lt. nh .or. k0 .gt. nfft1 - nfft2 + 1) then
@@ -272,62 +318,16 @@
       ! (below) determine success or failure instead.
       if (snr1 .lt. 1.5 .and. manualDecodeFlag .eq. 0) go to 900                      !### Threshold needs work? ###
 
-      fac = 1.0/nfft2
-      cx(0:nfft2 - 1) = ca(k0:k0 + nfft2 - 1)
-      cx = fac*cx
-      if (xpol) then
-         cy(0:nfft2 - 1) = cb(k0:k0 + nfft2 - 1)
-         cy = fac*cy
-         if (configured_dphi_deg .ne. 0) then
-            dphi = configured_dphi_deg/RAD
-            ! The sync weights describe the phase-corrected basis from symspec.
-            cy(0:nfft2 - 1) = cmplx(cos(dphi), sin(dphi))*cy(0:nfft2 - 1)
-         endif
-      endif
-
-! Here cx and cy (if xpol) are frequency-domain data around the selected
-! QSO frequency, taken from the full-length FFT computed in filbig().
-! Values for fsample, nfft1, nfft2, df, and the downsampled data rate
-! are as follows:
-
-!  fSample  nfft1       df        nfft2  fDownSampled
-!    (Hz)              (Hz)                 (Hz)
-!----------------------------------------------------
-!   96000  5376000  0.017857143  336000   6000.000
-!   95238  5120000  0.018601172  322560   5999.994
-
       poldeg = 0.
+      combine_poldeg = 0.
       if (xpol) then
-         ! NB: still uses the (possibly wrong-bin, see k0 above) ipk for
-         ! manual clicks in xpol mode -- not exercised by current testing,
-         ! but worth revisiting if xpol manual decode misbehaves similarly.
+         ! NB: for manual clicks in xpol mode this still takes the angles from
+         ! ipk, the sync-curve peak within +/- ntol of f0 (see above), which
+         ! is not necessarily the bin of the clicked signal.
          poldeg = sync(ipk)%pol
          combine_poldeg = sync(ipk)%combine_pol
-         cz(0:MAXFFT2 - 1) = cos(combine_poldeg/RAD)*cx + sin(combine_poldeg/RAD)*cy
-      else
-         cz(0:MAXFFT2 - 1) = cx
       endif
-
-      cz(MAXFFT2) = 0.
-! Roll off below 500 Hz and above 2500 Hz.
-      ja = nint(500.0/df)
-      jb = nint(2500.0/df)
-      do i = 0, ja
-         r = 0.5*(1.0 + cos(i*3.14159/ja))
-         cz(ja - i) = r*cz(ja - i)
-         cz(jb + i) = r*cz(jb + i)
-      enddo
-      cz(ja + jb + 1:) = 0.
-
-!Transform to time domain (real), fsample=12000 Hz
-      call four2a(cz, 2*nfft2, 1, 1, -1)
-      do i = 0, nfft2 - 1
-         j = nfft2 - 1 - i
-         iwave(2*i + 2) = int(max(-32768, min(32767, nint(real(cz(j))))), kind=2)
-         iwave(2*i + 1) = int(max(-32768, min(32767, nint(aimag(cz(j))))), kind=2)
-      enddo
-
-      iwave(2*nfft2 + 1:) = 0
+      call build_q65_samples(k0, nfft2, df, xpol, configured_dphi_deg, combine_poldeg, iwave)
 
       nsubmode = mode_q65 - 1
       nfa = 990                   !Tight limits around ipk for the wideband decode
@@ -339,13 +339,11 @@
 
 ! NB: Frequency of ipk is now shifted to 1000 Hz.
 
-      ! ndepth comes from npar_ptrs_mod, set from the GUI's Decode Depth
-      ! menu (see MainWindow::decode() -> setNdepth()). This used to be a
-      ! local variable "ndpth" hardwired to 3 here, which was never
-      ! connected to the GUI at all -- Q65 always ran at depth 3
-      ! regardless of what the user selected.
+      ! ndepthq65 comes from npar_ptrs_mod, set from the GUI's Q65 Search
+      ! Level menu (see MainWindow::decode() -> setNdepthq65()). It is
+      ! independent of the JT65 level (ndepth).
       call map65_mmdec(nutc, iwave, nqd, 60, nsubmode, nfa, nfb, 1000, ntol, &
-                       newdat, nagain, max_drift, ndepth, mycall, hiscall0, hisgrid)
+                       newdat, nagain, max_drift, ndepthq65, mycall, hiscall0, hisgrid)
 
       MHz = fcenter
       freq0 = MHz + 0.001d0*ikhz
@@ -394,13 +392,14 @@
             call write_stdout(trim(linenew)//new_line('a'))
          endif
 
-! Write to lu 26, for Messages and Band Map windows
+! Retain wideband decodes for Messages and Band Map.
          cmode = ': '
          cmode(2:2) = char(ichar('A') + mode_q65 - 1)
          freq1 = freq0 + 0.001d0*(ikhz1 - ikhz)
-         write (26, 1014) freq1, ndf, 0, 0, 0, xdt0, npol, 0, nsnr0, nutc, msg0(1:28), &
+         write (history_line, 1014) freq1, ndf, 0, 0, 0, xdt0, npol, 0, nsnr0, nutc, msg0(1:28), &
             ':', cp, cmode ! was 1:22
 1014     format(f8.3, i5, 3i3, f5.1, i4, i3, i4, i5.4, 4x, a28, 1x, 2a1, 2x, a2) ! was a22
+         call append_message(history_line, nutc, freq1, ndf)
 
 ! Suppress writing duplicates (same time, decoded message, and frequency)
 ! to map65_rx.log

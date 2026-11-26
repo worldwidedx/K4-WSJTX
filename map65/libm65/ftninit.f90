@@ -19,7 +19,6 @@ subroutine ftninit(appd)
   open(13,file=appd//'/map65.log',status='unknown')
 !  open(19,file=appd//'/livecq.txt',status='unknown')  ! not written with new livecq code
   open(21, file=appd//'/map65_rx.log', status='unknown', position='append', err=950)
-  open(26,file=appd//'/tmp26.txt',status='unknown')
 
 ! Import FFTW wisdom, if available:
   iret=fftwf_init_threads()            !Initialize FFTW threading 

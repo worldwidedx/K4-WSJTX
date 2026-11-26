@@ -1,17 +1,16 @@
 subroutine q65_set_list2(mycall,hiscall,hisgrid,callers,nhist2,codewords,ncw)
 
   use types
-  parameter (MAX_NCW=411)     !1 + 40 stored callers plus the current call, 5 kinds, 2 flags
-  parameter (MAX_CALLERS=50)  !For multiple q3 decodes in NA VHF Contest mode
+  use q65_callers, only: Q65_MAX_CALLERS,Q65_MAX_CODEWORDS
   character*12 mycall,hiscall
   character*6 hisgrid,c6
   character*4 g4
   character*37 msg,msgsent
   logical std,isgrid
-  integer codewords(63,MAX_NCW)
+  integer codewords(63,Q65_MAX_CODEWORDS)
   integer itone(85)
   integer isync(22)
-  type(q3list) callers(MAX_CALLERS)
+  type(q3list) callers(Q65_MAX_CALLERS)
 
   data isync/1,9,12,13,15,22,23,26,27,33,35,38,46,50,55,60,62,66,69,74,76,85/
 
@@ -19,10 +18,13 @@ subroutine q65_set_list2(mycall,hiscall,hisgrid,callers,nhist2,codewords,ncw)
        g4(2:2).le.'R' .and. g4(3:3).ge.'0' .and. g4(3:3).le.'9' .and.       &
        g4(4:4).ge.'0' .and. g4(4:4).le.'9' .and. g4(1:4).ne.'RR73'
 
+  ncw=0
+  if(nhist2.lt.0 .or. nhist2.gt.Q65_MAX_CALLERS) return
+
   call stdcall(hiscall,std)
   jmax=nhist2
   if(std .and. isgrid(hisgrid(1:4))) then
-     jmax=min(MAX_CALLERS,nhist2+1)
+     jmax=nhist2+1
      do j=1,nhist2
         if(callers(j)%call .eq. hiscall(1:6)) then
            jmax=nhist2
@@ -34,11 +36,12 @@ subroutine q65_set_list2(mycall,hiscall,hisgrid,callers,nhist2,codewords,ncw)
   codewords(:,1)=0
   i=1
   do j=1,jmax
-     c6=callers(j)%call
-     g4=callers(j)%grid
      if(j.eq.nhist2+1) then
         c6=hiscall(1:6)
         g4=hisgrid(1:4)
+     else
+        c6=callers(j)%call
+        g4=callers(j)%grid
      endif
      do k=1,5
         msg=trim(mycall)//' '//trim(c6)

@@ -6,20 +6,16 @@
 #include "qt_helpers.hpp"
 #include "../revision_utils.hpp"
 #include "../Network/PSKReporter.hpp"
-#include "liveCQSender.hpp"
+#include "../Network/LiveCQUpload.hpp"
+#include "livecq_decode.hpp"
 #include "pskreporter_decode.h"
 #include "pskreporter_settings.h"
 
 #include <QCoreApplication> //liveCQ
-#include <QNetworkAccessManager> //liveCQ
-#include <QNetworkRequest>
-#include <QNetworkReply>
-#include <QUrl>
-#include <QUrlQuery>
-#include <QEventLoop>
 #include <QDateTime>
 #include <QString>
-#include <QThread>
+#include <QUrl>
+#include <QUrlQuery>
 #include <QDebug>
 
 Messages::Messages (QString const& settings_filename, QString const& eclipse_filename,
@@ -42,42 +38,15 @@ Messages::Messages (QString const& settings_filename, QString const& eclipse_fil
   QSettings settings2 {m_settings_filename, QSettings::IniFormat};
   auto const pskReporterSettings = readMap65PSKReporterSettings(settings2);
   SettingsGroup h {&settings2, "Common"};
-  bool m_w3szUrl = settings2.value("w3szUrl",true).toBool();
-  QString m_otherUrl = settings2.value("otherUrl","").toString();
-  QString m_myCall=settings2.value("MyCall","").toString();
-  QString m_myGrid=settings2.value("MyGrid","").toString();
   m_spot_to_psk_reporter = pskReporterSettings.enabled;
-  QString theUrl;
-  
-  if(m_w3szUrl) {
-    theUrl = w3szUrlAddr;
-  } else {
-    theUrl = m_otherUrl;
-  }
-  
+
   m_cqOnly=false;
   m_cqStarOnly=false;
-  QString guiDate;
-  QStringList allDecodes =  { "" };
-  QStringList allDecodes2 = { "" };
   connect (ui->messagesTextBrowser, &DisplayText::selectCallsign, this, &Messages::selectCallsign2);
-  
-    // Create the thread and your liveCQ object
-  livecqThread = new QThread(this);
-  
-  connect(livecqThread, &QThread::started, this, [this, m_myCall, m_myGrid, theUrl]() {
-    auto* reporter2 = new liveCQSender(m_myCall, m_myGrid, theUrl);
-    reporter2->moveToThread(this->livecqThread);      
 
-    connect(reporter2, &liveCQSender::destroyed, livecqThread, &QThread::quit);
-    QMetaObject::invokeMethod(reporter2, "init", Qt::QueuedConnection);
-    
-    // Connect signals for control and communication
-    connect(this, &Messages::sendRemoteStationData2, reporter2, &liveCQSender::addRemoteStation);
-  
-});
-  connect(livecqThread, &QThread::finished, livecqThread, &QObject::deleteLater);
-  livecqThread->start();  
+  m_livecq = std::make_unique<LiveCQUpload>(this);
+  m_livecq->setUserAgent(http_user_agent().toUtf8());
+  connect(m_livecq.get(), &LiveCQUpload::errorOccurred, this, &Messages::errorOccurred);
 
   m_psk_reporter.reset(new PSKReporter({
     pskReporterSettings.use_tcpip,
@@ -141,149 +110,40 @@ void Messages::setPSKReportingEnabled(bool enabled)
 }
 
 void Messages::sendLiveCQData(QStringList decodeList) {
-  QSettings settings(m_settings_filename, QSettings::IniFormat);
+  QSettings settings {m_settings_filename, QSettings::IniFormat};
   SettingsGroup g {&settings, "Common"};
-  bool m_w3szUrl = settings.value("w3szUrl",true).toBool();
-  QString m_otherUrl = settings.value("otherUrl","").toString();
-  QString m_myCall=settings.value("MyCall","").toString();
-  QString m_myGrid=settings.value("MyGrid","").toString();
-  bool m_xpol = settings.value("Xpol",false).toBool();
-  QString rpol = "--";
-  QString theUrl;
+  bool const m_w3szUrl = settings.value("w3szUrl", true).toBool();
+  QString const m_otherUrl = settings.value("otherUrl", "").toString();
+  QString const m_myCall = settings.value("MyCall", "").toString();
+  QString const m_myGrid = settings.value("MyGrid", "").toString();
+  bool const m_xpol = settings.value("Xpol", false).toBool();
 
-  if(w3szUrlAddr.contains("https://") && m_w3szUrl) {
-    theUrl = w3szUrlAddr;
-  } else if (m_otherUrl.contains("https://") && !m_w3szUrl) { 
-    theUrl = m_otherUrl;
+  QString const theUrl = m_w3szUrl ? w3szUrlAddr : m_otherUrl;
+  QUrl const endpoint {theUrl};
+  if (!endpoint.isValid()
+      || endpoint.scheme().compare("https", Qt::CaseInsensitive) != 0) {
+    return;
   }
-  else return;
-  for (const QString &theLine : decodeList) {
-    QStringList thePostLine = theLine.split(" ",SkipEmptyParts);
-    if((thePostLine.at(5).trimmed() == "CQ" || thePostLine.at(5).trimmed() == "QRZ" || thePostLine.at(5).trimmed() == "CQV" ||  thePostLine.at(5) == "CQH" || thePostLine.at(5).trimmed() == "QRT") && m_myCall.length() >=3 && m_myGrid.length()>=4) {
-      if(allDecodes.filter(theLine.mid(0,53)).length() == 0) {
-        allDecodes.append(theLine);
-        QString freq = thePostLine.at(0).trimmed();
-        QString dF = thePostLine.at(1).trimmed();
-        QString utcdatetimestringOriginal = guiDate + " " + thePostLine.at(3).trimmed() + "00"; //needs 2 spaces between date and time
-        QDateTime utcdatetimeUTC = QDateTime::fromString(utcdatetimestringOriginal, "yyyy MMM dd  HHmmss");
-        utcdatetimeUTC.setTimeZone(QTimeZone::utc());
-        QString utcdatetimeUTCString = utcdatetimeUTC.toString("yyyy-MM-ddTHH:mm:ss");
-        utcdatetimeUTCString = utcdatetimeUTCString + "Z";
-        QString dB = thePostLine.at(4).trimmed();
-        QString msgType = thePostLine.at(5).trimmed().toUpper();
-        QString callsign = "";
-        QString grid = "--";
-        QString mode="";
-        QString txpol = " ";
-        QString dT = "";
-        QString modeChar = "";
-        // Handle CQ CALL but NO GRID -- dot at 7
-      if(thePostLine.at(7).contains(".")) {
-          callsign = thePostLine.at(6).trimmed().toUpper();
-          bool isCall = Map65PSKReporter::isValidMap65Callsign(callsign);
-          if(!isCall) continue;
-          dT =thePostLine.at(7).trimmed();
-          modeChar = thePostLine.at(8).trimmed(); 
-          if(modeChar.contains("#")) mode = QString("JT65") + modeChar.back();
-          else if(modeChar.contains(":")) mode = QString("Q65-60") + modeChar.back();          
-          if(m_xpol) {
-            rpol = thePostLine.at(2).trimmed();
-          } else {
-            rpol = "--";
-          }
-          txpol = "--";  
-          
-        // Handle CQ CALL GRID or CQ XXX CALL -- dot at 8
-        } else if (thePostLine.at(8).contains(".")) {
-          // Test for callsign at thePostLine(6)
-          callsign = thePostLine.at(6).trimmed().toUpper();
-          bool isCall = Map65PSKReporter::isValidMap65Callsign(callsign);
-          if(isCall) {
-            grid = thePostLine.at(7).trimmed();  
-            // Handle CQ XXX CALL
-          } else {
-            callsign = thePostLine.at(7).trimmed().toUpper();
-            bool isCall = Map65PSKReporter::isValidMap65Callsign(callsign);
-            if(!isCall) continue;
-          }          
-          dT =thePostLine.at(8).trimmed();
-          modeChar = thePostLine.at(9).trimmed();
-          if(modeChar.contains("#")) 
-          {  
-            mode = QString("JT65") + modeChar.back();            
-            if (m_xpol) {
-              rpol = thePostLine.at(2).trimmed();
-              if(thePostLine.length()==11) {
-                if(thePostLine.at(10).contains("H")) txpol = "H";
-                else if(thePostLine.at(10).contains("V")) txpol = "V";
-                else txpol+"--";
-              } else txpol="--";
-            }
-          } else if(modeChar.contains(":")) {
-            mode = QString("Q65-60") + modeChar.back();            
-            if (m_xpol) {
-              rpol = thePostLine.at(2).trimmed();
-              if(thePostLine.length()==11) {
-              if(thePostLine.at(10).contains("H")) txpol = "H";
-              else if(thePostLine.at(10).contains("V")) txpol = "V";
-              else txpol="--";
-            } else txpol="--";
-          }
-        }
-        // Handle CQ XXX CALL GRID
-        }  else if(thePostLine.at(9).contains(".")) {
-            callsign = thePostLine.at(7).trimmed().toUpper();
-            bool isCall = Map65PSKReporter::isValidMap65Callsign(callsign);
-            if(!isCall) continue;
-            grid = thePostLine.at(8).trimmed();  
-             
-            dT =thePostLine.at(9).trimmed();
-            modeChar = thePostLine.at(10).trimmed();
-            if(modeChar.contains("#")) 
-            {  
-              mode = QString("JT65") + modeChar.back();            
-              if (m_xpol) {
-                rpol = thePostLine.at(2).trimmed();
-                if(thePostLine.length()==12) {
-                  if(thePostLine.at(11).contains("H")) txpol = "H";
-                  else if(thePostLine.at(11).contains("V")) txpol = "V";
-                  else txpol="--";
-                } else txpol="--";                
-              }
-            } else if(modeChar.contains(":")) {
-              mode = QString("Q65-60") + modeChar.back();            
-              if (m_xpol) {
-                rpol = thePostLine.at(2).trimmed();
-                if(thePostLine.length()==12) {
-                  if(thePostLine.at(11).contains("H")) txpol = "H";
-                  else if(thePostLine.at(11).contains("V")) txpol = "V";
-                  else txpol="--";
-                } else txpol="--";  
-              }                
-            } 
-        }
-        else {
-          continue; 
-        }
-        if(mode.contains("JT65") || mode.contains("Q65")) {
-          QString postString =  "skedfreq=" + freq + "&rxfreq=" + dF + "&rpol=" + rpol + "&dt="  +  dT + "&dB="  + dB + "&msgtype="  +  msgType.toUpper() + "&callsign="  +  callsign.toUpper() + "&grid="  +  grid.toUpper() + "&mode="  +  mode + "&utcdatetime="  +  utcdatetimeUTCString + "&spotter="  +  m_myCall.toUpper() + "&spottergrid="  + m_myGrid.toUpper() + "&txpol=" + txpol + "&apptype=MAP65";
-          QByteArray postByteArray = postString.toUtf8();
-          
-        emit sendRemoteStationData2(postByteArray, theUrl);
-        }
-      }
-    }
+  if (!m_livecq->setEndpoint(endpoint)) {
+    return;
+  }
+
+  auto const spots = Map65LiveCQ::parseSpots(
+    decodeList, m_myCall, m_myGrid, m_xpol, QDateTime::currentDateTimeUtc(),
+    m_livecqSeenDecodes);
+
+  while (m_livecqSeenDecodes.size() > maxLiveCQSeenDecodes) {
+    m_livecqSeenDecodes.removeFirst();
+  }
+
+  for (auto const& spot : spots) {
+    m_livecq->postSpot(Map65LiveCQ::spotQuery(spot, m_myCall, m_myGrid));
   }
 }
 
-void Messages::onFinished(QNetworkReply *reply)
+void Messages::clearLiveCQHistory()
 {
-    if (reply->error() == QNetworkReply::NoError) {
-		qDebug() << "Reply in messages::inFinished is: " << reply->readAll();
-    } else {
-		qDebug() << "Error message in messages::inFinished is: " <<  reply->errorString();
-    }
-    reply->deleteLater();
+  m_livecqSeenDecodes.clear();
 }
 
 void Messages::setText(QString t, QString t2)

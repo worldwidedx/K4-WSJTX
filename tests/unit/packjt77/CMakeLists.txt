@@ -70,6 +70,13 @@ wsjt_link_common_fortran (test_packjt77_hash_state)
 
 add_test (NAME test_packjt77_hash_state COMMAND test_packjt77_hash_state)
 
+add_executable (test_packjt77_context_state
+  test_packjt77_context_state.f90)
+target_include_directories (test_packjt77_context_state PRIVATE ${CMAKE_BINARY_DIR})
+wsjt_link_common_fortran (test_packjt77_context_state)
+
+add_test (NAME test_packjt77_context_state COMMAND test_packjt77_context_state)
+
 if (WSJT_BUILD_FORTRAN_OPENMP)
   add_executable (test_packjt77_concurrent_unpack
     test_packjt77_concurrent_unpack.f90)

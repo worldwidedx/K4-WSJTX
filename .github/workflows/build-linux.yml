@@ -18,12 +18,12 @@ on:
         type: string
         default: "x86_64"
       release_channel:
-        description: "Build release channel: DEVEL, RC, or GA"
+        description: "Build release channel: DEVEL, BETA, RC, or GA"
         required: false
         type: string
         default: "DEVEL"
-      rc_number:
-        description: "Release candidate number when release_channel is RC"
+      prerelease_number:
+        description: "Prerelease number when release_channel is BETA or RC"
         required: false
         type: string
         default: ""
@@ -116,7 +116,7 @@ jobs:
             -DWSJT_SKIP_MANPAGES=ON \
             -DWSJT_ENABLE_TESTS=ON \
             -DWSJT_RELEASE_CHANNEL="${{ inputs.release_channel }}" \
-            -DWSJT_RC_NUMBER="${{ inputs.rc_number }}" \
+            -DWSJT_PRERELEASE_NUMBER="${{ inputs.prerelease_number }}" \
             -DPFUNIT_DIR="${{ steps.pfunit.outputs.dir }}" \
             -Wno-dev
 

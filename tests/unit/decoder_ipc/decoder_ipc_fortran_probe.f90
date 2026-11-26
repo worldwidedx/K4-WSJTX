@@ -3,7 +3,7 @@ subroutine decoder_ipc_fortran_probe(address, values) bind(C)
   include 'jt9com.f90'
 
   type(c_ptr), value :: address
-  integer(c_int), intent(out) :: values(10)
+  integer(c_int), intent(out) :: values(11)
   type(shared_dec_data), pointer :: shared
 
   call c_f_pointer(address, shared)
@@ -17,7 +17,12 @@ subroutine decoder_ipc_fortran_probe(address, values) bind(C)
   values(8) = DECODER_IPC_DECODING
   values(9) = DECODER_IPC_COMPLETE
   values(10) = DECODER_IPC_SHUTDOWN
+  values(11) = c_sizeof(shared%metadata)
 
   shared%control%generation = shared%control%generation + 1
   shared%payload%id2(1) = 1234
+  shared%metadata%input_id = 12345678901_c_int64_t
+  shared%metadata%analysis_id = 12345678902_c_int64_t
+  shared%metadata%attempt_no = 3
+  shared%metadata%valid_samples = 180000
 end subroutine decoder_ipc_fortran_probe

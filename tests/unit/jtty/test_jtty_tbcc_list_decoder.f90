@@ -1,5 +1,6 @@
 program test_jtty_tbcc_list_decoder
   use, intrinsic :: iso_fortran_env, only: int32, int64, real32, real64
+  use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
   use jtty_tbcc_code_profiles, only: jtty_tbcc_code_profile, &
        JTTY_TBCC_PROFILE_1167_1545_80F
   use tbcc, only: tbcc_encode, encode_crc12
@@ -9,7 +10,10 @@ program test_jtty_tbcc_list_decoder
   call expect_optimized_reference_parity()
   call expect_noiseless_tailbiting_decode()
   call expect_reserved_bit_pruning()
+  call expect_candidate_contract()
+  call expect_workspace_isolation()
   call expect_deterministic_hypothesis_budget()
+  call expect_score_symmetry()
   call expect_coherent_normalization()
 
   print *, 'test_jtty_tbcc_list_decoder: all checks passed'
@@ -24,14 +28,7 @@ contains
     complex(real32) :: correlations(0:3, JTTY_TBCC_INFORMATION_BITS)
     integer(int32) :: coherent_index, width_index, symbol, tone, wraps
 
-    do symbol = 1, JTTY_TBCC_INFORMATION_BITS
-      do tone = 0, 3
-        correlations(tone, symbol) = cmplx( &
-             real(modulo(17*tone + 11*symbol, 29) - 14, real32)/8.0_real32, &
-             real(modulo(7*tone + 19*symbol, 31) - 15, real32)/9.0_real32, &
-             real32)
-      end do
-    end do
+    call make_pattern_correlations(correlations)
 
     do wraps = 1, 2
       do coherent_index = 1, size(coherent_lengths)
@@ -63,7 +60,7 @@ contains
       do tone = 0, 3
         correlations(tone, symbol) = scale(1.0_real32, -18)*cmplx( &
              real(modulo(17*tone + 11*symbol, 29) - 14, real32)/8.0_real32, &
-             real(modulo(7*tone + 19*symbol, 31) - 15, real32)/9.0_real32, real32)
+             real(modulo(7*tone + 19*symbol, 31) - 15, real32)/16.0_real32, real32)
       end do
     end do
     correlations(:, 13) = cmplx(scale(1.0_real32, 20), 0.0_real32, real32)
@@ -151,7 +148,7 @@ contains
          error stop 'TBCC list decoder tail-biting state mismatch'
     call jtty_tbcc_score_candidate(code, correlations, 4_int32, candidates(:, 1), &
          rescored_metric, closed)
-    if (.not.closed .or. rescored_metric /= clean_metrics(1) .or. &
+    if (.not.closed .or. .not.real_arrays_agree([rescored_metric],clean_metrics(1:1)) .or. &
          abs(clean_metrics(1) - 46.0_real64) > 1.0e-12_real64) &
          error stop 'TBCC list decoder final L2 block or clean rescore mismatch'
   end subroutine expect_noiseless_tailbiting_decode
@@ -188,6 +185,80 @@ contains
            error stop 'TBCC list decoder retained reserved-invalid identity'
     end if
   end subroutine expect_reserved_bit_pruning
+
+  subroutine expect_candidate_contract()
+    complex(real32) :: correlations(0:3, JTTY_TBCC_INFORMATION_BITS)
+    integer(int32) :: bits(JTTY_TBCC_INFORMATION_BITS, JTTY_TBCC_MAX_HYPOTHESES)
+    integer(int32) :: states(JTTY_TBCC_MAX_HYPOTHESES), count, pool, rank, earlier
+    integer(int32) :: encoded(2, JTTY_TBCC_INFORMATION_BITS)
+    integer(int64) :: ids(JTTY_TBCC_MAX_HYPOTHESES)
+    real(real64) :: clean(JTTY_TBCC_MAX_HYPOTHESES), paths(JTTY_TBCC_MAX_HYPOTHESES), rescored
+    logical :: crc(JTTY_TBCC_MAX_HYPOTHESES), closed, expected_crc
+
+    call make_pattern_correlations(correlations)
+    call jtty_tbcc_list_wava(correlations, JTTY_TBCC_PROFILE_1167_1545_80F, &
+         2_int32, 4_int32, 2_int32, JTTY_TBCC_MAX_HYPOTHESES, &
+         bits, ids, clean, paths, states, crc, count, pool, prune_reserved_zero=.true.)
+    if (count /= JTTY_TBCC_MAX_HYPOTHESES .or. pool < count) &
+         error stop 'TBCC candidate contract fixture did not export four candidates'
+
+    do rank = 1, count
+      if (any(bits(:, rank) < 0_int32) .or. any(bits(:, rank) > 1_int32)) &
+           error stop 'TBCC candidate contains a nonbinary bit'
+      if (bits(JTTY_TBCC_RESERVED_BIT, rank) /= 0_int32) &
+           error stop 'TBCC candidate retained a reserved bit'
+      if (ids(rank) /= jtty_tbcc_candidate_identity(bits(:, rank))) &
+           error stop 'TBCC candidate identity disagrees with its bits'
+      if (states(rank) /= jtty_tbcc_tailbiting_state(JTTY_TBCC_PROFILE_1167_1545_80F, bits(:, rank))) &
+           error stop 'TBCC candidate start state disagrees with its bits'
+      call encode_crc12(bits(1:34, rank), encoded, JTTY_TBCC_PROFILE_1167_1545_80F)
+      expected_crc = all(encoded(1, :) == bits(:, rank))
+      if (crc(rank) .neqv. expected_crc) error stop 'TBCC candidate CRC status disagrees with encoding'
+      call jtty_tbcc_score_candidate(JTTY_TBCC_PROFILE_1167_1545_80F, correlations, &
+           2_int32, bits(:, rank), rescored, closed)
+      if (.not.closed .or. .not.real_arrays_agree([rescored], [clean(rank)])) &
+           error stop 'TBCC candidate clean score or closure disagrees with rescore'
+      do earlier = 1, rank - 1
+        if (ids(rank) == ids(earlier)) error stop 'TBCC candidate identity is duplicated'
+      end do
+      if (rank == 1) cycle
+      if (clean(rank) > clean(rank - 1)) error stop 'TBCC candidate clean scores are not descending'
+      if (clean(rank) == clean(rank - 1) .and. ids(rank) < ids(rank - 1)) &
+           error stop 'TBCC tied candidate identities are not ascending'
+    end do
+  end subroutine expect_candidate_contract
+
+  subroutine expect_workspace_isolation()
+    type(jtty_tbcc_decoder_plan) :: plan
+    type(jtty_tbcc_decoder_workspace) :: workspace
+    complex(real32) :: correlations(0:3, JTTY_TBCC_INFORMATION_BITS)
+    integer(int32) :: bits_a(JTTY_TBCC_INFORMATION_BITS, JTTY_TBCC_MAX_HYPOTHESES)
+    integer(int32) :: bits_b(JTTY_TBCC_INFORMATION_BITS, JTTY_TBCC_MAX_HYPOTHESES)
+    integer(int32) :: states_a(JTTY_TBCC_MAX_HYPOTHESES), states_b(JTTY_TBCC_MAX_HYPOTHESES)
+    integer(int32) :: count_a, count_b, pool_a, pool_b
+    integer(int64) :: ids_a(JTTY_TBCC_MAX_HYPOTHESES), ids_b(JTTY_TBCC_MAX_HYPOTHESES)
+    real(real64) :: clean_a(JTTY_TBCC_MAX_HYPOTHESES), clean_b(JTTY_TBCC_MAX_HYPOTHESES)
+    real(real64) :: paths_a(JTTY_TBCC_MAX_HYPOTHESES), paths_b(JTTY_TBCC_MAX_HYPOTHESES)
+    logical :: crc_a(JTTY_TBCC_MAX_HYPOTHESES), crc_b(JTTY_TBCC_MAX_HYPOTHESES)
+
+    call jtty_tbcc_init_decoder_plan(plan, JTTY_TBCC_PROFILE_1167_1545_80F, &
+         2_int32, 4_int32, 2_int32, JTTY_TBCC_MAX_HYPOTHESES)
+    call jtty_tbcc_init_decoder_workspace(workspace, plan)
+    call make_pattern_correlations(correlations)
+    call jtty_tbcc_list_wava_optimized(plan, workspace, correlations, &
+         bits_a, ids_a, clean_a, paths_a, states_a, crc_a, count_a, pool_a, prune_reserved_zero=.true.)
+    correlations = cmplx(0.0_real32, 0.0_real32, real32)
+    call jtty_tbcc_list_wava_optimized(plan, workspace, correlations, &
+         bits_b, ids_b, clean_b, paths_b, states_b, crc_b, count_b, pool_b, prune_reserved_zero=.false.)
+    call make_pattern_correlations(correlations)
+    call jtty_tbcc_list_wava_optimized(plan, workspace, correlations, &
+         bits_b, ids_b, clean_b, paths_b, states_b, crc_b, count_b, pool_b, prune_reserved_zero=.true.)
+    if (count_a /= count_b .or. pool_a /= pool_b .or. any(bits_a /= bits_b) .or. &
+         any(ids_a /= ids_b) .or. any(states_a /= states_b) .or. &
+         .not.real_arrays_agree(clean_a, clean_b) .or. &
+         .not.real_arrays_agree(paths_a, paths_b) .or. any(crc_a .neqv. crc_b)) &
+         error stop 'TBCC workspace retained state across A-B-A decodes'
+  end subroutine expect_workspace_isolation
 
   subroutine expect_deterministic_hypothesis_budget()
     type(jtty_tbcc_code_profile) :: code
@@ -233,7 +304,60 @@ contains
          one_count, one_pool, prune_reserved_zero=.true.)
     if (one_count /= 1_int32 .or. one_id(1) /= ids_a(1) .or. one_pool /= pool_a) &
          error stop 'TBCC list decoder did not enforce the H1 budget'
+
+    ! The nonzero pool must exceed H4 so this checks the admission boundary.
+    call make_pattern_correlations(correlations)
+    call jtty_tbcc_list_wava(correlations, code, 2_int32, 4_int32, 2_int32, &
+         JTTY_TBCC_MAX_HYPOTHESES, bits_a, ids_a, clean_a, path_a, states_a, &
+         crc_a, count_a, pool_a, prune_reserved_zero=.true.)
+    call jtty_tbcc_list_wava(correlations, code, 2_int32, 4_int32, 2_int32, &
+         1_int32, one_bit, one_id, one_clean, one_path, one_state, one_crc, &
+         one_count, one_pool, prune_reserved_zero=.true.)
+    if (count_a /= JTTY_TBCC_MAX_HYPOTHESES .or. pool_a <= count_a .or. &
+         one_count /= 1_int32 .or. one_pool /= pool_a) &
+         error stop 'TBCC nonzero H1/H4 fixture did not cross the hypothesis boundary'
+    if (any(one_bit(:, 1) /= bits_a(:, 1)) .or. one_id(1) /= ids_a(1) .or. &
+         one_state(1) /= states_a(1) .or. one_crc(1) .neqv. crc_a(1) .or. &
+         .not.real_arrays_agree(one_clean, clean_a(1:1)) .or. &
+         .not.real_arrays_agree(one_path, path_a(1:1))) &
+         error stop 'TBCC nonzero H1 differs from the first H4 candidate'
   end subroutine expect_deterministic_hypothesis_budget
+
+  subroutine expect_score_symmetry()
+    complex(real32) :: correlations(0:3, JTTY_TBCC_INFORMATION_BITS)
+    integer(int32) :: bits_a(JTTY_TBCC_INFORMATION_BITS, JTTY_TBCC_MAX_HYPOTHESES)
+    integer(int32) :: bits_b(JTTY_TBCC_INFORMATION_BITS, JTTY_TBCC_MAX_HYPOTHESES)
+    integer(int32) :: states_a(JTTY_TBCC_MAX_HYPOTHESES), states_b(JTTY_TBCC_MAX_HYPOTHESES)
+    integer(int32) :: count_a, count_b, pool_a, pool_b
+    integer(int64) :: ids_a(JTTY_TBCC_MAX_HYPOTHESES), ids_b(JTTY_TBCC_MAX_HYPOTHESES)
+    real(real64) :: clean_a(JTTY_TBCC_MAX_HYPOTHESES), clean_b(JTTY_TBCC_MAX_HYPOTHESES)
+    real(real64) :: paths_a(JTTY_TBCC_MAX_HYPOTHESES), paths_b(JTTY_TBCC_MAX_HYPOTHESES)
+    logical :: crc_a(JTTY_TBCC_MAX_HYPOTHESES), crc_b(JTTY_TBCC_MAX_HYPOTHESES)
+
+    call make_pattern_correlations(correlations)
+    call jtty_tbcc_list_wava(correlations, JTTY_TBCC_PROFILE_1167_1545_80F, &
+         2_int32, 4_int32, 2_int32, JTTY_TBCC_MAX_HYPOTHESES, &
+         bits_a, ids_a, clean_a, paths_a, states_a, crc_a, count_a, pool_a, prune_reserved_zero=.true.)
+    if (count_a /= JTTY_TBCC_MAX_HYPOTHESES) error stop 'TBCC symmetry fixture lacks four candidates'
+    if (any(clean_a(1:count_a-1) - clean_a(2:count_a) <= 1.0e-6_real64)) &
+         error stop 'TBCC symmetry fixture has near-tied clean scores'
+    correlations = -correlations
+    call jtty_tbcc_list_wava(correlations, JTTY_TBCC_PROFILE_1167_1545_80F, &
+         2_int32, 4_int32, 2_int32, JTTY_TBCC_MAX_HYPOTHESES, &
+         bits_b, ids_b, clean_b, paths_b, states_b, crc_b, count_b, pool_b, prune_reserved_zero=.true.)
+    if (count_b /= count_a .or. pool_b /= pool_a .or. any(bits_b /= bits_a) .or. &
+         any(ids_b /= ids_a) .or. any(states_b /= states_a) .or. any(crc_b .neqv. crc_a) .or. &
+         .not.real_arrays_agree(clean_b, clean_a)) &
+         error stop 'TBCC candidate order or score changed under negation'
+    correlations = 2.0_real32*correlations
+    call jtty_tbcc_list_wava(correlations, JTTY_TBCC_PROFILE_1167_1545_80F, &
+         2_int32, 4_int32, 2_int32, JTTY_TBCC_MAX_HYPOTHESES, &
+         bits_b, ids_b, clean_b, paths_b, states_b, crc_b, count_b, pool_b, prune_reserved_zero=.true.)
+    if (count_b /= count_a .or. pool_b /= pool_a .or. any(bits_b /= bits_a) .or. &
+         any(ids_b /= ids_a) .or. any(states_b /= states_a) .or. any(crc_b .neqv. crc_a) .or. &
+         .not.real_arrays_agree(clean_b, 4.0_real64*clean_a)) &
+         error stop 'TBCC candidate order or score changed under amplitude doubling'
+  end subroutine expect_score_symmetry
 
   subroutine expect_coherent_normalization()
     complex(real32) :: correlations(0:3, JTTY_TBCC_INFORMATION_BITS)
@@ -282,15 +406,35 @@ contains
     end do
   end subroutine make_noiseless_correlations
 
+  subroutine make_pattern_correlations(correlations)
+    complex(real32), intent(out) :: correlations(0:3, JTTY_TBCC_INFORMATION_BITS)
+    integer(int32) :: symbol, tone
+
+    ! Dyadic components keep short coherent metrics exact so candidate ties
+    ! exercise survivor ordering independently of real32 expression evaluation.
+    do symbol = 1, JTTY_TBCC_INFORMATION_BITS
+      do tone = 0, 3
+        correlations(tone, symbol) = cmplx( &
+             real(modulo(17*tone + 11*symbol, 29) - 14, real32)/8.0_real32, &
+             real(modulo(7*tone + 19*symbol, 31) - 15, real32)/16.0_real32, real32)
+      end do
+    end do
+  end subroutine make_pattern_correlations
+
   pure logical function real_arrays_agree(left, right) result(agree)
     real(real64), intent(in) :: left(:), right(:)
     integer(int32) :: element
+    ! These controlled fixtures allow a small real32-scale metric difference;
+    ! this is not a general error bound for cancellation in arbitrary inputs.
+    real(real64), parameter :: relative_error = 8.0_real64*real(epsilon(0.0_real32),real64)
 
     agree = size(left) == size(right)
     if (.not.agree) return
+    agree = all(ieee_is_finite(left)) .and. all(ieee_is_finite(right))
+    if (.not.agree) return
     do element = 1, size(left)
       if (left(element) == right(element)) cycle
-      if (abs(left(element)-right(element)) <= 64.0_real64*epsilon(0.0_real64)* &
+      if (abs(left(element)-right(element)) <= relative_error* &
            max(1.0_real64, abs(left(element)), abs(right(element)))) cycle
       agree = .false.
       return

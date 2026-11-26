@@ -49,7 +49,113 @@ private Q_SLOTS:
   void recordTerminatorsArePreserved ();
   void malformedFramesAreReported ();
   void killedFrameCanBeReplaced ();
+  void startupFrames_data ();
+  void startupFrames ();
+  void fragmentedStartupFrame ();
+  void startupFramesDoNotBecomeDecodeRecords ();
+  void requestRejectionPreservesCompletion ();
 };
+
+void TestDecoderOutputFramer::startupFrames_data ()
+{
+  QTest::addColumn<QByteArray> ("line");
+  QTest::addColumn<int> ("type");
+  QTest::addColumn<int> ("version");
+  QTest::addColumn<QByteArray> ("status");
+  auto const ready = static_cast<int> (DecoderOutputFramer::EventType::Ready);
+  auto const error = static_cast<int> (DecoderOutputFramer::EventType::Error);
+  auto const malformed = static_cast<int> (DecoderOutputFramer::EventType::Malformed);
+  QTest::newRow ("ready") << QByteArray {"<DecoderReady> version=3\n"} << ready << 3 << QByteArray {};
+  QTest::newRow ("crlf") << QByteArray {"<DecoderReady> version=3\r\n"} << ready << 3 << QByteArray {};
+  QTest::newRow ("unsupported-version-is-syntax") << QByteArray {"<DecoderReady> version=2\n"}
+                                               << ready << 2 << QByteArray {};
+  QTest::newRow ("error") << QByteArray {"<DecoderError> status=wrong-header-size\n"}
+                         << error << 0 << QByteArray {"wrong-header-size"};
+  for (auto const& line : {QByteArray {"<DecoderReady> version=\n"},
+                          QByteArray {"<DecoderReady> version=0\n"},
+                          QByteArray {"<DecoderReady> version=+3\n"},
+                          QByteArray {"<DecoderReady version=3\n"},
+                          QByteArray {"<DecoderReady> version=3 extra\n"},
+                          QByteArray {"<DecoderReady> version=99999999999\n"},
+                          QByteArray {"<DecoderError> status=\n"},
+                          QByteArray {"<DecoderError> status=wrong size\n"},
+                          QByteArray {"<DecoderError> status=WrongSize\n"}})
+    QTest::newRow (line.constData ()) << line << malformed << 0 << QByteArray {};
+}
+
+void TestDecoderOutputFramer::startupFrames ()
+{
+  QFETCH (QByteArray, line);
+  QFETCH (int, type);
+  QFETCH (int, version);
+  QFETCH (QByteArray, status);
+  QBuffer buffer {&line};
+  QVERIFY (buffer.open (QIODevice::ReadOnly));
+  DecoderOutputFramer framer;
+  QVector<DecoderOutputFramer::Event> events;
+  framer.drain (buffer, [&] (DecoderOutputFramer::Event const& event) { events.append (event); });
+  QCOMPARE (events.size (), 1);
+  QCOMPARE (static_cast<int> (events[0].type), type);
+  QCOMPARE (events[0].protocolVersion, version);
+  QCOMPARE (events[0].errorStatus, status);
+  QCOMPARE (framer.currentGeneration (), qint32 {0});
+}
+
+void TestDecoderOutputFramer::fragmentedStartupFrame ()
+{
+  QByteArray output {"<DecoderReady> ver"};
+  QBuffer buffer {&output};
+  QVERIFY (buffer.open (QIODevice::ReadOnly));
+  DecoderOutputFramer framer;
+  QVector<DecoderOutputFramer::Event> events;
+  auto const handler = [&] (DecoderOutputFramer::Event const& event) { events.append (event); };
+  framer.drain (buffer, handler);
+  QVERIFY (events.isEmpty ());
+  output.append ("sion=3\n");
+  framer.drain (buffer, handler);
+  QCOMPARE (events.size (), 1);
+  QCOMPARE (events[0].type, DecoderOutputFramer::EventType::Ready);
+  QCOMPARE (events[0].protocolVersion, qint32 {3});
+}
+
+void TestDecoderOutputFramer::startupFramesDoNotBecomeDecodeRecords ()
+{
+  QByteArray output {"<DecodeStarted> gen=7\n"
+                     "<DecoderReady> version=3\n"
+                     "<DecoderError> status=incompatible-layout\n"
+                     "<DecoderReady> version=bad\n"
+                     "<DecodeFinished>   0   0        0 gen=7\n"};
+  QBuffer buffer {&output};
+  QVERIFY (buffer.open (QIODevice::ReadOnly));
+  DecoderOutputFramer framer;
+  QVector<DecoderOutputFramer::EventType> types;
+  framer.drain (buffer, [&] (DecoderOutputFramer::Event const& event) { types.append (event.type); });
+  QCOMPARE (types, QVector<DecoderOutputFramer::EventType> ({
+    DecoderOutputFramer::EventType::Started, DecoderOutputFramer::EventType::Ready,
+    DecoderOutputFramer::EventType::Error, DecoderOutputFramer::EventType::Malformed,
+    DecoderOutputFramer::EventType::Finished}));
+}
+
+void TestDecoderOutputFramer::requestRejectionPreservesCompletion ()
+{
+  QByteArray const rejection {"<DecodeRejected> status=invalid operation=decode mode=8 input=11 analysis=12 attempt=1\r\n"};
+  QByteArray output = rejection + "<DecodeStarted> gen=7\n" + rejection
+    + "<DecodeRejected>\n<DecodeFinished>   0   0        0 gen=7\n";
+  QBuffer buffer {&output};
+  QVERIFY (buffer.open (QIODevice::ReadOnly));
+  DecoderOutputFramer framer;
+  QVector<DecoderOutputFramer::Event> events;
+  framer.drain (buffer, [&] (DecoderOutputFramer::Event const& event) { events.append (event); });
+  QCOMPARE (events.size (), 5);
+  QCOMPARE (events[0].type, DecoderOutputFramer::EventType::Malformed);
+  QCOMPARE (events[1].type, DecoderOutputFramer::EventType::Started);
+  QCOMPARE (events[2].type, DecoderOutputFramer::EventType::Rejected);
+  QCOMPARE (events[2].generation, qint32 {7});
+  QCOMPARE (events[2].rawLine, rejection);
+  QCOMPARE (events[3].type, DecoderOutputFramer::EventType::Malformed);
+  QCOMPARE (events[4].type, DecoderOutputFramer::EventType::Finished);
+  QCOMPARE (framer.currentGeneration (), qint32 {0});
+}
 
 void TestDecoderOutputFramer::rejectedRecordDoesNotStopDrain ()
 {

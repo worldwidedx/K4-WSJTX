@@ -1,8 +1,21 @@
-subroutine genq65(msg0,ichk,msgsent,itone,i3,n3,iflag)
+module q65_tx
+  use packjt77, only: pack77_state,pack77_legacy_truncating_fallback,       &
+       pack77_legacy_truncating_fallback_for_state,unpack77,unpack77_for_state
+  private
+  public :: genq65_for_state
+
+contains
+
+! genq65, packing with knowledge's hash tables, or without it packjt77's own,
+! and encoding with codec (q65_enc), or without it the thread's selected one.
+subroutine genq65_for_state(msg0,ichk,msgsent,itone,i3,n3,iflag,knowledge,codec)
 
 ! Encodes a Q65 message to yield itone(1:85)
 
-  use packjt77
+  use iso_c_binding, only: c_ptr
+  use q65_codec, only: q65_enc
+  type(pack77_state), pointer, intent(in) :: knowledge
+  type(c_ptr), intent(in), optional :: codec
   character*37 msg0               !Message to be generated
   character*37 msgsent            !Message as it will be received
   character*77 c77
@@ -12,7 +25,6 @@ subroutine genq65(msg0,ichk,msgsent,itone,i3,n3,iflag)
   integer sent(63)
   integer isync(22)
   data isync/1,9,12,13,15,22,23,26,27,33,35,38,46,50,55,60,62,66,69,74,76,85/
-  save
 
   if(msg0(1:1).eq.'@') then
      read(msg0(2:5),*,end=1,err=1) nfreq
@@ -27,16 +39,24 @@ subroutine genq65(msg0,ichk,msgsent,itone,i3,n3,iflag)
   n3=-1
   c77=' '
   unpk77_success=.false.
-  call pack77_legacy_truncating_fallback(msg0,i3,n3,c77)
+  if(associated(knowledge)) then
+     call pack77_legacy_truncating_fallback_for_state(knowledge,msg0,i3,n3,c77)
+  else
+     call pack77_legacy_truncating_fallback(msg0,i3,n3,c77)
+  endif
   if(i3.lt.0 .or. n3.lt.0) go to 998
   read(c77(60:74),'(b15)',err=998) ng15
   if(ng15.eq.32373) c77(60:74)='111111010010011'    !Message is RR73
-  call unpack77(c77,0,msgsent,unpk77_success)    !Unpack to get msgsent
+  if(associated(knowledge)) then
+     call unpack77_for_state(knowledge,c77,0,msgsent,unpk77_success)
+  else
+     call unpack77(c77,0,msgsent,unpk77_success)
+  endif    !Unpack to get msgsent
   read(c77,1001,err=998) dgen
 1001 format(12b6.6,b5.5)
   dgen(13)=2*dgen(13)+iflag     !Convert 77-bit to 78-bit payload; iflag is the spare 78th bit
   if(ichk.eq.1) go to 999       !Return if checking only
-  call q65_enc(dgen,sent)       !Encode message, dgen(1:13) ==> sent(1:63)
+  call q65_enc(dgen,sent,codec) !Encode message, dgen(1:13) ==> sent(1:63)
 
   j=1
   k=0
@@ -58,4 +78,20 @@ subroutine genq65(msg0,ichk,msgsent,itone,i3,n3,iflag)
   n3=-1
   msgsent='*** bad message ***                  '
 999 return
+end subroutine genq65_for_state
+
+end module q65_tx
+
+! With the selected decoder's knowledge, if any (lib/qra/q65/q65.f90 q65_work).
+subroutine genq65(msg0,ichk,msgsent,itone,i3,n3,iflag)
+  use packjt77, only: pack77_state
+  use q65, only: q65_work
+  use q65_tx, only: genq65_for_state
+  character*37 msg0,msgsent
+  integer itone(85)
+  type(pack77_state), pointer :: knowledge
+
+  knowledge=>null()
+  if(associated(q65_work)) knowledge=>q65_work%knowledge
+  call genq65_for_state(msg0,ichk,msgsent,itone,i3,n3,iflag,knowledge)
 end subroutine genq65

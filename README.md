@@ -1,33 +1,52 @@
-![WSJT-X](wsjtx_icon.webp)
+# K4 WSJT-X — Remote FT8 and FT4 for the Elecraft K4
 
-# Weak Signal Communication Software
+K4 WSJT-X is a desktop app for operating FT8, FT4, and other WSJT-X digital modes with an Elecraft K4 over a network. It streams receive audio from the K4 directly into the waterfall and decoder, sends transmit audio back to the radio, and carries CAT rig control over the same K4 Remote connection. There’s no USB audio cable, virtual sound card, or separate CAT connection to configure.
 
-> **K4 WSJT-X fork.** This tree is based on the official WSJT-X 3.2.0-rc1
-> prerelease and replaces its selectable radio and sound-card interfaces
-> with one Elecraft K4 Remote connection. CAT, receive audio, and transmit audio
-> share the K4 framed TCP stream used by QK4 Mobile. Both password-authenticated
-> TCP and TLS 1.2+ with the K4 password as a pre-shared key are supported.
->
-> Transmission uses conservative network-audio drive until the optional
-> protected K4 TEST-mode calibration is completed. Live ALC protection remains
-> active on every transmission. See [K4 Remote architecture and operation](doc/K4_REMOTE.md).
+[Download K4 WSJT-X for Windows, macOS, or Linux](https://github.com/worldwidedx/K4-WSJTX/releases)
 
-## Programs
+Choose the installer for your operating system and CPU from the release’s **Assets**. Check the release notes for platform availability and installation details, especially for prerelease builds.
 
-*WSJT-X*, *MAP65*, and *QMAP* are open-source, multi-platform programs designed for weak-signal digital communication by amateur radio. *WSJT-X* works with a standard SSB transceiver, while *MAP65* and *QMAP* use wideband SDR-style hardware. The programs are open source, free of charge, and licensed under the GNU General Public License. These program names are trademarks of the WSJT Development Team; see [TRADEMARK.md](TRADEMARK.md) for our policy on their use.
+## Quick setup
 
-They can be built and used on Windows, macOS, and Linux.
+### 1. Prepare the Elecraft K4
 
-*WSJT-X* implements communication protocols or "modes" called **FST4**, **FST4W**, **FT4**, **FT8**, **JT4**, **JT9**, **JT65**, **JTTY**, **MSK144**, **Q65**, **WSPR**, and **Echo**. Its two-way modes are designed for making reliable, confirmed QSOs in a wide variety of weak-signal propagation circumstances. Most use timed Transmit/Receive sequences of specific lengths, synchronized with UTC. **JTTY** supports fast RTTY-like contest exchanges and other keyboard-to-keyboard communication. **WSPR** and **FST4W** are for probing potential propagation paths with low-power transmissions, and **Echo** is for detecting and measuring reflections of your own signals from the Moon.
+Connect the K4 to Ethernet and use firmware that supports K4 Remote server operation. On the K4, tap the **globe** icon, open **Server Settings**, set a **Password**, and set **Max Clients** to at least **1**. Note the radio’s IP address or hostname. For the first connection, use a computer on the same local network as the radio. If the K4 is already configured as a remote server, use its existing connection details. [Elecraft K4 Operating Manual](https://ftp.elecraft.com/K4/Manuals%20Downloads/K4%20Built-In%20Operating%20Manual%20rev%20D14/K4BuiltInOperatingManualrevD14.html)
 
-*MAP65* implements a wideband receiver for **JT65** and **Q65** signals, optimized for EME on the VHF/UHF bands. It can be used together with *Linrad* (by SM5BSZ) or with direct input from a soundcard, FUNcube Dongle, or similar hardware. The program decodes all **JT65** or **Q65** signals in a passband up to 90 kHz wide, producing a sorted band map of decoded callsigns. In a dual-polarization system, *MAP65* optimally matches the linear polarization angle of each signal, thereby eliminating problems with Faraday rotation and spatial polarization offsets. *MAP65* also handles T/R switching and generates suitable messages and audio waveforms for the selected mode.
+### 2. Connect K4 WSJT-X to the radio
 
-*QMAP* is similar to *MAP65* in providing wideband reception of signals over a full EME sub-band. It works cooperatively with *WSJT-X*, supporting the **Q65** mode in both 30-second and 60-second submodes. The *QMAP* + *WSJT-X* combination provides full rig control and Doppler compensation for the EME (Earth-Moon-Earth) path.
+Open **Settings** (**File → Settings** on Windows and Linux). In **General**, enter your callsign and grid locator. In **Radio**, look for **Elecraft K4 Remote** and enter:
 
-## Mode Details
+| Setting | What to enter |
+| --- | --- |
+| **Host** | The K4’s IPv4 address or hostname, such as `192.168.1.50`. |
+| **Password** | The case-sensitive password from the K4’s **Server Settings**. |
+| **Port** and **TLS** | Use **9204** with **TLS 1.2+ with password as PSK** enabled, or **9205** with TLS off for plain TCP on a trusted local network. If your station uses a different port, enter that port. |
+| **TLS identity** | Leave blank unless your station uses a specific identity. |
+| **Audio encoding** | Start with **EM1 - raw 16-bit**. |
+| **Streaming latency** | Start with **3 (SL3)**. |
 
-**JT4**, **JT9**, and **JT65** use nearly identical message structure, efficient compression of messages for minimal QSOs, and 60-second T/R sequences. **JT4** and **JT65** were designed for EME on the VHF, UHF, and microwave bands, while **JT9** is optimized for the MF and HF bands. **JT9** is about 1 dB more sensitive than **JT65** while using less than 10% of the bandwidth.
+Click **Test CAT**. When it turns green, click **OK**. The frequency display should follow the K4’s VFO A.
 
-**FT4** and **FT8** use T/R cycles of only 7.5 and 15 s, respectively. They have become extremely popular for world-wide DXing on the HF bands. **MSK144** is designed for Meteor Scatter on the VHF bands. **Q65** offers submodes with T/R sequence lengths from 15 seconds to 5 minutes, and a wide range of tone spacings. Particular Q65 submodes are highly recommended for EME, ionospheric scatter, and other weak signal work on VHF, UHF, and microwave bands. These modes include message formats explicitly supporting nonstandard callsigns and some popular radio contests.
+### 3. Verify receive audio
 
-**FST4** and **FST4W** are designed particularly for the LF and MF bands. On these bands their fundamental sensitivities are better than other *WSJT-X* modes with the same sequence lengths, approaching the theoretical limits for their rates of information throughput. **FST4** is optimized for two-way QSOs, while **FST4W** is for quasi-beacon transmissions of **WSPR**-style messages. **FST4** and **FST4W** do not require the strict, independent time synchronization and phase locking of modes like EbNaut.
+Select **FT8** and an active band, then click **Monitor** if it’s off. Look for a moving waterfall and decoded signals in **Band Activity**. Keep the computer’s clock synchronized for timed digital modes.
+
+### 4. Set up transmit audio
+
+With the station connected to a dummy load, open **Settings → Radio** and run **Calibrate Remote Input**. The app uses K4 **TEST** mode to set transmit audio drive. Wait for successful completion and confirm the original TEST state is restored before trying a low-power transmission into the dummy load. Calibration is optional. Without a saved calibration, the app starts with conservative audio drive.
+
+The **Pwr** slider controls the K4’s RF power. The app selects **DATA-A** for digital transmission and monitors ALC during transmit.
+
+## K4 streaming over your network
+
+For operation away from the station, enter a host or IP address reachable from your computer. Use TLS on a connection that crosses the public internet. If your station uses a VPN, use the K4 address reachable through that VPN.
+
+- **Test CAT stays red.** Check the host, port, TLS setting, remote password, and available client slots on the K4.
+- **Test CAT is green but the waterfall is still.** Check that **Monitor** is on and try **EM1** with latency **3** to verify the receive stream.
+- **Audio drops out.** Try a higher streaming latency. If bandwidth is limited, try an Opus encoding (**EM2** or **EM3**).
+
+For K4-specific details, see [K4 Remote architecture and operation](doc/K4_REMOTE.md).
+
+## Core WSJT-X features
+
+[Official WSJT-X website](https://wsjtx.github.io/wsjtx/)

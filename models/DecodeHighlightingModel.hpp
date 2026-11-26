@@ -3,7 +3,10 @@
 
 #include <QAbstractListModel>
 #include <QBrush>
+#include <QColor>
 #include <QList>
+
+#include <vector>
 
 #include "qt_helpers.hpp"
 #include "pimpl_h.hpp"
@@ -34,14 +37,41 @@ public:
   };
   using HighlightItems = QList<HighlightInfo>;
 
+  struct ResolvedHighlight final
+  {
+    Highlight type_;
+    QColor background_;
+    QColor foreground_;
+  };
+  using HighlightTypes = std::vector<Highlight>;
+
+  struct HighlightColors final
+  {
+    Highlight type_;
+    QBrush foreground_;
+    QBrush background_;
+  };
+  using ColorPreset = QList<HighlightColors>;
+
   explicit DecodeHighlightingModel (QObject * parent = 0);
   ~DecodeHighlightingModel();
 
-  // access to raw items nd default items
+  // access to raw items and default items
   static HighlightItems const& default_items ();
   static HighlightItems const& default_items2 ();
+  static ColorPreset const& default_color_preset ();
+  static ColorPreset const& default2_color_preset ();
+  static ColorPreset const& red_green_color_vision_preset ();
+  static ColorPreset const& blue_yellow_color_vision_preset ();
+  static ColorPreset const& high_contrast_color_preset ();
+  static ColorPreset const& dark_shack_color_preset ();
+  static ColorPreset const& solarized_color_preset ();
+  static ColorPreset const& monochrome_color_preset ();
+  static ResolvedHighlight resolve_colors (HighlightItems const&, HighlightTypes const&,
+                                           QColor background, QColor foreground);
   HighlightItems const& items () const;
   void items (HighlightItems const&);
+  bool apply_color_preset (ColorPreset const&);
 
   void set_font (QFont const&);
 

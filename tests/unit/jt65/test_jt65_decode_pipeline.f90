@@ -54,12 +54,13 @@ program test_jt65_decode_pipeline
   type(jt65_decoder) :: decoder
   real(real32), allocatable :: samples(:)
   allocate(samples(jt65_sample_count))
-  call test_clean_modes(samples)
+  call test_clean_modes_and_reuse(samples)
   call test_ooo_signal(samples)
-  call test_silence_and_frequency_rejection(samples)
-  call test_decoder_reuse(samples, decoder)
+  call test_frequency_rejection(samples)
   call test_auto_clear_average(samples, decoder)
   call test_duplicate_average_cursor
+  call decoder%destroy()
+  deallocate(samples)
   print '(a)', 'JT65 decoder pipeline tests passed'
 
 contains
@@ -155,12 +156,22 @@ contains
     call require(ieee_is_finite(callback_width), description//' finite width metric')
   end subroutine require_decode
 
-  subroutine test_clean_modes(waveform)
+  subroutine test_clean_modes_and_reuse(waveform)
     real(real32), intent(inout) :: waveform(:)
     call reset_capture()
     call make_jt65_wave(waveform, standard_tones, 1, 1500.0_real64)
     call decode_signal(decoder, waveform, 0, .true.)
-    call require_decode('K1ABC W9XYZ FN42', 'JT65A clean signal')
+    call require_decode('K1ABC W9XYZ FN42', 'first JT65A reused-decoder signal')
+
+    waveform = 0.0_real32
+    call reset_capture()
+    call decode_signal(decoder, waveform, 0, .true.)
+    call require(callback_count == 0, 'reused decoder silence produces no callback')
+
+    call reset_capture()
+    call make_jt65_wave(waveform, standard_tones, 1, 1500.0_real64)
+    call decode_signal(decoder, waveform, 0, .true.)
+    call require_decode('K1ABC W9XYZ FN42', 'second JT65A reused-decoder signal')
 
     call reset_capture()
     call make_jt65_wave(waveform, standard_tones, 4, 1500.0_real64)
@@ -171,7 +182,7 @@ contains
     call make_jt65_wave(waveform, standard_tones, 2, 1500.0_real64)
     call decode_signal(decoder, waveform, 1, .true.)
     call require_decode('K1ABC W9XYZ FN42', 'JT65B clean signal')
-  end subroutine test_clean_modes
+  end subroutine test_clean_modes_and_reuse
 
   subroutine test_ooo_signal(waveform)
     real(real32), intent(inout) :: waveform(:)
@@ -188,39 +199,14 @@ contains
     call require(callback_count == 0, 'JT65A HF OOO signal is rejected')
   end subroutine test_ooo_signal
 
-  subroutine test_silence_and_frequency_rejection(waveform)
+  subroutine test_frequency_rejection(waveform)
     real(real32), intent(inout) :: waveform(:)
-
-    waveform = 0.0_real32
-    call reset_capture()
-    call decode_signal(decoder, waveform, 0, .true.)
-    call require(callback_count == 0, 'silence produces no callback')
 
     call make_jt65_wave(waveform, standard_tones, 1, 3000.0_real64)
     call reset_capture()
     call decode_signal(decoder, waveform, 0, .true.)
     call require(callback_count == 0, 'out-of-window signal produces no callback')
-  end subroutine test_silence_and_frequency_rejection
-
-  subroutine test_decoder_reuse(waveform, decoder_to_use)
-    real(real32), intent(inout) :: waveform(:)
-    type(jt65_decoder), intent(inout) :: decoder_to_use
-
-    call make_jt65_wave(waveform, standard_tones, 1, 1500.0_real64)
-    call reset_capture()
-    call decode_signal(decoder_to_use, waveform, 0, .true.)
-    call require_decode('K1ABC W9XYZ FN42', 'first reused-decoder signal')
-
-    waveform = 0.0_real32
-    call reset_capture()
-    call decode_signal(decoder_to_use, waveform, 0, .true.)
-    call require(callback_count == 0, 'reused decoder silence produces no callback')
-
-    call make_jt65_wave(waveform, standard_tones, 1, 1500.0_real64)
-    call reset_capture()
-    call decode_signal(decoder_to_use, waveform, 0, .true.)
-    call require_decode('K1ABC W9XYZ FN42', 'second reused-decoder signal')
-  end subroutine test_decoder_reuse
+  end subroutine test_frequency_rejection
 
   subroutine test_auto_clear_average(waveform, decoder_to_use)
     real(real32), intent(inout) :: waveform(:)

@@ -91,16 +91,19 @@ private slots:
     QVERIFY(state.accepts(nextReceivePeriod));
   }
 
-  void transmitPeriodKeepsDecodeWindowOpenUntilActualTransmit()
+  void lateDecodesRemainEligibleThroughFollowingTransmitPeriod()
   {
     auto const receivePeriod = utc("2026-08-03T12:00:15.000Z");
     auto state = armedState(receivePeriod);
 
     state.observePeriod(receivePeriod.addSecs(15), false, true, AutoRespondPolicy::First);
     QVERIFY(state.accepts(receivePeriod));
+    QVERIFY(state.claimFirst(receivePeriod));
 
-    state.close();
+    auto const nextReceivePeriod = receivePeriod.addSecs(30);
+    QVERIFY(!state.observePeriod(nextReceivePeriod, true, false, AutoRespondPolicy::First));
     QVERIFY(!state.accepts(receivePeriod));
+    QVERIFY(!state.accepts(nextReceivePeriod));
   }
 
   void firstPolicyClaimsOnlyOneCallerPerPeriod()
@@ -126,6 +129,27 @@ private slots:
     QVERIFY(!state.setEnableTx(true));
     QVERIFY(!state.armCurrentReceivePeriod(true, AutoRespondPolicy::First));
     QVERIFY(!state.claimFirst(period));
+  }
+
+  void firstEligibilityDoesNotConsumeTheReceivePeriod()
+  {
+    auto const period = utc("2026-08-03T12:00:15.000Z");
+    auto state = armedState(period);
+    auto const& eligibility = state;
+
+    QVERIFY(!eligibility.canClaimFirst(period.addSecs(-15)));
+    QVERIFY(!eligibility.canClaimFirst(period.addSecs(15)));
+    QVERIFY(eligibility.canClaimFirst(period));
+    QVERIFY(eligibility.canClaimFirst(period));
+    QVERIFY(state.claimFirst(period));
+    QVERIFY(!eligibility.canClaimFirst(period));
+    QVERIFY(!state.claimFirst(period));
+
+    auto const nextPeriod = period.addSecs(30);
+    state.observePeriod(nextPeriod, true, true, AutoRespondPolicy::First);
+    QVERIFY(eligibility.canClaimFirst(nextPeriod));
+    state.disarm();
+    QVERIFY(!eligibility.canClaimFirst(nextPeriod));
   }
 
   void responsePolicyIsSnapshottedForThePeriod()

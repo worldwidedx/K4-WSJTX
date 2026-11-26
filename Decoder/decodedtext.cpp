@@ -1,4 +1,5 @@
 #include "decodedtext.h"
+#include "DecoderAnnotations.hpp"
 
 #include <QStringList>
 #include <QRegularExpression>
@@ -14,7 +15,7 @@ namespace
 {
   QRegularExpression tokens_re {R"(
 ^
-  (?:(?<dual>[A-Z0-9/]+)\sRR73;\s)? # dual reply DXpedition message
+  (?:(?<dual>[A-Z0-9/]+|\.{3})\sRR73;\s)? # dual reply DXpedition message
   (?:
     (?<word1>
       (?:CQ|DE|QRZ)
@@ -26,7 +27,7 @@ namespace
     )\s
   )
   (?:
-    (?<word2>[A-Z0-9/]+)      # DE call
+    (?<word2>[A-Z0-9/]+|\.{3}) # DE call or unknown hash code
     (?:\s
       (?<word3>[-+A-Z0-9]+)   # report
       (?:\s
@@ -45,7 +46,7 @@ namespace
   )?
 )"
                                , QRegularExpression::ExtendedPatternSyntaxOption};
-  QRegularExpression const ap_suffix_re {R"(^(.*?)(?:\?\s)?[aq][0-9].*$)"};
+  QRegularExpression const ap_suffix_re {"^(.*?)" + DecoderAnnotations::ap_suffix_pattern () + ".*$"};
   QRegularExpression const angle_bracket_re {"[<>]"};
   QRegularExpression const cq_qrz_re {"^(CQ|QRZ)\\s"};
   QRegularExpression const grid_re {R"(^(?!RR73$)[A-R]{2}[0-9]{2}(?:[A-X]{2})?$)"};
@@ -61,6 +62,7 @@ DecodedMessageFields parseDecodedMessage (QString message)
   DecodedMessageFields fields;
   fields.destination = match.captured ("word1");
   fields.sender = match.captured ("word2");
+  fields.exchange = match.captured ("word3");
   fields.cq = fields.destination == "CQ" || fields.destination == "CQDX"
     || fields.destination.startsWith ("CQ ");
   for (auto const& name : {"word3", "word4", "word5"}) {

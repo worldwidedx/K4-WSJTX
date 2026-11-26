@@ -4,22 +4,64 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstddef>
-#include <type_traits>
+#include <string>
 
-#include <QByteArray>
 #include <QDateTime>
 #include <QRegularExpression>
 #include <QString>
-#include <QStringList>
 #include <QTime>
 #include <QVector>
 
+#include "lib/jtty/JttyTransmit.hpp"
+
 namespace Jtty
 {
+  // A content-free "keep transmitting" pattern (ordinary TEXT5-encoded text, nothing protocol-special) used to bridge a typing pause without PTT dropping/re-keying; '<' isn't used in normal chat text, so it's recognized and suppressed wherever JTTY text is displayed or logged.
+  // One block = one frame; longer filler delays typed text and PTT-off.
+  inline QString const jttyFillerText =
+    QStringLiteral ("<<<<<");
+
+  inline bool isJttyFillerText (QString const& text)
+  {
+    QString const trimmed = text.trimmed ();
+    if (trimmed.isEmpty ()) return false;
+    for (QChar const c : trimmed) {
+      if (c != QLatin1Char ('<') && c != QLatin1Char (' ')) return false;
+    }
+    return true;
+  }
+
+  // Collapses embedded filler runs (any internal spacing) to a single space, without trimming the string's own leading/trailing edge. For a growing-message delta fragment (e.g. ReceiveResultController's N1MM echo), a leading/trailing space is the word boundary against already-echoed text, not something filler-adjacent to discard.
+  inline QString collapseJttyFillerRuns (QString text)
+  {
+    static QRegularExpression const pattern (
+      QStringLiteral ("\\s*(?:<{5}\\s*)+"));
+    text.replace (pattern, QStringLiteral (" "));
+    return text;
+  }
+
+  // Filler travels gaplessly inside the same growing message as the real content around it, so it shows up embedded mid-string rather than as an isolated update; strips one-or-more 5-char '<' blocks (any internal spacing) and collapses the surrounding whitespace to a single space.
+  inline QString stripJttyFillerText (QString text)
+  {
+    return collapseJttyFillerRuns (text).simplified ();
+  }
+
+  inline QString trimJttyChatPunctuation (QString token)
+  {
+    auto isChatPunctuation = [] (QChar character) {
+      return QStringLiteral (",;:.!?()[]{}<>\"'").contains (character);
+    };
+    int start = 0;
+    int end = token.size ();
+    while (start < end && isChatPunctuation (token.at (start))) ++start;
+    while (end > start && isChatPunctuation (token.at (end - 1))) --end;
+    return token.mid (start, end - start);
+  }
+
   struct ParsedDecodeLine
   {
     int frequency {0};
+    int snr {0};
     QString message;
     bool valid {false};
   };
@@ -28,109 +70,6 @@ namespace Jtty
   {
     QString text;
     bool substituted {false};
-    bool truncated {false};
-
-    bool changed () const
-    {
-      return substituted || truncated;
-    }
-  };
-
-  enum class NativeAtomKind : qint8
-  {
-    Call = 0,
-    ExchangeNumber = 1,
-    ExchangeLocation = 2,
-    ExchangePair = 3,
-    ExchangeNumberTime = 4,
-    Control = 5,
-    Grid4 = 6,
-    Text5 = 7
-  };
-
-  enum class CallAction : qint8
-  {
-    Cq = 0,
-    Call = 1,
-    TuCq = 2,
-    CallTu = 3,
-    CallAgn = 4,
-    TuNowCall = 5
-  };
-
-  enum class ExchangeRole : qint8
-  {
-    FieldOnly = 0,
-    Full = 1
-  };
-
-  enum class NumberKind : qint8
-  {
-    Serial = 0,
-    CqZone = 1,
-    ItuZone = 2,
-    Age = 3,
-    Power = 4,
-    Check = 5,
-    FirstLicenseYear = 6,
-    Generic = 7
-  };
-
-  enum class LocationKind : qint8
-  {
-    StateProvince = 0,
-    ArrlRacSection = 1,
-    CountryPrefix = 2,
-    Qth = 3,
-    LocalAdministrativeCode = 4
-  };
-
-  enum class PairSchema : qint8
-  {
-    ZoneLocation = 0,
-    ClassSection = 1
-  };
-
-  enum class NativeExchangeProfile
-  {
-    // Shared with the Fortran text packer; None leaves text inference unprofiled.
-    None = 0,
-    FieldDay = 1,
-    RttyRoundup = 2
-  };
-
-  struct NativeAtomDescriptor
-  {
-    qint8 kind {};
-    qint8 subtype {};
-    qint8 role {};
-    qint8 reserved {};
-    qint32 value {};
-    char text[9] {};
-  };
-
-  static_assert (std::is_standard_layout<NativeAtomDescriptor>::value,
-                 "NativeAtomDescriptor must remain C-compatible");
-  static_assert (offsetof (NativeAtomDescriptor, kind) == 0, "atom ABI mismatch");
-  static_assert (offsetof (NativeAtomDescriptor, subtype) == 1, "atom ABI mismatch");
-  static_assert (offsetof (NativeAtomDescriptor, role) == 2, "atom ABI mismatch");
-  static_assert (offsetof (NativeAtomDescriptor, reserved) == 3, "atom ABI mismatch");
-  static_assert (offsetof (NativeAtomDescriptor, value) == 4, "atom ABI mismatch");
-  static_assert (offsetof (NativeAtomDescriptor, text) == 8, "atom ABI mismatch");
-  static_assert (sizeof (NativeAtomDescriptor) == 20, "atom ABI mismatch");
-
-  enum class NativeEncodeStatus
-  {
-    Ok = 0,
-    InvalidDescriptor = 1,
-    UnknownSection = 2
-  };
-
-  enum class NativeMacroStatus
-  {
-    Native,
-    LiteralFallback,
-    InvalidRuntime
   };
 
   struct NativeMacroContext
@@ -141,6 +80,7 @@ namespace Jtty
     NativeExchangeProfile exchangeProfile {NativeExchangeProfile::None};
     QString configuredExchange;
     QString grid;
+    int snr {-10};  // SNR of received signal, for %R; stubbed until the decoder reports it
 
     NativeMacroContext () = default;
 
@@ -171,65 +111,54 @@ namespace Jtty
     }
   };
 
-  inline QString sourceAlphabet ()
+  // The transmit encoder's strings are the UTF-16 units of the GUI's.
+  inline std::u16string toEncoder (QString const& text)
   {
-    // Keep in sync with ALPHABET in lib/jtty/jtty_source_codec.f90.
-    return QStringLiteral ("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ +-./?!\"#$%,&*()_'=[]{}<>|:;");
+    return text.toStdU16String ();
   }
 
-  inline bool isSourceCharacter (QChar c)
+  // Not QString::fromStdU16String, which reads a leading U+FEFF or U+FFFE as a byte order mark.
+  inline QString fromEncoder (std::u16string const& text)
   {
-    return sourceAlphabet ().contains (c)
-        || (c >= QLatin1Char {'a'} && c <= QLatin1Char {'z'});
+    return QString (reinterpret_cast<QChar const *> (text.data ()), static_cast<int> (text.size ()));
   }
 
-  // Fixed width of a JTTY transmit frame; genjtty_ (lib/jtty/genjtty.f90)
-  // expects exactly this many characters.
-  inline constexpr int maxMessageLength = 80;
-  inline constexpr int maxTransmitLength = maxMessageLength;
-
-  inline PreparedTransmitText prepareTransmitText (QString const& message)
+  inline Encoder::NativeMacroContext toEncoder (NativeMacroContext const& context)
   {
-    PreparedTransmitText result;
-    int const maxLength {maxTransmitLength};
-    result.truncated = message.size () > maxLength;
-    QString const bounded = message.left (maxLength);
-    result.text.reserve (bounded.size ());
-
-    for (QChar c : bounded) {
-      if (c == QChar::Null || c == QLatin1Char {'~'}) {
-        result.text.append (QLatin1Char {' '});
-        result.substituted = true;
-      } else if (isSourceCharacter (c)) {
-        result.text.append (c);
-      } else {
-        result.text.append (QLatin1Char {'#'});
-        result.substituted = true;
-      }
-    }
-
+    Encoder::NativeMacroContext result;
+    result.myCall = toEncoder (context.myCall);
+    result.hisCall = toEncoder (context.hisCall);
+    result.serialNumber = context.serialNumber;
+    result.exchangeProfile = context.exchangeProfile;
+    result.configuredExchange = toEncoder (context.configuredExchange);
+    result.grid = toEncoder (context.grid);
+    result.snr = context.snr;
     return result;
   }
 
-  // A message being queued behind one still transmitting (FIFO chaining,
-  // see MainWindow::execute_jtty_tx) gets a leading space inserted, since
-  // the user is unlikely to remember (or want) to type one themselves,
-  // and unlikely to hit Return mid-word. Re-bounds to maxTransmitLength
-  // in case the message was already at prepareTransmitText's limit.
-  // No-op (returns message unchanged) when isChained is false.
-  inline QString withChainedSpacing (QString const& message, bool isChained)
+  inline PreparedTransmitText prepareTransmitText (QString const& message)
   {
-    if (!isChained) return message;
-    return (QLatin1Char {' '} + message).left (maxTransmitLength);
+    auto const prepared = Encoder::prepareTransmitText (toEncoder (message));
+    return {fromEncoder (prepared.text), prepared.substituted};
   }
 
-  // Builds the fixed-width frame passed to genjtty_. The chained leading space
-  // is transport-only spacing, so it belongs here rather than in the logical
-  // message that is logged, displayed, and checked for contest serials.
-  inline QString transmitFrame (QString const& message, bool isChained)
+  struct TransmitTextSegment
   {
-    QString const spaced = withChainedSpacing (message, isChained);
-    return spaced + QString (maxTransmitLength - spaced.size (), QLatin1Char {' '});
+    int offset {0};
+    int length {0};
+    QString text;
+  };
+
+  inline TransmitTextSegment nextTransmitTextSegment (
+      QString const& message, int offset, int maximumLength = maxTransmitLength)
+  {
+    auto const segment = Encoder::nextTransmitTextSegment (toEncoder (message), offset, maximumLength);
+    return {segment.offset, segment.length, fromEncoder (segment.text)};
+  }
+
+  inline QString transmitFrame (QString const& message)
+  {
+    return fromEncoder (Encoder::transmitFrame (toEncoder (message)));
   }
 
   // Number of receive samples in one complete JTTY frame: 59 symbols of 384
@@ -249,251 +178,157 @@ namespace Jtty
 
   inline QString formatSerialNumber (int serialNumber)
   {
-    return QString {"%1"}.arg (serialNumber, 3, 10, QLatin1Char {'0'});
+    return fromEncoder (Encoder::formatSerialNumber (serialNumber));
   }
 
+  // The native form each function key sends.
   inline QString nativeMacroTemplate (int functionKey)
   {
-    static QString const templates[] {
-      QStringLiteral ("CQ %M CQ"),
-      QStringLiteral ("%H %E"),
-      QStringLiteral ("%H TU CQ %M CQ"),
-      QStringLiteral ("%M"),
-      QStringLiteral ("%H"),
-      QStringLiteral ("TU NOW %Q %E"),
-      QStringLiteral ("%H AGN?"),
-      QStringLiteral ("%E")
+    using Form = Encoder::NativeForm;
+    static Form const forms[] {
+      Form::Cq,
+      Form::CallExchange,
+      Form::CallTuCq,
+      Form::MyCall,
+      Form::HisCall,
+      Form::TuNowExchange,
+      Form::CallAgn,
+      Form::Exchange
     };
     if (functionKey < 1 || functionKey > 8) return {};
-    return templates[functionKey - 1];
+    return fromEncoder (Encoder::nativeFormTemplate (forms[functionKey - 1]));
   }
 
   inline QString legacyNativeMacroTemplate (int functionKey)
   {
-    static QString const templates[] {
-      QStringLiteral ("CQ %M CQ"),
-      QStringLiteral ("%H 599 %N"),
-      QStringLiteral ("%H TU CQ %M CQ"),
-      QStringLiteral ("%M"),
-      QStringLiteral ("%H"),
-      QStringLiteral ("TU NOW %Q 599 %N"),
-      QStringLiteral ("%H AGN?"),
-      QStringLiteral ("599 %N")
+    using Form = Encoder::NativeForm;
+    static Form const forms[] {
+      Form::Cq,
+      Form::CallSerial,
+      Form::CallTuCq,
+      Form::MyCall,
+      Form::HisCall,
+      Form::TuNowSerial,
+      Form::CallAgn,
+      Form::Serial
     };
     if (functionKey < 1 || functionKey > 8) return {};
-    return templates[functionKey - 1];
+    return fromEncoder (Encoder::nativeFormTemplate (forms[functionKey - 1]));
   }
 
-  inline QString nativeGridMacroTemplate (int functionKey)
+  // %[ and %] turn PTT on and off, and %L logs the QSO. They apply to the whole
+  // macro wherever they appear: PTT off already sends everything queued first.
+  struct MacroControl
   {
-    switch (functionKey) {
-    case 2: return QStringLiteral ("%H %G");
-    case 6: return QStringLiteral ("TU NOW %Q %G");
-    case 8: return QStringLiteral ("%G");
-    default: return {};
+    QString text;
+    bool pttOn {false};
+    bool pttOff {false};
+    bool logQso {false};
+
+    // With %Q and %L together ("TU NOW %Q %E%L"), the macro logs the current
+    // QSO and opens the next: its exchange takes the next serial number, and
+    // the next call becomes the DX call.
+    bool startsNextQso () const
+    {
+      return logQso && text.contains (QStringLiteral ("%Q"));
     }
-  }
+  };
 
-  inline QString normalizedMacroTemplate (QString const& macroTemplate)
+  // Upper-cases a token's letter so a macro typed as %l means the token. Only
+  // macros: free text keeps %m as the two characters, which the N1MM and codec
+  // paths rely on (lib/jtty/JttyTransmitHost.cpp).
+  inline QString normalizeMacroTokens (QString macro)
   {
-    return macroTemplate.simplified ().toUpper ();
-  }
-
-  inline int nativeMacroFunctionKey (QString const& macroTemplate)
-  {
-    QString const normalized = normalizedMacroTemplate (macroTemplate);
-    if (normalized == QStringLiteral ("599 %G")) return 8;
-    for (int functionKey = 1; functionKey <= 8; ++functionKey) {
-      QString const gridTemplate = nativeGridMacroTemplate (functionKey);
-      if (normalized == nativeMacroTemplate (functionKey)
-          || macroTemplate == legacyNativeMacroTemplate (functionKey)
-          || (!gridTemplate.isEmpty () && normalized == gridTemplate)) {
-        return functionKey;
-      }
+    static QString const tokenLetters {QStringLiteral ("MHQNEGRL")};
+    for (int i = 0; i + 1 < macro.size (); ++i) {
+      if (macro.at (i) != QLatin1Char ('%')) continue;
+      QChar const upper = macro.at (i + 1).toUpper ();
+      if (!tokenLetters.contains (upper)) continue;
+      macro[i + 1] = upper;
+      ++i;
     }
-    return 0;
+    return macro;
   }
 
-  inline bool isNativeMacroTemplate (QString const& macroTemplate)
+  inline MacroControl parseMacroControl (QString macro)
   {
-    return nativeMacroFunctionKey (macroTemplate) != 0;
+    macro = normalizeMacroTokens (std::move (macro));
+    MacroControl result;
+    result.pttOn = macro.contains (QStringLiteral ("%["));
+    result.pttOff = macro.contains (QStringLiteral ("%]"));
+    result.logQso = macro.contains (QStringLiteral ("%L"));
+    macro.replace (QStringLiteral ("%["), QStringLiteral (" "));
+    macro.replace (QStringLiteral ("%]"), QStringLiteral (" "));
+    macro.replace (QStringLiteral ("%L"), QStringLiteral (" "));
+    result.text = macro.simplified ();
+    return result;
   }
 
-  inline QString nativeExchangeFieldText (NativeMacroContext const& context)
+  inline QString formatSnr (int snr)
   {
-    QString const configured = context.configuredExchange.simplified ().toUpper ();
-    if (context.exchangeProfile == NativeExchangeProfile::None
-        || (context.exchangeProfile == NativeExchangeProfile::RttyRoundup
-            && (configured == QStringLiteral ("DX") || configured == QStringLiteral ("#")))) {
-      return formatSerialNumber (context.serialNumber);
-    }
-    return configured;
+    return fromEncoder (Encoder::formatSnr (snr));
   }
 
-  inline QString expandLiteralMacro (QString macroTemplate,
+  inline QString expandLiteralMacro (QString const& macroTemplate,
                                      NativeMacroContext const& context)
   {
-    macroTemplate.replace (QStringLiteral ("%M"), context.myCall);
-    macroTemplate.replace (QStringLiteral ("%H"), context.hisCall);
-    macroTemplate.replace (QStringLiteral ("%Q"), context.hisCall);
-    macroTemplate.replace (QStringLiteral ("%N"), formatSerialNumber (context.serialNumber));
-    macroTemplate.replace (QStringLiteral ("%E"), nativeExchangeFieldText (context));
-    macroTemplate.replace (QStringLiteral ("%G"), context.grid);
-    return macroTemplate;
-  }
-
-  inline QString migratedNativeMacroTemplate (int functionKey, QString const& savedValue)
-  {
-    if ((functionKey == 2 || functionKey == 6 || functionKey == 8)
-        && savedValue == legacyNativeMacroTemplate (functionKey)) {
-      return nativeMacroTemplate (functionKey);
-    }
-    return savedValue;
-  }
-
-  inline QString normalizedNativeCall (QString const& call)
-  {
-    return call.trimmed ().toUpper ();
+    return fromEncoder (Encoder::expandLiteralMacro (toEncoder (macroTemplate), toEncoder (context)));
   }
 
   inline bool isNativeCall (QString const& rawCall)
   {
-    QString const call = normalizedNativeCall (rawCall);
-    if (call.size () < 3 || call.size () > 6 || call.startsWith (QLatin1Char {'Q'})) {
-      return false;
-    }
-
-    int area = -1;
-    for (int i = call.size () - 1; i >= 1; --i) {
-      QChar const c = call.at (i);
-      if (c >= QLatin1Char {'0'} && c <= QLatin1Char {'9'}) {
-        area = i;
-        break;
-      }
-    }
-    if (area != 1 && area != 2) return false;
-
-    bool prefixHasLetter {false};
-    for (int i = 0; i < area; ++i) {
-      QChar const c = call.at (i);
-      bool const isLetter = c >= QLatin1Char {'A'} && c <= QLatin1Char {'Z'};
-      bool const isDigit = c >= QLatin1Char {'0'} && c <= QLatin1Char {'9'};
-      if (!isLetter && !isDigit) return false;
-      prefixHasLetter = prefixHasLetter || isLetter;
-    }
-    if (!prefixHasLetter || area == call.size () - 1) return false;
-
-    for (int i = area + 1; i < call.size (); ++i) {
-      QChar const c = call.at (i);
-      if (c < QLatin1Char {'A'} || c > QLatin1Char {'Z'}) return false;
-    }
-    return call.size () - area - 1 <= 3;
+    return Encoder::isNativeCall (toEncoder (rawCall));
   }
 
   inline NativeAtomDescriptor nativeCallAtom (CallAction action, QString const& rawCall)
   {
-    NativeAtomDescriptor atom;
-    atom.kind = static_cast<qint8> (NativeAtomKind::Call);
-    atom.subtype = static_cast<qint8> (action);
-    QByteArray const call = normalizedNativeCall (rawCall).toLatin1 ();
-    std::copy_n (call.cbegin (), std::min (call.size (), 8), atom.text);
-    return atom;
-  }
-
-  inline NativeAtomDescriptor nativeSerialAtom (int serialNumber)
-  {
-    NativeAtomDescriptor atom;
-    atom.kind = static_cast<qint8> (NativeAtomKind::ExchangeNumber);
-    atom.subtype = static_cast<qint8> (NumberKind::Serial);
-    atom.role = static_cast<qint8> (ExchangeRole::Full);
-    atom.value = serialNumber;
-    return atom;
-  }
-
-  inline void setNativeAtomText (NativeAtomDescriptor& atom, QString const& value)
-  {
-    QByteArray const text = value.toLatin1 ();
-    std::copy_n (text.cbegin (), std::min (text.size (), 8), atom.text);
+    return Encoder::nativeCallAtom (action, toEncoder (rawCall));
   }
 
   inline NativeAtomDescriptor nativeLocationAtom (ExchangeRole role, LocationKind kind,
                                                    QString const& token)
   {
-    NativeAtomDescriptor atom;
-    atom.kind = static_cast<qint8> (NativeAtomKind::ExchangeLocation);
-    atom.subtype = static_cast<qint8> (kind);
-    atom.role = static_cast<qint8> (role);
-    setNativeAtomText (atom, token);
-    return atom;
-  }
-
-  inline NativeAtomDescriptor nativeClassSectionAtom (int count, QChar classLetter,
-                                                       QString const& section)
-  {
-    NativeAtomDescriptor atom;
-    atom.kind = static_cast<qint8> (NativeAtomKind::ExchangePair);
-    atom.subtype = static_cast<qint8> (PairSchema::ClassSection);
-    atom.role = static_cast<qint8> (classLetter.unicode () - QLatin1Char {'A'}.unicode ());
-    atom.value = count;
-    setNativeAtomText (atom, section);
-    return atom;
+    return Encoder::nativeLocationAtom (role, kind, toEncoder (token));
   }
 
   inline NativeAtomDescriptor nativeControlAtom (int phraseId)
   {
-    NativeAtomDescriptor atom;
-    atom.kind = static_cast<qint8> (NativeAtomKind::Control);
-    atom.subtype = static_cast<qint8> (phraseId);
-    return atom;
+    return Encoder::nativeControlAtom (phraseId);
   }
 
   inline NativeAtomDescriptor nativeGridAtom (ExchangeRole role, QString const& grid)
   {
-    NativeAtomDescriptor atom;
-    atom.kind = static_cast<qint8> (NativeAtomKind::Grid4);
-    atom.role = static_cast<qint8> (role);
-    setNativeAtomText (atom, grid);
-    return atom;
+    return Encoder::nativeGridAtom (role, toEncoder (grid));
   }
 
   inline bool isDecimal (QString const& value)
   {
-    if (value.isEmpty ()) return false;
-    for (QChar const c : value) {
-      if (c < QLatin1Char {'0'} || c > QLatin1Char {'9'}) return false;
-    }
-    return true;
+    return Encoder::isDecimal (toEncoder (value));
   }
 
   inline QString normalizedFieldDayExchange (QString const& value)
   {
-    QString exchange = value.simplified ().toUpper ();
-    if (exchange.contains (QLatin1Char {' '})) return exchange;
+    return fromEncoder (Encoder::normalizedFieldDayExchange (toEncoder (value)));
+  }
 
-    int classPosition {0};
-    while (classPosition < exchange.size ()
-           && exchange.at (classPosition) >= QLatin1Char {'0'}
-           && exchange.at (classPosition) <= QLatin1Char {'9'}) {
-      ++classPosition;
-    }
-    if (classPosition > 0 && classPosition + 1 < exchange.size ()
-        && exchange.at (classPosition) >= QLatin1Char {'A'}
-        && exchange.at (classPosition) <= QLatin1Char {'F'}) {
-      exchange.insert (classPosition + 1, QLatin1Char {' '});
-    }
-    return exchange;
+  inline NativeMacroContext nativeMacroContext (QString const& myCall, QString const& hisCall,
+                                                int serialNumber, QString const& grid, int snr,
+                                                NativeExchangeProfile profile,
+                                                QString const& exchange)
+  {
+    auto const context = Encoder::nativeMacroContext (toEncoder (myCall), toEncoder (hisCall),
+                                                      serialNumber, toEncoder (grid), snr, profile,
+                                                      toEncoder (exchange));
+    NativeMacroContext result {fromEncoder (context.myCall), fromEncoder (context.hisCall),
+                               context.serialNumber, context.exchangeProfile,
+                               fromEncoder (context.configuredExchange), fromEncoder (context.grid)};
+    result.snr = context.snr;
+    return result;
   }
 
   inline bool isCanonicalBase36Token (QString const& value)
   {
-    if (value.size () != 2 && value.size () != 3) return false;
-    if (value.size () == 3 && value.startsWith (QLatin1Char {'0'})) return false;
-    for (QChar const c : value) {
-      bool const digit = c >= QLatin1Char {'0'} && c <= QLatin1Char {'9'};
-      bool const letter = c >= QLatin1Char {'A'} && c <= QLatin1Char {'Z'};
-      if (!digit && !letter) return false;
-    }
-    return true;
+    return Encoder::isCanonicalBase36Token (toEncoder (value));
   }
 
   inline bool isGrid4 (QString const& value)
@@ -507,37 +342,12 @@ namespace Jtty
 
   inline QString controlPhrase (int phraseId)
   {
-    static QString const phrases[] {
-      QStringLiteral ("AGN?"),
-      QStringLiteral ("CALL?"),
-      QStringLiteral ("AGN CALL"),
-      QStringLiteral ("NR?"),
-      QStringLiteral ("AGN NR"),
-      QStringLiteral ("EXCH?"),
-      QStringLiteral ("STATE?"),
-      QStringLiteral ("SECTION?"),
-      QStringLiteral ("ZONE?"),
-      QStringLiteral ("GRID?"),
-      QStringLiteral ("RPRT?"),
-      QStringLiteral ("QSL TU"),
-      QStringLiteral ("TU"),
-      QStringLiteral ("QRZ?"),
-      QStringLiteral ("QSO B4"),
-      QStringLiteral ("WAIT"),
-      QStringLiteral ("NIL?"),
-      QStringLiteral ("OK?")
-    };
-    if (phraseId < 0 || phraseId >= 18) return {};
-    return phrases[phraseId];
+    return fromEncoder (Encoder::controlPhrase (phraseId));
   }
 
   inline int controlPhraseId (QString const& macroTemplate)
   {
-    QString const normalized = normalizedMacroTemplate (macroTemplate);
-    for (int phraseId = 0; phraseId < 18; ++phraseId) {
-      if (normalized == controlPhrase (phraseId)) return phraseId;
-    }
-    return -1;
+    return Encoder::controlPhraseId (toEncoder (macroTemplate));
   }
 
   struct NativeExchangeCompilation
@@ -550,226 +360,19 @@ namespace Jtty
 
   inline NativeExchangeCompilation nativeExchange (NativeMacroContext const& context)
   {
-    NativeExchangeCompilation result;
-    auto invalid = [&result] (QString const& error) {
-      result.error = error;
-      return result;
-    };
-    auto serial = [&result] (int value) {
-      if (value < 0 || value >= (1 << 17)) return false;
-      result.valid = true;
-      result.atom = nativeSerialAtom (value);
-      result.text = QStringLiteral ("599 %1").arg (formatSerialNumber (value));
-      return true;
-    };
-
-    QString const configured = context.configuredExchange.simplified ().toUpper ();
-    switch (context.exchangeProfile) {
-    case NativeExchangeProfile::None:
-      if (!serial (context.serialNumber)) {
-        return invalid (QStringLiteral ("Serial number must be between 0 and 131071"));
-      }
-      return result;
-
-    case NativeExchangeProfile::FieldDay: {
-      QStringList const fields = configured.split (QLatin1Char {' '});
-      if (fields.size () != 2 || fields.at (0).size () < 2) {
-        return invalid (QStringLiteral ("Field Day exchange must be COUNTCLASS SECTION"));
-      }
-      QString const countClass = fields.at (0);
-      QChar const classLetter = countClass.back ();
-      QString const countText = countClass.left (countClass.size () - 1);
-      bool countOk {false};
-      int const count = countText.toInt (&countOk);
-      if (!countOk || !isDecimal (countText) || count < 1 || count > 32) {
-        return invalid (QStringLiteral ("Field Day transmitter count must be between 1 and 32"));
-      }
-      if (classLetter < QLatin1Char {'A'} || classLetter > QLatin1Char {'F'}) {
-        return invalid (QStringLiteral ("Field Day class must be A through F"));
-      }
-      QString const section = fields.at (1);
-      if (!isCanonicalBase36Token (section)) {
-        return invalid (QStringLiteral ("Field Day section must be a canonical 2-3 character code"));
-      }
-      result.valid = true;
-      result.atom = nativeClassSectionAtom (count, classLetter, section);
-      result.text = QStringLiteral ("%1%2 %3").arg (count).arg (classLetter).arg (section);
-      return result;
-    }
-
-    case NativeExchangeProfile::RttyRoundup:
-      if (configured == QStringLiteral ("DX") || configured == QStringLiteral ("#")) {
-        if (!serial (context.serialNumber)) {
-          return invalid (QStringLiteral ("Serial number must be between 0 and 131071"));
-        }
-        return result;
-      }
-      if (isDecimal (configured)) {
-        bool valueOk {false};
-        int const value = configured.toInt (&valueOk);
-        if (!valueOk || !serial (value)) {
-          return invalid (QStringLiteral ("Configured serial must be between 0 and 131071"));
-        }
-        return result;
-      }
-      if (!isCanonicalBase36Token (configured)) {
-        return invalid (QStringLiteral (
-          "RTTY exchange must be DX, #, a decimal serial, or a canonical 2-3 character state/province"));
-      }
-      result.valid = true;
-      result.atom = nativeLocationAtom (
-        ExchangeRole::Full, LocationKind::StateProvince, configured);
-      result.text = QStringLiteral ("599 %1").arg (configured);
-      return result;
-    }
-
-    return invalid (QStringLiteral ("Unsupported exchange profile"));
-  }
-
-  inline NativeExchangeCompilation nativeGridExchange (NativeMacroContext const& context,
-                                                         ExchangeRole role)
-  {
-    NativeExchangeCompilation result;
-    QString const locator = context.grid.trimmed ().toUpper ();
-    static QRegularExpression const locatorPattern {
-      QStringLiteral ("^[A-R]{2}[0-9]{2}(?:[A-X]{2}(?:[0-9]{2})?)?$")};
-    if (!locatorPattern.match (locator).hasMatch ()) {
-      result.error = QStringLiteral ("Grid must be a valid four-, six-, or eight-character Maidenhead locator");
-      return result;
-    }
-    QString const grid = locator.left (4);
-    result.valid = true;
-    result.atom = nativeGridAtom (role, grid);
-    result.text = role == ExchangeRole::Full
-      ? QStringLiteral ("599 %1").arg (grid) : grid;
-    return result;
+    auto const exchange = Encoder::nativeExchange (toEncoder (context));
+    return {exchange.valid, exchange.atom, fromEncoder (exchange.text), fromEncoder (exchange.error)};
   }
 
   inline NativeMacroCompilation compileNativeMacro (
       QString const& macroTemplate, NativeMacroContext const& context)
   {
+    auto const compiled = Encoder::compileNativeMacro (toEncoder (macroTemplate), toEncoder (context));
     NativeMacroCompilation result;
-    QString const normalized = normalizedMacroTemplate (macroTemplate);
-    int const phraseId = controlPhraseId (normalized);
-    if (phraseId >= 0) {
-      result.status = NativeMacroStatus::Native;
-      result.atoms.append (nativeControlAtom (phraseId));
-      result.text = controlPhrase (phraseId);
-      return result;
-    }
-
-    int const functionKey = nativeMacroFunctionKey (macroTemplate);
-    if (functionKey == 0) {
-      result.text = expandLiteralMacro (macroTemplate, context);
-      return result;
-    }
-
-    QString const myCall = normalizedNativeCall (context.myCall);
-    QString const hisCall = normalizedNativeCall (context.hisCall);
-    auto invalid = [&result] (QString const& error) {
-      result.status = NativeMacroStatus::InvalidRuntime;
-      result.atoms.clear ();
-      result.text.clear ();
-      result.error = error;
-      return result;
-    };
-    auto appendCall = [&result] (CallAction action, QString const& call) {
-      result.atoms.append (nativeCallAtom (action, call));
-    };
-    auto appendSerial = [&result, &context] {
-      result.atoms.append (nativeSerialAtom (context.serialNumber));
-    };
-    auto appendExchange = [&result, &context, &normalized] {
-      NativeExchangeCompilation exchange;
-      if (normalized.contains (QStringLiteral ("%G"))) {
-        ExchangeRole const role = normalized == QStringLiteral ("599 %G")
-          ? ExchangeRole::Full : ExchangeRole::FieldOnly;
-        exchange = nativeGridExchange (context, role);
-      } else {
-        exchange = nativeExchange (context);
-      }
-      if (exchange.valid) result.atoms.append (exchange.atom);
-      return exchange;
-    };
-
-    switch (functionKey) {
-    case 1:
-      if (!isNativeCall (myCall)) return invalid (QStringLiteral ("Configured callsign is not a native Call8 callsign"));
-      appendCall (CallAction::Cq, myCall);
-      result.text = QStringLiteral ("CQ %1 CQ").arg (myCall);
-      break;
-    case 2:
-      if (!isNativeCall (hisCall)) return invalid (QStringLiteral ("DX callsign is not a native Call8 callsign"));
-      appendCall (CallAction::Call, hisCall);
-      if (macroTemplate == legacyNativeMacroTemplate (2)) {
-        if (context.serialNumber < 0 || context.serialNumber >= (1 << 17)) {
-          return invalid (QStringLiteral ("Serial number must be between 0 and 131071"));
-        }
-        appendSerial ();
-        result.text = QStringLiteral ("%1 599 %2").arg (
-            hisCall, formatSerialNumber (context.serialNumber));
-      } else {
-        auto const exchange = appendExchange ();
-        if (!exchange.valid) return invalid (exchange.error);
-        result.text = QStringLiteral ("%1 %2").arg (hisCall, exchange.text);
-      }
-      break;
-    case 3:
-      if (!isNativeCall (hisCall)) return invalid (QStringLiteral ("DX callsign is not a native Call8 callsign"));
-      if (!isNativeCall (myCall)) return invalid (QStringLiteral ("Configured callsign is not a native Call8 callsign"));
-      appendCall (CallAction::CallTu, hisCall);
-      appendCall (CallAction::Cq, myCall);
-      result.text = QStringLiteral ("%1 TU CQ %2 CQ").arg (hisCall, myCall);
-      break;
-    case 4:
-      if (!isNativeCall (myCall)) return invalid (QStringLiteral ("Configured callsign is not a native Call8 callsign"));
-      appendCall (CallAction::Call, myCall);
-      result.text = myCall;
-      break;
-    case 5:
-      if (!isNativeCall (hisCall)) return invalid (QStringLiteral ("DX callsign is not a native Call8 callsign"));
-      appendCall (CallAction::Call, hisCall);
-      result.text = hisCall;
-      break;
-    case 6:
-      if (!isNativeCall (hisCall)) return invalid (QStringLiteral ("Queued callsign is not a native Call8 callsign"));
-      appendCall (CallAction::TuNowCall, hisCall);
-      if (macroTemplate == legacyNativeMacroTemplate (6)) {
-        if (context.serialNumber < 0 || context.serialNumber >= (1 << 17)) {
-          return invalid (QStringLiteral ("Serial number must be between 0 and 131071"));
-        }
-        appendSerial ();
-        result.text = QStringLiteral ("TU NOW %1 599 %2").arg (
-            hisCall, formatSerialNumber (context.serialNumber));
-      } else {
-        auto const exchange = appendExchange ();
-        if (!exchange.valid) return invalid (exchange.error);
-        result.text = QStringLiteral ("TU NOW %1 %2").arg (hisCall, exchange.text);
-      }
-      break;
-    case 7:
-      if (!isNativeCall (hisCall)) return invalid (QStringLiteral ("DX callsign is not a native Call8 callsign"));
-      appendCall (CallAction::CallAgn, hisCall);
-      result.text = QStringLiteral ("%1 AGN?").arg (hisCall);
-      break;
-    case 8:
-      if (macroTemplate == legacyNativeMacroTemplate (8)) {
-        if (context.serialNumber < 0 || context.serialNumber >= (1 << 17)) {
-          return invalid (QStringLiteral ("Serial number must be between 0 and 131071"));
-        }
-        appendSerial ();
-        result.text = QStringLiteral ("599 %1").arg (formatSerialNumber (context.serialNumber));
-      } else {
-        auto const exchange = appendExchange ();
-        if (!exchange.valid) return invalid (exchange.error);
-        result.text = exchange.text;
-      }
-      break;
-    default:
-      return invalid (QStringLiteral ("Unsupported native macro"));
-    }
-
-    result.status = NativeMacroStatus::Native;
+    result.status = compiled.status;
+    for (auto const& atom : compiled.atoms) result.atoms.append (atom);
+    result.text = fromEncoder (compiled.text);
+    result.error = fromEncoder (compiled.error);
     return result;
   }
 
@@ -808,7 +411,15 @@ namespace Jtty
                                                     tsyncSeconds));
   }
 
-  inline ParsedDecodeLine parseDecodeLine (QString const& line)
+  // Matches a decode line's freq/SNR column layout with the SNR field left
+  // blank (a sent message has no measured SNR), so Tx and Rx lines line up.
+  inline QString formatJttyTxLine (float frequency, QString const& message)
+  {
+    QString const frequencyText = QStringLiteral ("%1").arg (qRound (frequency), 4);
+    return frequencyText + QStringLiteral ("      ") + message;
+  }
+
+  inline ParsedDecodeLine parseDecodeLine (QString const& line, bool withSnr = false)
   {
     ParsedDecodeLine result;
     QString const trimmed = line.trimmed ();
@@ -827,6 +438,14 @@ namespace Jtty
     result.frequency = frequency;
     result.message = separator < trimmed.size ()
         ? trimmed.mid (separator).trimmed () : QString {};
+    if (withSnr) {
+      int const end = result.message.indexOf (QLatin1Char {' '});
+      bool snrOk {false};
+      int const snr = result.message.left (end < 0 ? result.message.size () : end).toInt (&snrOk);
+      if (!snrOk) return result;
+      result.snr = snr;
+      result.message = end < 0 ? QString {} : result.message.mid (end).trimmed ();
+    }
     result.valid = true;
     return result;
   }
@@ -859,6 +478,21 @@ namespace Jtty
     return result;
   }
 
+  // Format one JTTY decode line for display/logging: "Freq SNR  Message" (a
+  // leading UTC time label, when wanted, is prepended by the caller). SNR is
+  // plain right-justified, no zero-pad/forced sign -- matches the existing
+  // decode-pane convention used by other modes (e.g. FT8's own line format,
+  // lib/decoder_callbacks.f90, "i4" for its SNR field), deliberately
+  // different from formatSnr's zero-padded convention for the %R Tx macro.
+  inline QString formatJttyDecodeLine (float frequency, int snr, QString const& message)
+  {
+    QString const frequencyText = QStringLiteral ("%1").arg (qRound (frequency), 4);
+    QString const snrText = QStringLiteral ("%1").arg (snr, 3);
+    return message.isEmpty ()
+      ? frequencyText
+      : frequencyText + QStringLiteral (" ") + snrText + QStringLiteral ("  ") + message;
+  }
+
   struct DecodeLineChange
   {
     bool messageChanged {false};
@@ -888,6 +522,7 @@ namespace Jtty
     QString text;
     float sequenceStart {0.f};
     bool complete {false};
+    int snr {-10};
   };
 
   inline bool shouldApplyToQsoHistory (bool alreadyPresent, float frequency,

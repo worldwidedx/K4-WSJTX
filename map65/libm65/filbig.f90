@@ -2,15 +2,13 @@ module filbig_mod
   use iso_fortran_env, only: real32, real64
   use iso_c_binding, only:c_intptr_t
   use timer_module,   only: timer
-  use debug_log
   use cacb_mod
   use npar_ptrs_mod,  only: nrate_active, nfft_big_active
   use fftw3_constants
   use fftw3_f77_interfaces
-  use sec_midn_mod, only: sec_midn
   implicit none
   
-  integer, parameter :: MAXFFT1 = 56*192000
+  integer, parameter :: MAXFFT1 = 56*256000
   integer, parameter :: MAXFFT2 = 2*77175
 
   complex, save :: c4a_buf(MAXFFT2), c4b_buf(MAXFFT2), cfilt_buf(MAXFFT2)
@@ -37,6 +35,7 @@ contains
     real halfpulse(8)                       !Impulse response (one sided)
     real base, fac, filtval
     integer i, i0, j, nfft1, nfft2, nflags, nh, npatience, nz
+    logical need_big_fft
     real(real64) :: decim
     ! Filter in frequency domain; sized at max short-FFT length
     data npatience/1/
@@ -45,9 +44,10 @@ contains
 
     save
 
-    ! ca/cb storage is sized at MAXFFT1 in cacb_mod; the *active* big FFT
-    ! length is nfft_big_active, set from C++ via set_runtime_params_().
-    call init_cacb(MAXFFT1)
+    ! ca/cb storage in cacb_mod is sized for the active big FFT (56 * the
+    ! sample rate, set from C++ via set_runtime_params_()), not for the
+    ! largest supported rate. The rate only changes on restart.
+    call init_cacb(min(56*nrate_active, MAXFFT1))
 
     if (nmax .lt. 0) go to 900
 
@@ -78,20 +78,6 @@ contains
     endif
 
     if (filbig_first) then
-       ! TEMP diagnostic 2026-09-10 for the "first decode cycle after
-       ! startup is degraded/missing" investigation. filbig_first is a
-       ! module-SAVEd flag -- true exactly once, for the life of the
-       ! process -- so this whole block runs on the very first filbig()
-       ! call and never again. That happens to line up exactly with when
-       ! the anomaly has been observed. FFTW plan creation (even the cheap
-       ! ESTIMATE_PATIENT mode used below) still does real work for a
-       ! multi-million-point transform; if it takes long enough to run
-       ! synchronously on this thread, it could delay real-time audio
-       ! capture on the GUI/audio thread for that whole span. Time it
-       ! directly rather than assuming either way.
-       call dbg('filbig: FIRST-EVER CALL, starting FFTW plan creation at t=' // rtoa(sec_midn()) // &
-                ' nfft1=' // itoa(nfft1) // ' nfft2=' // itoa(nfft2))
-
        nflags = FFTW_ESTIMATE
        if (npatience .eq. 1) nflags = FFTW_ESTIMATE_PATIENT
        if (npatience .eq. 2) nflags = FFTW_MEASURE
@@ -106,7 +92,6 @@ contains
        call sfftw_plan_dft_1d(plan4, nfft2, c4b_buf,  c4b_buf,  FFTW_FORWARD,  nflags)
        call sfftw_plan_dft_1d(plan5, nfft2, cfilt_buf,cfilt_buf,FFTW_BACKWARD, nflags)
        call timer('FFTplans', 1)
-       call dbg('filbig: FFTW plan creation DONE at t=' // rtoa(sec_midn()))
 
   ! Convert impulse response to filter function
        do i = 1, nfft2
@@ -127,13 +112,15 @@ contains
        df = dble(nrate_active)/dble(nfft1)
        if (nfsample .eq. 95238) df = 95238.1d0/dble(nfft1)
        filbig_first = .false.
-       call dbg('filbig: entire one-time init (plans + filter) DONE at t=' // rtoa(sec_midn()))
     endif
 
   ! When new data comes along, we need to compute a new "big FFT"
   ! If we just have a new f0, continue with the existing ca and cb.
 
-    if (newdat .ne. 0 .or. sum(abs(ca)) .eq. 0.0) then  !### Test on ca should be unnecessary?
+    ! Only the first nfft1 samples of ca are ever filled, so only those are checked.
+    need_big_fft = newdat .ne. 0
+    if (.not. need_big_fft) need_big_fft = sum(abs(ca(1:nfft1))) .eq. 0.0
+    if (need_big_fft) then
        nz = min(nmax, nfft1)
        do i = 1, nz
           ca(i) = cmplx(dd(1, i), dd(2, i))
@@ -172,21 +159,19 @@ contains
        endif
     enddo
 
-    ! Upper half of filter, with wrap-around and bounds check
+    ! Upper half of filter, wrapping negative-frequency bins
     do i = nh + 1, nfft2
        j = i0 + i - 1 - nfft2
        if (j .lt. 1) j = j + nfft1
 
-       if (j < 1 .or. j > size(ca)) then
-          write (dbg_unit, *) 'FILBIG OOB: i=', i, ' j=', j, ' nh=', nh, &
-             ' nfft1=', nfft1, ' nfft2=', nfft2, ' i0=', i0
-          flush(dbg_unit)
-          stop 'FILBIG index OOB'
-       end if
-
-       filtval = real(cfilt_buf(i)) - base
-       c4a_buf(i) = filtval*ca(j)
-       if (xpol) c4b_buf(i) = filtval*cb(j)
+       if (j .ge. 1 .and. j .le. nfft1) then
+          filtval = real(cfilt_buf(i)) - base
+          c4a_buf(i) = filtval*ca(j)
+          if (xpol) c4b_buf(i) = filtval*cb(j)
+       else
+          c4a_buf(i) = 0.0
+          if (xpol) c4b_buf(i) = 0.0
+       endif
     enddo
 
   ! Do the short reverse transform, to go back to time domain.

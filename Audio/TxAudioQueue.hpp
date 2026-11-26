@@ -47,9 +47,18 @@ struct TxAudioQueueDrainState
   qint64 total_at_drain {0};
 };
 
+enum class TxAudioQueueEnqueueFailure
+{
+  None,
+  Capacity,
+  StaleEpoch,
+  BackendUnavailable
+};
+
 struct TxAudioQueueEnqueueResult
 {
   bool accepted {false};
+  TxAudioQueueEnqueueFailure failure {TxAudioQueueEnqueueFailure::None};
   TxAudioQueueProgress progress {};
 };
 
@@ -88,6 +97,7 @@ private:
 Q_DECLARE_METATYPE (TxAudioQueueEpoch)
 Q_DECLARE_METATYPE (TxAudioQueueProgress)
 Q_DECLARE_METATYPE (TxAudioQueueDrainState)
+Q_DECLARE_METATYPE (TxAudioQueueEnqueueFailure)
 Q_DECLARE_METATYPE (TxAudioQueueEnqueueResult)
 
 #endif

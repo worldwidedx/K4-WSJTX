@@ -26,8 +26,28 @@ image::Add_Frequency.png[align="center",alt="Add Frequency window"]
 entries can be deleted in a single operation by selecting them before
 right-clicking.
 
+- To add entries from the built-in list without replacing your working
+frequencies, choose *Actions | Add suggested frequencies*. Filter by
+band or mode, check only the entries you want, and select *Add
+selected*. Entries already in your working list are hidden by default;
+you can show them for reference, but cannot add them again. Your
+existing entries, descriptions, and preferred settings are not changed.
+Click *OK* in Settings to save your additions, or *Cancel* to discard
+them. If you cancel Settings, the notice remains available for
+suggestions you did not save. Saving a selection acknowledges the
+current suggestions, even if you chose only some of them.
+
 - Right-click anywhere within the table body and click *Reset* button
-to return the table to its default configuration.
+to replace the table with its default configuration. Reset discards
+any frequencies you added or customized.
+
+NOTE: Upgrading _WSJT-X_ does not replace your working-frequency list.
+If new built-in suggestions are available, a notice on the
+*Frequencies* tab offers *Browse suggestions...*. The chooser can show
+only the newly suggested entries, so you can select any that are useful
+without resetting your list. Opening the chooser alone does not dismiss
+the notice. *Dismiss* hides it until new suggestions are shipped, even
+if you later cancel Settings.
 
 Other  more  advanced  maintenance  operations are  available  on  the
 right-click context popup menu.

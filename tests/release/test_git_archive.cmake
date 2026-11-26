@@ -36,11 +36,20 @@ execute_process (
 if (NOT state_result EQUAL 0)
   message (FATAL_ERROR "Extracted Git archive did not preserve release identity")
 endif ()
+execute_process (
+  COMMAND "${CMAKE_COMMAND}"
+    -D SOURCE_DIR=${extract_dir}
+    -D TEST_BINARY_DIR=${TEST_BINARY_DIR}/archive-ctest-fixtures
+    -P ${extract_dir}/tests/release/test_release_state.cmake
+  RESULT_VARIABLE state_result)
+if (NOT state_result EQUAL 0)
+  message (FATAL_ERROR "test_release_state fails when run from the extracted Git archive")
+endif ()
 
 include ("${extract_dir}/CMake/Modules/read_release_state.cmake")
 wsjt_read_release_state (
   "${extract_dir}/release-state.txt"
-  archive_version archive_channel archive_rc archive_revision)
+  archive_version archive_channel archive_prerelease archive_revision)
 include ("${extract_dir}/CMake/Modules/set_build_type.cmake")
 set (PROJECT_NAME wsjtx)
 string (REPLACE "." ";" archive_version_parts "${archive_version}")
@@ -48,12 +57,14 @@ list (GET archive_version_parts 0 PROJECT_VERSION_MAJOR)
 list (GET archive_version_parts 1 PROJECT_VERSION_MINOR)
 list (GET archive_version_parts 2 PROJECT_VERSION_PATCH)
 set (WSJT_RELEASE_CHANNEL "${archive_channel}" CACHE STRING "" FORCE)
-set (WSJT_RC_NUMBER "${archive_rc}" CACHE STRING "" FORCE)
+set (WSJT_PRERELEASE_NUMBER "${archive_prerelease}" CACHE STRING "" FORCE)
 set_build_type ()
 if (archive_channel STREQUAL "DEVEL")
   set (expected_version "${archive_version}-devel")
+elseif (archive_channel STREQUAL "BETA")
+  set (expected_version "${archive_version}-beta${archive_prerelease}")
 elseif (archive_channel STREQUAL "RC")
-  set (expected_version "${archive_version}-rc${archive_rc}")
+  set (expected_version "${archive_version}-rc${archive_prerelease}")
 else ()
   set (expected_version "${archive_version}")
 endif ()

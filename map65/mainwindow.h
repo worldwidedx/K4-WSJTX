@@ -6,7 +6,7 @@
 #include <QScopedPointer>
 #include <QLabel>
 #include <QDateTime>
-#include <QHash>
+#include <QSet>
 #include <QProcess>
 #include "soundin.h"
 #include "soundout.h"
@@ -89,6 +89,24 @@ public:
   bool    m_xpolx;
   int     m_fs96000;
   int     m_pendingFs96000 {-1};
+  int     m_pendingPaInDevice {-1};
+  // Saved device names; kept for map65.ini while the device isn't found.
+  QString m_paInDeviceName;
+  QString m_paOutDeviceName;
+  QString m_paInDeviceApi;              // host API of the saved device
+  QString m_paOutDeviceApi;
+  bool    m_noOutputShown = false;
+  // What SoundIn was last started with: the sound-card device and channel
+  // count, or device -1 for network input or while input is stopped until a
+  // restart.
+  int     m_soundInDevice {-1};
+  int     m_soundInChannels {0};
+  bool    m_soundInStopped {false};
+  int     m_lastCardDevice {-1};     // last sound-card device SoundIn was started with
+  int     m_lastCardChannels {0};
+  bool    m_soundInFailedNoticeShown {false};
+  bool    m_soundOutFailedNoticeShown {false};
+  bool    m_soundOutTxNoticeShown {false};
   bool    m_IQswap;
   bool    m_initIQplus;
   bool    m_bIQxt;
@@ -114,6 +132,7 @@ public slots:
   void freezeDecode(int n);
   void editor_error();
   void guiUpdate();
+  void updateDecoderLagIndicator();
   void doubleClickOnCall(QString hiscall, bool ctrl);
   void doubleClickOnMessages(QString hiscall, QString t2, bool ctrl);
   void startDecoder();
@@ -157,10 +176,12 @@ private slots:
   void on_actionF4_sets_Tx6_triggered();
   void on_actionOnly_EME_calls_triggered();
   void on_actionNo_shorthands_if_Tx1_triggered();
-  void on_actionNo_Deep_Search_triggered();
-  void on_actionNormal_Deep_Search_triggered();
-  void on_actionAggressive_Deep_Search_triggered();
-  void on_actionFull_Deep_Search_triggered();
+  void on_actionJT65_No_Deep_Search_triggered();
+  void on_actionJT65_Normal_Deep_Search_triggered();
+  void on_actionJT65_Aggressive_Deep_Search_triggered();
+  void on_actionQ65_Fast_triggered();
+  void on_actionQ65_Normal_triggered();
+  void on_actionQ65_Deep_triggered();
   void on_actionNone_triggered();
   void on_actionSave_all_triggered();
   void on_actionKeyboard_shortcuts_triggered();
@@ -230,7 +251,8 @@ private:
   qint32  m_ntx;
   qint32  m_txFreq;
   qint32  m_setftx;
-  qint32  m_ndepth;
+  qint32  m_ndepth;                 //JT65 search level (0-2)
+  qint32  m_ndepthq65;              //Q65 search level (1-3)
   qint32  m_sec0;
   qint32  m_map65RxLog;
   qint32  m_nutc0;
@@ -300,6 +322,10 @@ private:
   QLabel* lab6;
   QLabel* lab7;
   QLabel* lab8;
+  QLabel* labLag;
+  int     m_lagSeen {0};
+  int     m_lagTotal {0};
+  qint64  m_lagLastMs {0};
 
   QMessageBox msgBox0;
 
@@ -319,7 +345,7 @@ private:
   char hisgrid[6] = {};
   char datetime[17] = {};
 
-  QHash<QString,bool> m_worked;
+  QSet<QString> m_worked;
 
   SignalMeter *xSignalMeter;
   SignalMeter *ySignalMeter;
@@ -336,6 +362,22 @@ private:
   void createStatusBar();
   void updateStatusBar();
   void msgBox(QString t);
+  bool stopSoundIn(bool report = true);
+public:
+  bool soundInRunning() const { return soundInThread.isRunning(); }
+  // SoundIn has its device open: running, or its start failed and the stream is held.
+  // The sound-card device SoundIn has open, and its channel count: while it
+  // runs, or after a failed start, when the stream stays open until exit
+  // (whatever input runs meanwhile). -1 when none.
+  int soundInOpenDevice() const {
+    if (soundInThread.m_streamLeftOpen) return m_lastCardDevice;
+    return soundInThread.isRunning() ? m_soundInDevice : -1;
+  }
+  int soundInOpenChannels() const {
+    return soundInThread.m_streamLeftOpen ? m_lastCardChannels : m_soundInChannels;
+  }
+private:
+  void findSavedDevices();
   void genStdMsgs(QString rpt);
   void lookup();
   void ba2msg(QByteArray ba, char* message);
@@ -343,7 +385,7 @@ private:
   void stub();
   bool isGrid4(QString g);
   bool subProcessFailed (QProcess *, int exit_code, QProcess::ExitStatus);
-  void read_log();
+  void loadWorkedLog();
   void writeCrashData();
   void savetf2(QString fname, bool xpol);
   void getfile(QString fname, bool m_xpol, int dbDgrd);
@@ -376,8 +418,6 @@ extern "C" {
   void gen_q65_wave_(char* msg, int* ntxFreq, int* mode64,
               char* msgsent, short iwave[], int* nwave,
               int len1, int len2);
-
-  int ptt_(int* nport, int* itx, int* iptt);
 
   void astrosub00_ (int* nyear, int* month, int* nday, double* uth, int* nfreq,
                     const char* mygrid, int* ndop00, int len1);

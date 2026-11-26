@@ -1,92 +1,61 @@
-subroutine get_q3list(fname,bDiskData,nlist,list)
+subroutine get_q3list(fname,bDiskData,capacity,nlist,list)
 
+  use types, only: q3list
+  use, intrinsic :: iso_fortran_env, only: int64
+  use q65_callers, only: Q65_MAX_CALLERS, Q65_ROW_WIDTH,             &
+       q65_load_callers, q65_expire_callers
   use jpl_ephemeris_status, only: EPHEMERIS_INVALID_INPUT,           &
        EPHEMERIS_UNAVAILABLE
+  implicit none
 
-  type q3list
-     character*6 call
-     character*4 grid
-     integer nsec
-     integer nfreq
-     integer moonel
-  end type q3list
+  character(len=*), intent(in) :: fname
+  logical*1, intent(in) :: bDiskData
+  integer, intent(in) :: capacity
+  integer, intent(out) :: nlist
+  character(len=*), intent(inout) :: list(*)
+  character(len=8) :: grid6
+  integer :: nt(8),now,nhist,status,i,j,mjd
+  integer :: utc_year,utc_month,utc_day,ephemeris_result
+  integer :: indx(Q65_MAX_CALLERS)
+  real :: uth,xlon,xlat,RASun,DecSun,xLST,AzSun,ElSun,day
+  real :: RAMoon,DecMoon,HA,AzMoon,ElMoon,vr,techo,age
+  type(q3list) :: history(Q65_MAX_CALLERS),callers(Q65_MAX_CALLERS)
 
-  parameter (MAX_CALLERS=50)
-  character*(*) fname
-  character*37 list(MAX_CALLERS)
-  character*8 grid6
-  logical*1 bDiskData
-  integer time
-  integer nt(8)
-  integer utc_year,utc_month,utc_day
-  integer ephemeris_result
-  integer indx(MAX_CALLERS)
-  type(q3list) ctmp(MAX_CALLERS),callers(MAX_CALLERS)
-  character*256 jpleph_file_name,file24name
-  common/jplcom/jpleph_file_name
-  common/lu24com/file24name
-
-  nhist2=0
- open(24,file=fname,status='unknown',form='unformatted')
-  read(24,end=1) nhist2
-  if(nhist2.ge.1 .and. nhist2.le.MAX_CALLERS) then
-     read(24,end=1) ctmp(1:nhist2)
-  else
-     nhist2=0
-  endif
-1 rewind 24
-  if(nhist2.eq.0) go to 900
-
+  nlist=0
+  if(capacity.le.0 .or. len(list).lt.Q65_ROW_WIDTH) return
+  call q65_load_callers(fname,history,nhist,status)
+  if(status.ne.0 .or. nhist.eq.0) return
   now=time()
+  call q65_expire_callers(history,nhist,now)
   call date_and_time(values=nt)
   call normalize_utc_calendar(nt,utc_year,utc_month,utc_day,uth)
-  j=0
-  
-  do i=1,nhist2
-     age=(now - ctmp(i)%nsec)/3600.0
-     if(age.gt.24.0) cycle
-     grid6=ctmp(i)%grid//'mm'
+
+  do i=1,nhist
+     grid6=history(i)%grid//'mm'
      call grid2deg(grid6,xlon,xlat)
-     call sun(utc_year,utc_month,utc_day,uth,-xlon,xlat,RASun,DecSun,    &
+     call sun(utc_year,utc_month,utc_day,uth,-xlon,xlat,RASun,DecSun, &
           xLST,AzSun,ElSun,mjd,day)
-     call moondopjpl(utc_year,utc_month,utc_day,uth,-xlon,xlat,RAMoon,   &
-          DecMoon,                                                     &
-          xLST,HA,AzMoon,ElMoon,vr,techo,ephemeris_result)
+     call moondopjpl(utc_year,utc_month,utc_day,uth,-xlon,xlat,RAMoon, &
+          DecMoon,xLST,HA,AzMoon,ElMoon,vr,techo,ephemeris_result)
      if(ephemeris_result.eq.EPHEMERIS_INVALID_INPUT .or.             &
           ephemeris_result.eq.EPHEMERIS_UNAVAILABLE) cycle
      if(ElMoon.lt.-5.0 .and. (.not.bDiskData)) cycle
-     j=j+1                                   !Keep this one...
-     callers(j)=ctmp(i)
-     callers(j)%moonel=nint(ElMoon)          !... and save its current moonel
+     nlist=nlist+1
+     callers(nlist)=history(i)
+     callers(nlist)%moonel=nint(ElMoon)
   enddo
 
-  nhist2=j
-  write(24) nhist2
-  write(24) callers(1:nhist2)
-
-  call indexx(callers(1:nhist2)%nfreq,nhist2,indx)
-  do i=1,nhist2
+  if(nlist.eq.0) return
+  call indexx(callers(1:nlist)%nfreq,nlist,indx)
+  nlist=min(nlist,capacity)
+  do i=1,nlist
      j=indx(i)
-     moon_el=nint(ElMoon)
-     age=(now - callers(j)%nsec)/3600.0
-     write(list(i),1000) i,callers(j)%nfreq,callers(j)%call,    &
+     age=real(int(now,int64)-int(callers(j)%nsec,int64))/3600.0
+     write(list(i),1000) i,callers(j)%nfreq,callers(j)%call,           &
           callers(j)%grid,callers(j)%moonel,age,char(0)
 1000 format(i2,'.',i6,2x,a6,2x,a4,i5,f7.1,1x,a1)
-
-!     h1=mod(now,86400)/3600.0
-!     h2=mod(callers(i)%nsec,86400)/3600.0
-!     hd=h1-h2
-!     if(hd.lt.0.0) hd=hd+24.0
-!     write(*,3301) i,callers(i)%call,now,callers(i)%nsec,h1,h2,hd
-!3301 format(i3,2x,a6,2i12,3f10.6)
-
   enddo
 
-900 close(24)
-  nlist=nhist2
-  file24name=fname
-
-  return
 end subroutine get_q3list
 
 subroutine normalize_utc_calendar(values,year,month,day,uth)
@@ -150,47 +119,22 @@ contains
 
 end subroutine normalize_utc_calendar
 
-subroutine rm_q3list(dxcall0)
+subroutine rm_q3list(fname,dxcall)
 
-  parameter (MAX_CALLERS=50)
-  type q3list
-     character*6 call
-     character*4 grid
-     integer nsec
-     integer nfreq
-     integer moonel
-  end type q3list
-  character*(*) dxcall0
-  character*6 dxcall
-  character*256 file24name
-  type(q3list) callers(MAX_CALLERS)
-  common/lu24com/file24name
+  use types, only: q3list
+  use q65_callers, only: Q65_MAX_CALLERS, q65_load_callers,          &
+       q65_save_callers, q65_remove_caller
+  implicit none
 
-  dxcall=dxcall0
-  open(24,file=trim(file24name),status='unknown',form='unformatted')
-  read(24) nhist2
-  read(24) callers(1:nhist2)
+  character(len=*), intent(in) :: fname,dxcall
+  type(q3list) :: callers(Q65_MAX_CALLERS)
+  integer :: count,status
 
-  if(nhist2.eq.MAX_CALLERS .and. dxcall.eq.callers(nhist2)%call) then
-     nhist2=MAX_CALLERS - 1
-     go to 10
-  endif
+  call q65_load_callers(fname,callers,count,status)
+  if(status.ne.0) return
+  call q65_remove_caller(callers,count,dxcall)
+  call q65_save_callers(fname,callers,count,status)
 
-  iz=nhist2
-  do i=1,iz
-     if(callers(i)%call .eq. dxcall) then
-        nhist2=nhist2-1
-        callers(i:nhist2)=callers(i+1:nhist2+1)    !Remove dxcall from q3list
-        exit
-     endif
-  enddo
-
-10 rewind 24
-  write(24) nhist2
-  write(24) callers(1:nhist2)
-  close(24)
-
-  return
 end subroutine rm_q3list
 
 subroutine jpl_setup(fname)

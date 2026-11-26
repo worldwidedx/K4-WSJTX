@@ -1,5 +1,13 @@
-subroutine sfox_remove_ft8(dd,npts)
+module sfox_remove_ft8_module
+   implicit none
+   private
+   public :: sfox_remove_ft8_for_state
+contains
+subroutine sfox_remove_ft8_for_state(knowledge,dd,npts)
    use packjt77
+   implicit real(a-h,o-z)
+   implicit integer(i-n)
+   type(pack77_state), optional, intent(inout) :: knowledge
    include 'ft8_params.f90'
    parameter (MAXCAND=100)
    parameter (NP2=2812)
@@ -194,7 +202,11 @@ subroutine sfox_remove_ft8(dd,npts)
       if(i3.gt.5 .or. (i3.eq.0.and.n3.gt.6)) cycle
       if(i3.eq.0 .and. n3.eq.2) cycle
 
-      call unpack77(c77,1,msg37,unpk77_success)
+      if(present(knowledge)) then
+         call unpack77_for_state(knowledge,c77,1,msg37,unpk77_success)
+      else
+         call unpack77(c77,1,msg37,unpk77_success)
+      endif
 !      write(77,*) 'FT8 interference: ',msg37
       if(.not.unpk77_success) cycle
 ! Message structure: S7 D29 S7 D29 S7
@@ -213,4 +225,14 @@ subroutine sfox_remove_ft8(dd,npts)
 !      return
    enddo
    return
+end subroutine sfox_remove_ft8_for_state
+end module sfox_remove_ft8_module
+
+subroutine sfox_remove_ft8(dd,npts)
+    use sfox_remove_ft8_module, only: sfox_remove_ft8_for_state
+   implicit none
+   integer npts
+   real dd(npts)
+
+    call sfox_remove_ft8_for_state(dd=dd,npts=npts)
 end subroutine sfox_remove_ft8

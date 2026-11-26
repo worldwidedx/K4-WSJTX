@@ -1,12 +1,21 @@
-subroutine softsym(id2,npts8,nsps8,newdat,fpk,syncpk,snrdb,xdt,        &
+module jt9_soft_symbols
+  use jt9_downsample, only: jt9_downsample_workspace, downsam9
+  implicit none
+  private
+  public :: softsym
+contains
+
+subroutine softsym(workspace,id2,npts8,nsps8,fpk,syncpk,snrdb,xdt,        &
      freq,drift,a3,schk,i1SoftSymbols)
 
 ! Compute the soft symbols
 
   use timer_module, only: timer
 
+  implicit real(a-h,o-z), integer(i-n)
   parameter (NZ2=1512,NZ3=1360)
-  logical, intent(inout) :: newdat
+  type(jt9_downsample_workspace), intent(inout) :: workspace
+  integer*2, intent(in) :: id2(*)
   complex c2(0:NZ2-1)
   complex c3(0:NZ3-1)
   complex c5(0:NZ3-1)
@@ -20,8 +29,19 @@ subroutine softsym(id2,npts8,nsps8,newdat,fpk,syncpk,snrdb,xdt,        &
 
 ! Mix, low-pass filter, and downsample to 16 samples per symbol
   call timer('downsam9',0)
-  call downsam9(id2,npts8,nsps8,newdat,nspsd,fpk,c2)
+  call downsam9(workspace,id2,npts8,fpk,c2)
   call timer('downsam9',1)
+  if(all(c2.eq.(0.,0.))) then
+     syncpk=-1.
+     snrdb=-99.
+     xdt=0.
+     freq=fpk
+     drift=0.
+     a3=0.
+     schk=0.
+     i1SoftSymbols=0
+     return
+  endif
 
   call peakdt9(c2,nsps8,nspsd,c3,xdt)  !Find DT
 
@@ -52,3 +72,5 @@ subroutine softsym(id2,npts8,nsps8,newdat,fpk,syncpk,snrdb,xdt,        &
 
   return
 end subroutine softsym
+
+end module jt9_soft_symbols

@@ -1,6 +1,5 @@
-add_executable (test_q65_workspace
-  test_q65_workspace.f90
-  ${CMAKE_SOURCE_DIR}/lib/qra/q65/q65_workspace.f90)
+add_executable (test_q65_workspace test_q65_workspace.f90)
+wsjt_link_common_fortran (test_q65_workspace)
 
 add_test (NAME test_q65_workspace COMMAND test_q65_workspace)
 
@@ -21,7 +20,8 @@ add_test (NAME test_q65_decode_pipeline COMMAND test_q65_decode_pipeline)
 set_tests_properties (test_q65_decode_pipeline PROPERTIES
   COST 10
   # Allow for hosted ARM emulation without leaving the test unbounded.
-  TIMEOUT 180)
+  # The full-period spectra and drift cases added about a third to the runtime.
+  TIMEOUT 360)
 if (WSJT_ENABLE_TSAN)
   set_tests_properties (test_q65_decode_pipeline PROPERTIES
     ENVIRONMENT "TSAN_OPTIONS=${wsjt_tsan_fortran_options}")
@@ -33,3 +33,15 @@ target_include_directories (test_q65_llh_contracts PRIVATE
   ${CMAKE_SOURCE_DIR}/lib/qra/q65)
 target_link_libraries (test_q65_llh_contracts PRIVATE wsjt_cxx)
 add_test (NAME test_q65_llh_contracts COMMAND test_q65_llh_contracts)
+
+add_executable (test_q65_callers test_q65_callers.f90)
+wsjt_link_common_fortran (test_q65_callers)
+add_test (NAME test_q65_callers COMMAND test_q65_callers)
+
+add_executable (test_q65_caller_display test_q65_caller_display.f90)
+wsjt_link_common_fortran (test_q65_caller_display)
+add_test (NAME test_q65_caller_display COMMAND test_q65_caller_display)
+
+add_executable (test_q65_set_list_suffix test_q65_set_list_suffix.f90)
+wsjt_link_common_fortran (test_q65_set_list_suffix)
+add_test (NAME test_q65_set_list_suffix COMMAND test_q65_set_list_suffix)

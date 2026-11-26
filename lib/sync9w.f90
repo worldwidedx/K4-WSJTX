@@ -1,4 +1,4 @@
-subroutine sync9w(ss,nzhsym,lag1,lag2,ia,ib,ccfred,ccfblue,ipkbest,lagpk,nadd)
+subroutine sync9w(ss,nzhsym,lag1,lag2,ia,ib,icandidatea,icandidateb,ccfred,ccfblue,ipkbest,lagpk,nadd)
 
   include 'constants.f90'
   real ss(184,NSMAX)
@@ -12,10 +12,12 @@ subroutine sync9w(ss,nzhsym,lag1,lag2,ia,ib,ccfred,ccfblue,ipkbest,lagpk,nadd)
   do j=1,nzhsym
      sa=ss(j,1:NSMAX)
      call smo(sa,NSMAX,sb,nadd)
-     call smo(sb,NSMAX,sa,nadd)
+     call smo(sa,NSMAX,sb,nadd)
      ss(j,1:NSMAX)=sa
   enddo
 
+  lagpk=0
+  ccfblue=0.
   ipk=0
   ipkbest=0
   sbest=0.
@@ -23,9 +25,11 @@ subroutine sync9w(ss,nzhsym,lag1,lag2,ia,ib,ccfred,ccfblue,ipkbest,lagpk,nadd)
   df=12000.0/16384.0
 
   do i=ia,ib                                 !Loop over specified freq range
-     ss1=ss(1:184,i)                         !Symbol amplitudes at this freq
+     ss1=0.
+     ss1(1:nzhsym)=ss(1:nzhsym,i)           !Available symbol amplitudes at this freq
      call pctile(ss1,nzhsym,50,xmed)         !Median level at this freq
-     ss1=ss1/xmed - 1.0
+     if(xmed.le.0.) cycle
+     ss1(1:nzhsym)=ss1(1:nzhsym)/xmed - 1.0
 
      smax=0.                                 !Find DT in specified range
      do lag=lag1,lag2
@@ -45,13 +49,14 @@ subroutine sync9w(ss,nzhsym,lag1,lag2,ia,ib,ccfred,ccfblue,ipkbest,lagpk,nadd)
      enddo
 
      ccfred(i)=smax                        !Best at this freq, over all lags
-     if(smax.gt.sbest) then
+     if(i.ge.icandidatea .and. i.le.icandidateb .and. smax.gt.sbest) then
         sbest=smax
         ipkbest=ipk
         ss1save=ss1
      endif
   enddo
 
+  if(ipkbest.eq.0) return
   call pctile(ccfred(ia),ib-ia+1,50,xmed)
   if(xmed.le.0.0) xmed=1.0
   ccfred=ccfred/xmed

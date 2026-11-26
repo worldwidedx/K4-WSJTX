@@ -2,255 +2,116 @@ module display_mod
   implicit none
 contains
 
-subroutine display(nkeep, ftol)
+subroutine display(nkeep, ftol, nutc)
   use stdout_channel_mod, only: write_stdout
-  use iso_fortran_env, only: real64
+  use message_history_mod, only: message_record, expire_messages, recent_messages
   use indexx_mod, only: indexx
-  use debug_log, only: dbg, itoa, rtoa
-  use sec_midn_mod, only: sec_midn
   implicit none
 
   ! Arguments
   integer, intent(in) :: nkeep
   real,    intent(in) :: ftol
+  integer, intent(in) :: nutc
 
-  ! Parameters
-  integer, parameter :: MAXLINES = 400
-  integer, parameter :: MX       = 400
-  integer, parameter :: MAXCALLS = 500
+  ! A busy band may retain more history than the Messages window can display.
+  integer, parameter :: MAXLINES = 800
 
-  ! Locals
-  integer         :: indx(MAXLINES), indx2(MX)
-  character(len=83)  :: line(MAXLINES), line2(MX), line3(MAXLINES)
+  ! Keep large buffers off the decoder thread's stack.
+  integer, save   :: indx(MAXLINES), group_order(MAXLINES), call_order(MAXLINES)
+  character(len=83), save :: line(MAXLINES)
   character(len=63)  :: out, out0
-  character(len=3)   :: cfreq0
-  character(len=6)   :: callsign, callsign0
-  ! N6NU 2026-05-24: bumped 12 ? 18 to carry the 5-char ndf (signed
-  ! Hz offset within kHz) alongside cfreq0 in the "&" bandmap line.
-  ! The C++ overlay handler (mainwindow.cpp processStdOut) reads
-  ! both fields and places the tick at nkHz + ndf/1000 instead of
-  ! integer kHz, which was up to �500 Hz off on signals with
-  ! non-zero ndf.
-  character(len=18)  :: freqcall(MAXCALLS)
+  ! 12 characters hold the longest compound calls (e.g. ER/EA8DBM, up to 11)
+  ! plus a trailing space.
+  character(len=12)  :: callsign, seen_calls(MAXLINES)
+  ! Then the record's mode (# JT65, : Q65) and UTC (hhmm), so the GUI can
+  ! color the waterfall callsign label and age it from the call's latest
+  ! decode rather than from each redisplay.
+  character(len=28)  :: freqcall(MAXLINES)
 
-  real            :: freqkHz(MAXLINES)
-  integer         :: utc(MAXLINES), utc2(MX), utcz
-  real(real64)    :: f0
+  real, save      :: freqkHz(MAXLINES), call_freqkHz(MAXLINES)
+  type(message_record), allocatable :: records(:)
+  integer         :: now
 
   character(len=83)  :: livecq2, livecq3
   character(len=128) :: linenew
   character(len=64)  :: linenew2
 
-  integer :: io_status
-  integer :: ndf, nh, nm
-  integer :: i, j, j0, k, k3, kz
+  integer :: i, j, group_first, group_last, group_size
   integer :: nz, nage, iage, nquad
-  integer :: i0, i1, i2, len, nc, m, nstart
+  integer :: i1, i2, len, nc
 
   ! Initialize some scalars/arrays defensively
   out0      = ' '
-  cfreq0    = ' '
-  callsign0 = ' '
   freqcall  = '            '
 
-  ! TEMP diagnostic 2026-09-10 for the "decode reaches map65_rx.log but not
-  ! the Messages window" investigation -- this is the entry point for the
-  ! ENTIRE "@"/"&" (Messages/Band Map window) pipeline; nothing gets to
-  ! those windows except through here.
-  call dbg('display: ENTRY at t=' // rtoa(sec_midn()) // ' nkeep=' // itoa(nkeep))
-
-  !------------------ Read and filter valid lines ---------------------
-  rewind(26)
-  nz = 0
-
-  do i = 1, MAXLINES
-     read(26,1010,end=10) line(i)
-1010 format(a83)
-     read(line(i),1020,iostat=io_status) f0, ndf, nh, nm
-1020 format(f8.3,i5,25x,i3,i2)
-
-     if (io_status /= 0) cycle
-
-     utc(i)     = 60*nh + nm
-     freqkHz(i) = 1000.d0*(f0 - 144.d0) + 0.001d0*ndf
-  enddo
-
-10 backspace(26)
-  nz = i -1
-  call dbg('display: read from unit 26, raw record count nz=' // itoa(nz))
-  if (nz >= 1) utcz = utc(nz)
-  nz=nz-1
+  call expire_messages(nutc, nkeep)
+  call recent_messages(MAXLINES, records)
+  call write_stdout('<Map65DisplayBegin>'//new_line('a'))
+  nz = size(records)
   if (nz < 1) then
-     call dbg('display: EARLY RETURN, nz<1 after decrement -- no records to emit')
      return
   endif
+
+  now = 60*(nutc/100) + mod(nutc, 100)
   nquad = max(nkeep/4, 3)
   do i = 1, nz
-     nage = utcz - utc(i)
-     if (nage < 0) nage = nage + 1440
+     line(i) = records(i)%line
+     freqkHz(i) = records(i)%frequency_khz
+     nage = modulo(now - records(i)%utc, 1440)
      iage = nage / nquad
      write(line(i)(79:80),1021) iage
 1021 format(i2)
   enddo
-
-  nage = utcz - utc(1)
-  if (nage < 0) nage = nage + 1440
-  if (nage > nkeep) then
-     do i = 1, nz
-        nage = utcz - utc(i)
-        if (nage < 0) nage = nage + 1440
-        if (nage <= nkeep) go to 20
-     enddo
-20   i0 = i
-     nz = nz - i0 + 1
-     rewind(26)
-     if (nz < 1) return
-     do i = 1, nz
-        j = i + i0 - 1
-        line(i)    = line(j)
-        utc(i)     = utc(j)
-        freqkHz(i) = freqkHz(j)
-        write(26,1022) line(i)
-1022    format(a83)
-     enddo
-     ! Rewriting fewer records than the file previously held does not
-     ! shrink it -- the old, longer tail stays on disk past this point.
-     ! Without truncating here, a later rewind+read pass reads straight
-     ! through into that stale leftover data and resurrects entries this
-     ! trim was supposed to drop for good, causing unbounded growth of
-     ! the Messages window over a long session regardless of nkeep.
-     ! endfile leaves the file positioned after the EOF marker it just
-     ! wrote, and Fortran forbids further sequential I/O from there
-     ! without repositioning first -- backspace moves back onto that
-     ! marker so the next append (map65a.f90/q65b.F90) can write there.
-     endfile(26)
-     backspace(26)
-  endif
-
-  flush(26)
   call indexx(freqkHz, nz, indx)
 
-  nstart = 1
-  k3     = 0
-  k      = 1
-  m      = indx(1)
+  group_first = 1
+  do while (group_first <= nz)
+     group_last = group_first
+     do while (group_last < nz)
+        if (freqkHz(indx(group_last+1)) - freqkHz(indx(group_last)) > 2.0*ftol) exit
+        group_last = group_last + 1
+     enddo
 
-  if (m < 1 .or. m > MAXLINES) then
-     write(linenew,'(A,1X,I0,1X,I0)') 'Error in display.f90:', nz, m
-     call write_stdout(trim(linenew)//new_line('a'))
-     m = 1
-  endif
-  line2(1) = line(m)
-  utc2(1)  = utc(m)
-  do i = 2, nz
-     j0 = indx(i-1)
-     j  = indx(i)
-     if (freqkHz(j) - freqkHz(j0) > 2.0*ftol) then
-        if (nstart == 0) then
-           k = k + 1
-           line2(k) = ""
-           utc2(k)  = -1
-        endif
-        kz = k
-        if(nstart.eq.1) then
-           call indexx(float(utc2(1:kz)), kz, indx2)
-           k3=0
-        do k = 1, kz
-           k3 = min(k3+1, MAXLINES)
-           line3(k3) = line2(indx2(k))
-        enddo
-        nstart = 0
-        else
-           call indexx(float(utc2(1:kz)),kz,indx2)
-           do k=1,kz
-              k3=min(k3+1,400)
-              line3(k3)=line2(indx2(k))
-           enddo
-        endif
-        k= 0
-     endif
-     if (i == nz) then
-        k = k + 1
-        line2(k) = ""
-        utc2(k)  = -1
-     endif
-     k = k + 1
-     line2(k) = line(j)
-     utc2(k)  = utc(j)
-     j0=j
-  enddo
-  kz = k
-  call indexx(float(utc2(1:kz)), kz, indx2)
-  do k = 1, kz
-     k3 = min(k3+1, MAXLINES)
-     line3(k3) = line2(indx2(k))
+     group_size = group_last - group_first + 1
+     call indexx(real(indx(group_first:group_last)), group_size, group_order)
+     do i = 1, group_size
+        j = indx(group_first + group_order(i) - 1)
+        out = line(j)(1:13)//line(j)(28:31)//line(j)(39:45)// &
+              line(j)(35:38)//line(j)(46:80)
+        if (out(6:8) == '   ') cycle
+        if (out(19:22) == out0(19:22) .and. out(31:55) == out0(31:55) .and. &
+            out(6:8) == out0(6:8)) cycle
+        livecq2 = line(j)
+        livecq3 = out(1:61)//' '//livecq2(23:27)//' '//livecq2(79:83)
+        write(linenew,'("@",A)') trim(livecq3)
+        call write_stdout(trim(linenew)//new_line('a'))
+        out0 = out
+     enddo
+     group_first = group_last + 1
   enddo
 
-  rewind 19
-  rewind 20
-  cfreq0='   '
   nc = 0
-  callsign0='      '
-  call dbg('display: about to walk k3=' // itoa(k3) // ' sorted records for "@" emission')
-  do k = 1, k3
-     out = line3(k)(1:13)//line3(k)(28:31)//line3(k)(39:45)// &
-           line3(k)(35:38)//line3(k)(46:80)
-     livecq2 = line3(k)
-     if (out(6:8) /= '   ') then
-        cfreq0 = out(6:8)
-
-! Suppress listing duplicate (same time, decoded message, and frequency)
-        if (out(19:22) /= out0(19:22) .or. out(31:55) /= out0(31:55) .or. &
-            out(6:8) /= out0(6:8)) then
-           livecq3 = out(1:61)//' '//livecq2(23:27)//' '//livecq2(79:83)
-           write(linenew,'("@",A)') trim(livecq3)
-           call write_stdout(trim(linenew)//new_line('a'))
-           call dbg('display: k=' // itoa(k) // ' "@" EMITTED freq=' // out(6:8) // &
-                    ' utc=' // out(19:22) // ' msg="' // trim(out(31:55)) // '"')
-           out0 = out
-        else
-           call dbg('display: k=' // itoa(k) // ' "@" SUPPRESSED (matches out0) freq=' // out(6:8) // &
-                    ' utc=' // out(19:22) // ' msg="' // trim(out(31:55)) // &
-                    '" -- out0 was freq=' // out0(6:8) // ' utc=' // out0(19:22) // &
-                    ' msg="' // trim(out0(31:55)) // '"')
-        endif
-
-        i1 = index(out(31:), ' ')
-        callsign = out(i1+31:)
-        i2 = index(callsign, ' ')
-        if (i2 > 1) callsign(i2:) = '      '
-        if (callsign /= '      ' .and. callsign /= callsign0) then
-           len = i2 - 1
-           if (len < 0) len = 6
-           if (len >= 3) then
-              if (nc < MAXCALLS) nc = nc + 1
-              freqcall(nc) = cfreq0//line3(k)(9:13)//' '//callsign//line3(k)(79:80)
-              callsign0=callsign
-           endif
-        endif
-        if (callsign /= '      ' .and. callsign == callsign0) then
-           if (nc > 0 .and. nc <= MAXCALLS) then
-              freqcall(nc) = cfreq0//line3(k)(9:13)//' '//callsign//line3(k)(79:80)
-           endif
-        endif
-     else
-        call dbg('display: k=' // itoa(k) // ' SKIPPED entirely (out(6:8) blank -- not a frequency record)')
-     endif
+  do i = nz, 1, -1
+     out = line(i)(1:13)//line(i)(28:31)//line(i)(39:45)// &
+           line(i)(35:38)//line(i)(46:80)
+     if (out(6:8) == '   ') cycle
+     i1 = index(out(31:), ' ')
+     if (i1 == 0) cycle
+     callsign = out(i1+31:)
+     i2 = index(callsign, ' ')
+     if (i2 > 1) callsign(i2:) = ' '
+     len = i2 - 1
+     if (len < 0) len = 6
+     if (len < 3 .or. callsign == ' ') cycle
+     if (any(seen_calls(1:nc) == callsign)) cycle
+     nc = nc + 1
+     seen_calls(nc) = callsign
+     freqcall(nc) = out(6:8)//line(i)(9:13)//' '//callsign//line(i)(79:81)//line(i)(40:43)
+     call_freqkHz(nc) = freqkHz(i)
   enddo
-  call dbg('display: done, nc(bandmap entries)=' // itoa(nc))
-
-if(nc.lt.MAXCALLS) nc=nc+1
-freqcall(nc)='            '
-
-if(nc.lt.MAXCALLS) nc=nc+1
-freqcall(nc)='            '
-
-if (nc+1 <= MAXCALLS) freqcall(nc+1) = '            '
-if (nc+2 <= MAXCALLS) freqcall(nc+2) = '            '
-
-
+  if (nc > 0) call indexx(call_freqkHz, nc, call_order)
   do i = 1, nc
-     write(linenew2,'("&",A)') trim(freqcall(i))
+     write(linenew2,'("&",A)') trim(freqcall(call_order(i)))
      call write_stdout(trim(linenew2)//new_line('a'))
   enddo
 

@@ -1,12 +1,35 @@
 #include <QApplication>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QCoreApplication>
+#include <QDialog>
+#include <QDir>
+#include <QFile>
 #include <QMouseEvent>
+#include <QMessageBox>
+#include <QNetworkAccessManager>
 #include <QScrollBar>
+#include <QSettings>
+#include <QSignalSpy>
+#include <QStandardPaths>
+#include <QTemporaryDir>
 #include <QTest>
+#include <QTimer>
 #include <QTextBlock>
 #include <QTextCursor>
 #include <QToolButton>
+#include <QTranslator>
+
+#include <memory>
 
 #include "commons.h"
+#include "Configuration.hpp"
+#include "MetaDataRegistry.hpp"
+#include "JttyReceiveLine.hpp"
+#include "Decoder/decodedtext.h"
+#include "logbook/logbook.h"
+#include "models/DecodeHighlightingModel.hpp"
+#include "widgets/JttyMessages.hpp"
 #include "widgets/displaytext.h"
 
 namespace
@@ -30,11 +53,25 @@ class TestDisplayText final
 {
   Q_OBJECT
 
+  QTemporaryDir directory_;
+  QNetworkAccessManager network_;
+  std::unique_ptr<QSettings> settings_;
+  std::unique_ptr<Configuration> configuration_;
+
 private:
   static QPoint positionWithin (DisplayText const& display, QString const& text)
   {
     auto cursor = display.document ()->find (text);
     cursor.setPosition (cursor.selectionStart () + text.size () / 2);
+    return display.cursorRect (cursor).center ();
+  }
+
+  static QPoint positionWithinPart (DisplayText const& display, QString const& token,
+                                    QString const& part)
+  {
+    auto cursor = display.document ()->find (token);
+    auto const position = cursor.selectionStart () + token.indexOf (part) + part.size () / 2;
+    cursor.setPosition (position);
     return display.cursorRect (cursor).center ();
   }
 
@@ -75,7 +112,333 @@ private:
     return display.cursorForPosition (QPoint {1, 1}).block ().text ();
   }
 
+  static QString topVisibleDecode (DisplayText const& display)
+  {
+    return display.cursorForPosition (QPoint {1, 6}).block ().text ();
+  }
+
+  static void addPeriod (DisplayText& display, QString const& period, int count)
+  {
+    display.new_period ();
+    for (int i = 0; i < count; ++i)
+      {
+        display.insertText (QString {"%1 decode %2"}.arg (period).arg (i, 2, 10, QLatin1Char {'0'}));
+      }
+    QApplication::processEvents ();
+  }
+
+  void createConfiguration (bool decodes_from_top, bool include_wae = false, bool show_countries = false)
+  {
+    configuration_.reset ();
+    settings_.reset (new QSettings {directory_.filePath ("settings.ini"), QSettings::IniFormat});
+    settings_->clear ();
+    settings_->setValue ("Configuration/DecodesFromTop", decodes_from_top);
+    settings_->setValue ("Configuration/IncludeWAEEntities", include_wae);
+    settings_->setValue ("Configuration/AlwaysShowCountryNames", show_countries);
+    if (show_countries)
+      {
+        auto highlights = DecodeHighlightingModel::default_items ();
+        for (auto& highlight : highlights)
+          highlight.enabled_ = highlight.type_ == DecodeHighlightingModel::Highlight::CQ;
+        settings_->setValue ("Configuration/DecodeHighlighting", QVariant::fromValue (highlights));
+      }
+    settings_->sync ();
+    configuration_.reset (new Configuration {&network_, QDir {directory_.path ()}, settings_.get (), nullptr});
+  }
+
+  bool enableDecodesFromTopInSettings ()
+  {
+    QDialog * dialog {};
+    for (auto * widget : QApplication::topLevelWidgets ())
+      {
+        auto * candidate = qobject_cast<QDialog *> (widget);
+        if (candidate && candidate->findChild<QCheckBox *> ("decodes_from_top_check_box"))
+          {
+            dialog = candidate;
+            break;
+          }
+      }
+    if (!dialog) return false;
+
+    auto * checkbox = dialog->findChild<QCheckBox *> ("decodes_from_top_check_box");
+    checkbox->setChecked (true);
+    auto ensure_option = [dialog] (char const * object_name, char const * option) {
+      if (auto * combo = dialog->findChild<QComboBox *> (object_name);
+          combo && combo->currentIndex () < 0)
+        {
+          combo->addItem (option);
+        }
+    };
+    ensure_option ("sound_input_combo_box", "Test input");
+    ensure_option ("sound_input_channel_combo_box", "Mono");
+    ensure_option ("sound_output_combo_box", "Test output");
+
+    QTimer dismiss_message;
+    dismiss_message.setSingleShot (true);
+    connect (&dismiss_message, &QTimer::timeout, [] {
+      for (auto * widget : QApplication::topLevelWidgets ())
+        {
+          if (auto * message = qobject_cast<QMessageBox *> (widget))
+            {
+              message->accept ();
+            }
+        }
+    });
+    dismiss_message.start (1000);
+    auto const invoked = QMetaObject::invokeMethod (dialog, "accept", Qt::DirectConnection);
+    dismiss_message.stop ();
+    return invoked && configuration_->decodes_from_top ();
+  }
+
 private slots:
+  void workedFactsRespectSharedMatchingOptions_data ()
+  {
+    QTest::addColumn<bool> ("byMode");
+    QTest::addColumn<bool> ("includeWae");
+    for (bool byMode : {false, true})
+      for (bool includeWae : {false, true})
+        QTest::newRow (qPrintable (QString {"mode-%1-wae-%2"}.arg (byMode).arg (includeWae)))
+          << byMode << includeWae;
+  }
+
+  void workedFactsRespectSharedMatchingOptions ()
+  {
+    QFETCH (bool, byMode);
+    QFETCH (bool, includeWae);
+    createConfiguration (false, includeWae);
+    configuration_.reset ();
+    settings_->setValue ("Configuration/HighlightByMode", byMode);
+    configuration_.reset (new Configuration {&network_, QDir {directory_.path ()}, settings_.get (), nullptr});
+    LogBook logbook {configuration_.get ()};
+    QSignalSpy loaded {&logbook, &LogBook::finished_loading};
+    QTRY_VERIFY (!loaded.isEmpty ());
+    QVERIFY (logbook.add ("TA2ABC", "KN40", "20m", "FT8", QByteArray {}));
+
+    auto const sameCall = classifyDecode (DecodedText {"060522 -10  0.3  815 ~ CQ TA2ABC KN40"},
+                                           "FT4", "20m", logbook);
+    QVERIFY (sameCall.workedOnBand);
+    QCOMPARE (sameCall.workedOnBand->call, !byMode);
+    auto const otherEntity = classifyDecode (DecodedText {"060522 -10  0.3  815 ~ CQ TA1ABC KN40"},
+                                              "FT4", "20m", logbook);
+    QVERIFY (otherEntity.worked);
+    QCOMPARE (otherEntity.worked->entity, !byMode && !includeWae);
+  }
+
+  void japaneseCatalogPreservesDecodeFacts ()
+  {
+    createConfiguration (false);
+    LogBook logbook {configuration_.get ()};
+    QSignalSpy loaded {&logbook, &LogBook::finished_loading};
+    QTRY_VERIFY (!loaded.isEmpty ());
+    DecodedText cq {"060522 -10  0.3  815 ~ CQ TA2ABC KN40"};
+    auto const original = classifyDecode (cq, "FT4", "20m", logbook);
+    QTranslator translator;
+    QVERIFY (translator.load (QString::fromUtf8 (WSJT_JAPANESE_QM)));
+    QCoreApplication::installTranslator (&translator);
+    QVERIFY (DecodeHighlightingModel::highlight_name (DecodeHighlightingModel::Highlight::DXCC) != "New DXCC");
+    auto const translated = classifyDecode (cq, "FT4", "20m", logbook);
+    QCOMPARE (translated.sender, original.sender);
+    QCOMPARE (translated.grid, original.grid);
+    QVERIFY (translated.highlights == original.highlights);
+    QCOMPARE (translated.worked->entity, original.worked->entity);
+    QCOMPARE (translated.workedOnBand->call, original.workedOnBand->call);
+    DisplayText display;
+    display.set_configuration (configuration_.get ());
+    QVERIFY (display.displayDecodedText (cq, "W1AAA", "FT4", true, logbook, "20m",
+                                         false, false, false, 0.0, false, -99, {}, false, &translated));
+    auto const withFacts = display.toPlainText ();
+    display.clear ();
+    QVERIFY (display.displayDecodedText (cq, "W1AAA", "FT4", true, logbook, "20m"));
+    QCOMPARE (display.toPlainText (), withFacts);
+    QCoreApplication::removeTranslator (&translator);
+  }
+
+  void classificationUsesIdentityAndHasNoWidgetHistory ()
+  {
+    class Translator final : public QTranslator
+    {
+      QString translate (char const *, char const * source, char const *, int) const override
+      {
+        return QString {source}.startsWith ("New ") ? QStringLiteral ("Duplicate translated label") : QString {};
+      }
+    } translator;
+    createConfiguration (false);
+    LogBook logbook {configuration_.get ()};
+    DisplayText display;
+    display.set_configuration (configuration_.get ());
+    DecodedText cq {"060522 -10  0.3  815 ~ CQ TA2ABC KN40"};
+    QVERIFY (display.displayDecodedText (cq, "W1AAA", "FT4", true, logbook, "20m"));
+    auto const facts = classifyDecode (cq, "FT4", "20m", logbook);
+    QVERIFY (facts.worked);
+    auto const original = display.toPlainText ();
+    QCoreApplication::installTranslator (&translator);
+    QCOMPARE (DecodeHighlightingModel::highlight_name (DecodeHighlightingModel::Highlight::DXCC),
+              QStringLiteral ("Duplicate translated label"));
+    display.clear ();
+    QVERIFY (display.displayDecodedText (cq, "W1AAA", "FT4", true, logbook, "20m"));
+    auto const translated = classifyDecode (cq, "FT4", "20m", logbook);
+    QVERIFY (translated.highlights == facts.highlights);
+    QCOMPARE (translated.sender, facts.sender);
+    QCOMPARE (translated.grid, facts.grid);
+    QCOMPARE (translated.worked->entity, facts.worked->entity);
+    QCOMPARE (translated.workedOnBand->call, facts.workedOnBand->call);
+    QCOMPARE (display.toPlainText (), original);
+    DecodedText reply {"060522 -10  0.3  815 ~ W1AAA TA2ABC -10"};
+    QVERIFY (!display.displayDecodedText (reply, "W1AAA", "FT4", true, logbook, "20m", false, true));
+    auto const missing = classifyDecode (DecodedText {"."}, "FT4", "20m", logbook);
+    QVERIFY (!missing.worked);
+    QVERIFY (!missing.workedOnBand);
+    QVERIFY (missing.highlights.empty ());
+    QVERIFY (missing.sender.isEmpty ());
+    QVERIFY (display.displayDecodedText (cq, "W1AAA", "FT4", false, logbook, "20m"));
+    QCoreApplication::removeTranslator (&translator);
+  }
+
+  void workedStatusDoesNotFollowWinningHighlight ()
+  {
+    createConfiguration (false);
+    configuration_.reset ();
+    auto highlights = DecodeHighlightingModel::default_items ();
+    for (auto& highlight : highlights)
+      highlight.enabled_ = highlight.type_ == DecodeHighlightingModel::Highlight::DXCC
+        || highlight.type_ == DecodeHighlightingModel::Highlight::CQ;
+    settings_->setValue ("Configuration/DecodeHighlighting", QVariant::fromValue (highlights));
+    configuration_.reset (new Configuration {&network_, QDir {directory_.path ()}, settings_.get (), nullptr});
+    LogBook logbook {configuration_.get ()};
+    QSignalSpy loaded {&logbook, &LogBook::finished_loading};
+    QTRY_VERIFY (!loaded.isEmpty ());
+    DisplayText display;
+    display.set_configuration (configuration_.get ());
+    DecodedText cq {"060522 -10  0.3  815 ~ CQ TA2ABC KN40"};
+    QVERIFY (display.displayDecodedText (cq, "W1AAA", "FT4", true, logbook, "20m"));
+    auto facts = classifyDecode (cq, "FT4", "20m", logbook);
+    auto priority = [&] {
+      return DecodeHighlightingModel::resolve_colors (highlights, facts.highlights, {}, {}).type_;
+    };
+    QVERIFY (priority () == DecodeHighlightingModel::Highlight::DXCC);
+    QVERIFY (facts.workedOnBand);
+    QVERIFY (!facts.workedOnBand->call);
+    QVERIFY (logbook.add ("TA2ABC", "KN40", "20m", "FT4", QByteArray {}));
+    QVERIFY (display.displayDecodedText (cq, "W1AAA", "FT4", true, logbook, "20m"));
+    facts = classifyDecode (cq, "FT4", "20m", logbook);
+    QVERIFY (priority () == DecodeHighlightingModel::Highlight::CQ);
+    QVERIFY (facts.workedOnBand->call);
+    QVERIFY (display.displayDecodedText (cq, "W1AAA", "FT4", true, logbook, "40m"));
+    facts = classifyDecode (cq, "FT4", "40m", logbook);
+    QVERIFY (!facts.workedOnBand->call);
+    facts = classifyDecode (cq, "FT4", "", logbook);
+    QVERIFY (!facts.workedOnBand);
+  }
+
+  void initTestCase ()
+  {
+    register_types ();
+    QStandardPaths::setTestModeEnabled (true);
+    QCoreApplication::setApplicationName ("test_displaytext");
+    QVERIFY (directory_.isValid ());
+    QDir data_dir {QStandardPaths::writableLocation (QStandardPaths::DataLocation)};
+    QVERIFY (QDir {}.mkpath (data_dir.path ()));
+    QFile countries {data_dir.filePath ("cty.dat")};
+    QVERIFY (countries.open (QIODevice::WriteOnly | QIODevice::Text));
+    QByteArray const contents {
+      "Asiatic Turkey:20:39:AS:39:-35:-3:TA\nTA;\n"
+      "European Turkey:20:39:EU:41:-28:-3:*TA1\nTA1;\n"
+      "Asiatic Russia:17:30:AS:55:-80:-6:UA9\nUA9;\n"};
+    QCOMPARE (countries.write (contents), qint64 {contents.size ()});
+  }
+
+  void cleanupTestCase ()
+  {
+    configuration_.reset ();
+    QFile::remove (QDir {QStandardPaths::writableLocation (QStandardPaths::DataLocation)}.filePath ("cty.dat"));
+  }
+
+  void countryLabelsRespectEntityView_data ()
+  {
+    QTest::addColumn<bool> ("include_wae");
+    QTest::addColumn<bool> ("cq");
+    QTest::addColumn<bool> ("principal_prefix");
+    QTest::addColumn<QString> ("call");
+    QTest::addColumn<QString> ("expected");
+    for (bool include_wae : {false, true})
+      for (bool cq : {false, true})
+        for (bool principal_prefix : {false, true})
+          for (auto const * call : {"TA1ABC", "TA2ABC", "UA9ABC"})
+            {
+              bool const european_turkey = QString {call}.startsWith ("TA1");
+              bool const russia = QString {call}.startsWith ("UA9");
+              QString const expected = principal_prefix
+                ? (russia ? "UA9" : include_wae && european_turkey ? "TA1" : "TA")
+                : (russia ? "AS Russia" : !include_wae ? "Turkey" : european_turkey ? "EU Turkey" : "AS Turkey");
+              auto const row = QString {"%1-%2-%3-%4"}.arg (include_wae ? "WAE" : "DXCC")
+                .arg (cq ? "CQ" : "reply").arg (principal_prefix ? "prefix" : "name").arg (call);
+              QTest::newRow (qPrintable (row)) << include_wae << cq << principal_prefix << QString {call} << expected;
+            }
+  }
+
+  void countryLabelsRespectEntityView ()
+  {
+    QFETCH (bool, include_wae);
+    QFETCH (bool, cq);
+    QFETCH (bool, principal_prefix);
+    QFETCH (QString, call);
+    QFETCH (QString, expected);
+    createConfiguration (false, include_wae, true);
+    LogBook logbook {configuration_.get ()};
+    DecodedText decoded {QString {"060522 -10  0.3  815 ~ %1 %2 %3"}
+      .arg (cq ? "CQ" : "W1AAA").arg (call).arg (cq ? "KN40" : "-10")};
+    QString sender;
+    QString grid;
+    decoded.deCallAndGrid (sender, grid);
+    QCOMPARE (sender, call);
+
+    DisplayText display;
+    display.set_configuration (configuration_.get ());
+    QVERIFY (display.displayDecodedText (decoded, "W1AAA", "FT8", true, logbook, "20m", principal_prefix));
+    auto const rendered = display.toPlainText ();
+    QVERIFY (rendered.startsWith (decoded.string ()));
+    QCOMPARE (rendered.mid (decoded.string ().size ()).trimmed (), expected);
+  }
+
+  void jttyTransmitHighlightDoesNotLeakIntoNewLines_data ()
+  {
+    QTest::addColumn<QString> ("message");
+    QTest::newRow ("single line") << QString {"CQ TEST"};
+    QTest::newRow ("multiple lines") << QString {"CQ TEST\nSECOND LINE"};
+    QTest::newRow ("wrapped line") << QString (90, QLatin1Char {'A'});
+  }
+
+  void jttyTransmitHighlightDoesNotLeakIntoNewLines ()
+  {
+    QFETCH (QString, message);
+    DisplayText display;
+    JttyReceiveLine sent;
+    JttyReceiveLine::Presentation const presentation {
+      0, 1, QDateTime {}, 0.0, 1500, message, -10, true, Qt::yellow, Qt::black};
+    auto const cursor = sent.render (*display.document (), presentation, {}, display.contentFont ());
+    QVERIFY (!cursor.isNull ());
+    display.setTextCursor (cursor);
+    auto const transmitted = display.document ()->toPlainText ();
+
+    display.insertText ("FT8 received message", Qt::green);
+    auto received = display.document ()->lastBlock ();
+    QCOMPARE (received.blockFormat ().background (), QBrush {Qt::green});
+    QCOMPARE (received.charFormat ().background ().style (), Qt::NoBrush);
+    for (auto fragment = received.begin (); !fragment.atEnd (); ++fragment)
+      {
+        QCOMPARE (fragment.fragment ().charFormat ().background ().style (), Qt::NoBrush);
+      }
+
+    display.insertText ("Another FT8 received message");
+    received = display.document ()->lastBlock ();
+    QCOMPARE (received.blockFormat ().background ().style (), Qt::NoBrush);
+    QCOMPARE (received.charFormat ().background ().style (), Qt::NoBrush);
+    QVERIFY (display.toPlainText ().startsWith (transmitted + '\n'));
+    QTextCursor sent_text {display.document ()};
+    sent_text.movePosition (QTextCursor::NextCharacter, QTextCursor::KeepAnchor);
+    QCOMPARE (sent_text.charFormat ().background (), QBrush {Qt::yellow});
+  }
+
   void insertionDoesNotRetargetDoubleClick ()
   {
     DisplayText display;
@@ -164,6 +527,99 @@ private slots:
 
     QCOMPARE (selected_line, QString {"N0CALL direct target"});
     QCOMPARE (selected_word, QString {"N0CALL"});
+  }
+
+  void doubleClickSelectsQtWordsWithinSlashedCallsigns ()
+  {
+    DisplayText display;
+    display.resize (640, 240);
+    display.insertText ("N0LL/P\nVE3/W1AW\nW1AW/QRP\nN0LL/P N0LL/M");
+    display.show ();
+    QApplication::processEvents ();
+
+    QString selected_word;
+    QString clicked_token;
+    connect (&display, &DisplayText::selectCallsign,
+             [&] (QString const&, QString const& word, Qt::KeyboardModifiers,
+                  QString const& token) {
+               selected_word = word;
+               clicked_token = token;
+             });
+
+    sendDoubleClick (display, positionWithinPart (display, "N0LL/P", "N0LL"));
+    QCOMPARE (selected_word, QString {"N0LL"});
+    QCOMPARE (clicked_token, QString {"N0LL/P"});
+    sendDoubleClick (display, positionWithinPart (display, "N0LL/P", "P"));
+    QCOMPARE (selected_word, QString {"P"});
+    QCOMPARE (clicked_token, QString {"N0LL/P"});
+
+    sendDoubleClick (display, positionWithinPart (display, "VE3/W1AW", "VE3"));
+    QCOMPARE (selected_word, QString {"VE3"});
+    QCOMPARE (clicked_token, QString {"VE3/W1AW"});
+    sendDoubleClick (display, positionWithinPart (display, "VE3/W1AW", "W1AW"));
+    QCOMPARE (selected_word, QString {"W1AW"});
+    QCOMPARE (clicked_token, QString {"VE3/W1AW"});
+
+    sendDoubleClick (display, positionWithinPart (display, "W1AW/QRP", "W1AW"));
+    QCOMPARE (selected_word, QString {"W1AW"});
+    QCOMPARE (clicked_token, QString {"W1AW/QRP"});
+    sendDoubleClick (display, positionWithinPart (display, "W1AW/QRP", "QRP"));
+    QCOMPARE (selected_word, QString {"QRP"});
+    QCOMPARE (clicked_token, QString {"W1AW/QRP"});
+
+    sendDoubleClick (display, positionWithinPart (display, "N0LL/M", "N0LL"));
+    QCOMPARE (selected_word, QString {"N0LL"});
+    QCOMPARE (clicked_token, QString {"N0LL/M"});
+  }
+
+  void jttyClickTrimsAttachedChatPunctuation ()
+  {
+    DisplayText display;
+    display.resize (640, 240);
+    display.insertText ("(N0LL/P),: VE3/W1AW; W1AW/QRP. K1ABC, W9XYZ");
+    display.show ();
+    QApplication::processEvents ();
+
+    QString clicked_token;
+    connect (&display, &DisplayText::selectCallsign,
+             [&] (QString const&, QString const&, Qt::KeyboardModifiers,
+                  QString const& token) { clicked_token = token; });
+
+    sendDoubleClick (display, positionWithinPart (display, "(N0LL/P),:", "N0LL"));
+    QCOMPARE (clicked_token, QString {"(N0LL/P),:"});
+    QCOMPARE (Jtty::trimJttyChatPunctuation (clicked_token), QString {"N0LL/P"});
+
+    sendDoubleClick (display, positionWithinPart (display, "VE3/W1AW;", "VE3"));
+    QCOMPARE (Jtty::trimJttyChatPunctuation (clicked_token), QString {"VE3/W1AW"});
+
+    sendDoubleClick (display, positionWithinPart (display, "W1AW/QRP.", "QRP"));
+    QCOMPARE (Jtty::trimJttyChatPunctuation (clicked_token), QString {"W1AW/QRP"});
+
+    sendDoubleClick (display, positionWithinPart (display, "K1ABC,", "K1ABC"));
+    QCOMPARE (Jtty::trimJttyChatPunctuation (clicked_token), QString {"K1ABC"});
+
+    sendDoubleClick (display, positionWithin (display, "W9XYZ"));
+    QCOMPARE (clicked_token, QString {"W9XYZ"});
+    QCOMPARE (Jtty::trimJttyChatPunctuation (clicked_token), QString {"W9XYZ"});
+  }
+
+  void standardDecodeClickKeepsExistingWordSelection ()
+  {
+    DisplayText display;
+    display.resize (640, 240);
+    display.insertText ("CQ K1ABC FN42");
+    display.show ();
+    QApplication::processEvents ();
+
+    QString selected_word;
+    connect (&display, &DisplayText::selectCallsign,
+             [&] (QString const&, QString const& word, Qt::KeyboardModifiers) {
+               selected_word = word;
+             });
+
+    sendDoubleClick (display, positionWithin (display, "K1ABC"));
+
+    QCOMPARE (selected_word, QString {"K1ABC"});
   }
 
   void eraseCancelsCapturedTarget ()
@@ -389,6 +845,89 @@ private slots:
 
     QCOMPARE (topVisibleLine (display), parked_line);
     QVERIFY (return_button->isVisible ());
+  }
+
+  void decodesFromTopKeepsFollowingAcrossPeriods ()
+  {
+    createConfiguration (true);
+    QVERIFY (configuration_->decodes_from_top ());
+
+    DisplayText display;
+    display.set_configuration (configuration_.get (), true);
+    display.resize (360, 140);
+    display.show ();
+    auto * return_button = display.findChild<QToolButton *> ("returnToLiveActivityButton");
+    QVERIFY (return_button);
+
+    addPeriod (display, "P0", 30);
+    addPeriod (display, "P1", 30);
+    addPeriod (display, "P2", 30);
+    QCOMPARE (topVisibleDecode (display), QString {"P2 decode 00"});
+
+    auto * scroll_bar = display.verticalScrollBar ();
+    auto const live_position = scroll_bar->value ();
+    scroll_bar->triggerAction (QAbstractSlider::SliderSingleStepAdd);
+    QApplication::processEvents ();
+
+    QVERIFY (scroll_bar->value () > live_position);
+    QVERIFY (topVisibleDecode (display).startsWith ("P2"));
+    QVERIFY (!return_button->isVisible ());
+
+    addPeriod (display, "P3", 10);
+
+    QCOMPARE (topVisibleDecode (display), QString {"P3 decode 00"});
+    QVERIFY (!return_button->isVisible ());
+  }
+
+  void rxFrequencyKeepsStickyScrollingWithDecodesFromTopSetting ()
+  {
+    createConfiguration (true);
+
+    DisplayText display;
+    display.set_configuration (configuration_.get ());
+    display.resize (360, 140);
+    display.show ();
+    populateForScrolling (display);
+
+    auto * scroll_bar = display.verticalScrollBar ();
+    auto * return_button = display.findChild<QToolButton *> ("returnToLiveActivityButton");
+    QVERIFY (return_button);
+    scroll_bar->triggerAction (QAbstractSlider::SliderPageStepSub);
+    QApplication::processEvents ();
+    QVERIFY (return_button->isVisible ());
+    auto const parked_line = topVisibleLine (display);
+
+    display.insertText ("new live decode");
+    QApplication::processEvents ();
+
+    QCOMPARE (topVisibleLine (display), parked_line);
+    QVERIFY (return_button->isVisible ());
+  }
+
+  void enablingDecodesFromTopResumesFollowing ()
+  {
+    createConfiguration (false);
+
+    DisplayText display;
+    display.set_configuration (configuration_.get (), true);
+    display.resize (360, 140);
+    display.show ();
+    auto * return_button = display.findChild<QToolButton *> ("returnToLiveActivityButton");
+    QVERIFY (return_button);
+
+    addPeriod (display, "P0", 30);
+    addPeriod (display, "P1", 30);
+
+    auto * scroll_bar = display.verticalScrollBar ();
+    scroll_bar->triggerAction (QAbstractSlider::SliderPageStepSub);
+    QApplication::processEvents ();
+    QVERIFY (return_button->isVisible ());
+
+    QVERIFY (enableDecodesFromTopInSettings ());
+
+    QVERIFY (!return_button->isVisible ());
+    addPeriod (display, "P2", 10);
+    QCOMPARE (topVisibleDecode (display), QString {"P2 decode 00"});
   }
 };
 

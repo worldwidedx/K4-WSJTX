@@ -99,6 +99,12 @@ if (NOT APPLE)
   set (CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} -Wl,--gc-sections")
   set (CMAKE_EXE_LINKER_FLAGS_MINSIZEREL "${CMAKE_EXE_LINKER_FLAGS_MINSIZEREL} -Wl,--gc-sections")
 endif (NOT APPLE)
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  # Only some distributions' GCC (Ubuntu's) links --as-needed by default;
+  # without it a program loads every library its static dependencies link,
+  # used or not.
+  set (CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--as-needed")
+endif ()
 
 
 #

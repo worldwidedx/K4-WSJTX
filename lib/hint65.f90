@@ -1,23 +1,16 @@
 subroutine hint65(s3,mrs,mrs2,nadd,nflip,mycall,hiscall,hisgrid,qual,decoded)
 
   use packjt
-  use prog_args
+  use jt65_mod, only: jt65_work,ensure_jt65_workspace
   parameter (MAXCALLS=10000,MAXRPT=63)
-  parameter (MAXMSG=2*MAXCALLS + 2 + MAXRPT)
+  parameter (MAXMSG=2*MAXCALLS + 3 + MAXRPT)
   real s3(64,63)
-  integer*1 sym1(0:62,MAXMSG)
-  integer*1 sym2(0:62,MAXMSG)
   integer mrs(63),mrs2(63)
-  integer dgen(12),sym(0:62),sym_rev(0:62)
-  character*6 mycall,hiscall,hisgrid,call2(MAXCALLS)
-  character*4 grid2(MAXCALLS),rpt(MAXRPT)
-  character callsign*12,grid*4
-  character*180 line
-  character ceme*3,msg*22,msg00*22
-  character*22 msg0(MAXMSG),decoded
-  logical*1 eme(MAXCALLS)
-  logical first
-  data first/.true./
+  integer dgen(12),sym_rev(0:62)
+  character*6 mycall,hiscall,hisgrid
+  character*4 rpt(MAXRPT)
+  character msg*22,msg00*22
+  character*22 decoded
   data rpt/'-01','-02','-03','-04','-05',          &
            '-06','-07','-08','-09','-10',          &
            '-11','-12','-13','-14','-15',          &
@@ -31,39 +24,16 @@ subroutine hint65(s3,mrs,mrs2,nadd,nflip,mycall,hiscall,hisgrid,qual,decoded)
            'R-21','R-22','R-23','R-24','R-25',     &
            'R-26','R-27','R-28','R-29','R-30',     &
            'RO','RRR','73'/
-  save first,sym1,nused,msg0,sym2
-
-  first=.true.   !### For now, at least: always recompute hypothetical messages
-  if(first) then
-     neme=0
-     open(23,file=trim(data_dir)//'/CALL3.TXT',status='unknown')
-     icall=0
-     j=0
-     do i=1,MAXCALLS
-        read(23,1002,end=10) line
-1002    format(a80)
-        if(line(1:4).eq.'ZZZZ') cycle
-        if(line(1:2).eq.'//') cycle
-        i1=index(line,',')
-        if(i1.lt.4) cycle
-        i2=index(line(i1+1:),',')
-        if(i2.lt.5) cycle
-        i2=i2+i1
-        i3=index(line(i2+1:),',')
-        if(i3.lt.1) i3=index(line(i2+1:),' ')
-        i3=i2+i3
-        callsign=line(1:i1-1)
-        grid=line(i1+1:i1+4)
-        ceme=line(i2+1:i3-1)
-        eme(i)=ceme.eq.'EME'
-        if(neme.eq.1 .and. (.not.eme(i))) cycle
-        j=j+1
-        call2(j)=callsign(1:6)               !### Fix for compound callsigns!
-        grid2(j)=grid
-     enddo
-10   ncalls=j
-     close(23)
-
+  call ensure_jt65_workspace()
+  if(.not.allocated(jt65_work%symbols2)) then
+    allocate(jt65_work%symbols2(0:62,MAXMSG),jt65_work%messages(MAXMSG))
+  endif
+  associate(sym2=>jt65_work%symbols2,msg0=>jt65_work%messages, &
+       nused=>jt65_work%hint_count)
+  if(jt65_work%hint_revision/=jt65_work%call_revision.or.mycall/=jt65_work%hint_mycall.or. &
+       hiscall/=jt65_work%hint_hiscall.or.hisgrid/=jt65_work%hint_grid) then
+     ncalls=0
+     if(allocated(jt65_work%calls)) ncalls=size(jt65_work%calls)
 ! NB: generation of test messages is not yet complete!
      j=0
      do i=-1,ncalls
@@ -80,14 +50,12 @@ subroutine hint65(s3,mrs,mrs2,nadd,nflip,mycall,hiscall,hisgrid,qual,decoded)
               if(m.eq.2) msg='CQ '//hiscall//' '//hisgrid(1:4)
               if(m.ge.3) msg=mycall//' '//hiscall//' '//rpt(m-2)
            else
-              if(m.eq.1)  msg=mycall//' '//call2(i)//' '//grid2(i)
-              if(m.eq.2)  msg='CQ '//call2(i)//' '//grid2(i)
+              if(m.eq.1)  msg=mycall//' '//jt65_work%calls(i)(1:6)//' '//jt65_work%grids(i)
+              if(m.eq.2)  msg='CQ '//jt65_work%calls(i)(1:6)//' '//jt65_work%grids(i)
            endif
            call fmtmsg(msg,iz)
            call packmsg(msg,dgen,itype) !Pack message into 72 bits
            call rs_encode(dgen,sym_rev)            !RS encode
-           sym(0:62)=sym_rev(62:0:-1)
-           sym1(0:62,j)=sym
 
            call interleave63(sym_rev,1)            !Interleave channel symbols
            call graycode(sym_rev,63,1,sym_rev)     !Apply Gray code
@@ -96,7 +64,10 @@ subroutine hint65(s3,mrs,mrs2,nadd,nflip,mycall,hiscall,hisgrid,qual,decoded)
         enddo
      enddo
      nused=j
-     first=.false.
+     jt65_work%hint_revision=jt65_work%call_revision
+     jt65_work%hint_mycall=mycall
+     jt65_work%hint_hiscall=hiscall
+     jt65_work%hint_grid=hisgrid
   endif
 
   ref0=0.
@@ -124,6 +95,7 @@ subroutine hint65(s3,mrs,mrs2,nadd,nflip,mycall,hiscall,hisgrid,qual,decoded)
            psum=psum + s3(i,j)
            if(i.eq.mrs(j)+1) ref=ref - s3(i,j) + s3(mrs2(j)+1,j)
         enddo
+        if(ref<=0.) cycle
         p=psum/ref
 
         if(p.gt.u1) then
@@ -150,5 +122,6 @@ subroutine hint65(s3,mrs,mrs2,nadd,nflip,mycall,hiscall,hisgrid,qual,decoded)
   qmin=1.0
   if(qual.ge.qmin) decoded=msg0(ipk)
 
+  end associate
   return
 end subroutine hint65

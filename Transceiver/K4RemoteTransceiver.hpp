@@ -179,6 +179,7 @@ private:
   K4RemoteTxGuard tx_guard_;
   K4RemoteTxAudio tx_audio_;
   TxAudioQueue jtty_audio_queue_;
+  TxAudioQueueProgress jtty_last_progress_;
   quint64 tx_generation_{0};
   qint64 last_meter_query_{0};
   bool restore_test_mode_{false};

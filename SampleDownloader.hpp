@@ -2,10 +2,11 @@
 #define SAMPLE_DOWNLOADER_HPP__
 
 #include <QObject>
+#include <QSettings>
+#include <QString>
 
 #include "pimpl_h.hpp"
 
-class QSettings;
 class QWidget;
 class QNetworkAccessManager;
 class Configuration;
@@ -46,5 +47,25 @@ private:
   class impl;
   pimpl<impl> m_;
 };
+
+// The SourceForge default of releases before 3.3 reads as PROJECT_SAMPLES_URL.
+inline QString saved_samples_url (QSettings const& settings)
+{
+  auto const url = settings.value ("SamplesURL", PROJECT_SAMPLES_URL).toString ();
+  return url == "http://downloads.sourceforge.net/project/wsjt/" ? QString {PROJECT_SAMPLES_URL} : url;
+}
+
+// Only a custom URL is saved, so releases before 3.3 sharing these settings keep their own default.
+inline void save_samples_url (QSettings& settings, QString const& url)
+{
+  if (url == PROJECT_SAMPLES_URL)
+    {
+      settings.remove ("SamplesURL");
+    }
+  else
+    {
+      settings.setValue ("SamplesURL", url);
+    }
+}
 
 #endif

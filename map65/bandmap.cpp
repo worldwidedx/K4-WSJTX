@@ -56,8 +56,8 @@ void BandMap::setText(QString t)
     tfreq=lines[i].mid(0,3);
     tspace=lines[i].mid(4,1);
     if(tspace==" ") tspace=bg;
-    tcall=lines[i].mid(5,7);
-    int n=lines[i].mid(13,1).toInt();
+    tcall=lines[i].mid(5,13);
+    int n=lines[i].mid(19,1).toInt();
     if(n==0) t0 += s0;
     if(n==1) t0 += s1;
     if(n==2) t0 += s2;
@@ -71,8 +71,8 @@ void BandMap::setText(QString t)
       tfreq=lines[i].mid(0,3);
       tspace=lines[i].mid(4,1);
       if(tspace=="  ") tspace=bg;
-      tcall=lines[i].mid(5,7);
-      int n=lines[i].mid(13,1).toInt();
+      tcall=lines[i].mid(5,13);
+      int n=lines[i].mid(19,1).toInt();
       if(n==0) t0 += s0;
       if(n==1) t0 += s1;
       if(n==2) t0 += s2;

@@ -1,7 +1,21 @@
-subroutine sfrx_sub(nyymmdd,nutc,nfqso,ntol,iwave)
+module sfrx_engine
+  use iso_c_binding, only: c_ptr
+  use packjt77, only: pack77_state
+  use sfox_unpack_module, only: superfox_callback, sfox_unpack_for_state, sfox_render_legacy
+  use sfox_remove_ft8_module, only: sfox_remove_ft8_for_state
+  implicit none
+  private
+  public :: sfrx_decode, superfox_callback
+contains
+subroutine sfrx_decode(knowledge,callback,user_context,nyymmdd,nutc,nfqso,ntol,iwave)
 
   use sfox_mod
   use julian
+  implicit real(a-h,o-z)
+  implicit integer(i-n)
+  type(pack77_state), optional, intent(inout) :: knowledge
+  procedure(superfox_callback) :: callback
+  type(c_ptr), intent(in) :: user_context
 
   integer*2 iwave(NMAX)
   integer*8 secday,ntime8
@@ -33,7 +47,7 @@ subroutine sfrx_sub(nyymmdd,nutc,nfqso,ntol,iwave)
 
   allocate(c0(NMAX),dd(NMAX))
   dd=iwave
-  call sfox_remove_ft8(dd,npts)
+  call sfox_remove_ft8_for_state(knowledge,dd,npts)
 
   call sfox_ana(dd,npts,c0,npts)
 
@@ -48,8 +62,22 @@ subroutine sfrx_sub(nyymmdd,nutc,nfqso,ntol,iwave)
   if(crc_ok) then
      nsnr=nint(snr)
      nsignature = 1
-     call sfox_unpack(nutc,xdec,nsnr,fbest-750.0,tbest,foxcall,nsignature)
+     call sfox_unpack_for_state(knowledge,callback,user_context,nutc,xdec,nsnr,fbest-750.0,tbest,foxcall,nsignature)
   endif
 
   return
+end subroutine sfrx_decode
+end module sfrx_engine
+
+subroutine sfrx_sub(nyymmdd,nutc,nfqso,ntol,iwave)
+  use iso_c_binding, only: c_null_ptr
+  use sfrx_engine, only: sfrx_decode
+  use sfox_unpack_module, only: sfox_render_legacy
+  use sfox_mod, only: NMAX
+  implicit none
+  integer nyymmdd,nutc,nfqso,ntol
+  integer*2 iwave(NMAX)
+
+  call sfrx_decode(callback=sfox_render_legacy,user_context=c_null_ptr,nyymmdd=nyymmdd,nutc=nutc, &
+       nfqso=nfqso,ntol=ntol,iwave=iwave)
 end subroutine sfrx_sub

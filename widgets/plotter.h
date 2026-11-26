@@ -16,12 +16,14 @@
 #include <QToolTip>
 
 #include "WaterfallScale.hpp"
+#include "JttySpectrum.hpp"
 
 #define VERT_DIVS 7	//specify grid screen divisions
 
 extern bool g_single_decode;
 
 class QAction;
+class QPainter;
 
 class CPlotter : public QFrame
 {
@@ -98,11 +100,14 @@ public:
   void restartTotalPower();
   bool scaleOK () const {return m_bScaleOK;}
   void setDarkStyle(bool b);
+  void setJttyRow (JttyWaterfallRow const& row) { m_pendingJttyRow = row; }
+  void setJttySpectrum (std::array<float, JttySpectrumFrame::BinCount> const& cumulative,
+                        std::array<float, JttySpectrumFrame::BinCount> const& linearAverage);
 
 signals:
   void freezeDecode1(int n);
   void setFreq1(int rxFreq, int txFreq);
-  void jttyDecodeAgainAt(float secondsAgo);
+  void jttyDecodeAgainAtSample (quint64 reception, qint64 endSample);
 
 protected:
   //re-implemented widget event handlers
@@ -117,6 +122,7 @@ private:
   int XfromFreq(float f);
   float FreqfromX(int x);
   void drawSavedWaterfall();
+  void drawJttyLabels (QPainter& painter, bool newestOnly);
 
   QAction * m_set_freq_action;
 
@@ -167,6 +173,15 @@ private:
   QVector<float> m_swideDisplay;
   QVector<float> m_savgDisplay;
   QVector<float> m_replotRow;
+  struct JttyRowHistory {
+    JttyWaterfallRow audio;
+    bool timestamp = false;
+  };
+  QVector<JttyRowHistory> m_jttyRows;
+  JttyWaterfallRow m_pendingJttyRow;
+  std::array<float, JttySpectrumFrame::BinCount> m_jttyCumulative {};
+  std::array<float, JttySpectrumFrame::BinCount> m_jttyLinearAverage {};
+  int m_jttyRowsSinceTimestamp = 1000;
   QString m_mode;
   QString m_mode0;
   QString m_rxBand;

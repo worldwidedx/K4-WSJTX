@@ -130,8 +130,9 @@ contains
     integer :: cached_count
 
     cached_count = ntot
-    cached_messages = testmsg(1:ntot)
-    cached_symbols = ncode(:, 1:ntot)
+    allocate(cached_messages(cached_count), cached_symbols(size(ncode, 1), cached_count))
+    cached_messages(:) = testmsg(1:cached_count)
+    cached_symbols(:, :) = ncode(:, 1:cached_count)
     call build_fresh(local_call, dx_call, dx_grid, eme_only)
     call require(ntot == cached_count, description//': cached and fresh candidate counts match')
     call require(all(testmsg(1:ntot) == cached_messages), description//': cached and fresh messages match')

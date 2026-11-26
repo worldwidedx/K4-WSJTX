@@ -1,5 +1,9 @@
 
-subroutine ft8mfcqvar(s8,itone,msgd,msg37,lft8sd)
+subroutine ft8mfcqvar(s8,itone,msgd,msg37,lft8sd,knowledge)
+
+  use packjt77, only: pack77_state
+  use ft8_codec_context, only: get_ft8_codec_state
+  use ft8var_codec_context, only: genft8sdvar_for_state
 
   use ft8_mod1, only : idtone25,idtone25_valid
   real, intent(in) :: s8(0:7,79)
@@ -8,12 +12,17 @@ subroutine ft8mfcqvar(s8,itone,msgd,msg37,lft8sd)
   integer itone(79),mrs(58),mrs2(58)
   integer*1 msgbits(77)
   logical(1) lft8sd
+  type(pack77_state), target, optional, intent(inout) :: knowledge
+  type(pack77_state), pointer :: codec
+
+  codec => get_ft8_codec_state()
+  if(present(knowledge)) codec => knowledge
 
   if(len_trim(msgd).lt.6) return
   idtone25(1,1:58)=0
   idtone25_valid(1)=.false.
   i3=-1; n3=-1
-  call genft8sdvar(msgd,i3,n3,msgsent37,msgbits,itone)
+  call genft8sdvar_for_state(codec,msgd,i3,n3,msgsent37,msgbits,itone)
   if(i3.lt.0) return
   idtone25(1,1:29)=itone(8:36)
   idtone25(1,30:58)=itone(44:72)

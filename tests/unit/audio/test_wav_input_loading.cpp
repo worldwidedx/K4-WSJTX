@@ -4,10 +4,13 @@
 #include <future>
 
 #include <QFile>
+#include <QAudioFormat>
 #include <QSemaphore>
+#include <QTemporaryDir>
 #include <QTemporaryFile>
 
 #include "Audio/WavInputLoader.hpp"
+#include "Audio/BWFFile.hpp"
 
 namespace
 {
@@ -105,9 +108,75 @@ private:
     QCOMPARE (result.samples[0], short {1234});
     QCOMPARE (result.samples[1], short {-2345});
     QCOMPARE (result.samples[2], short {32767});
+    QVERIFY (!result.firstSampleUtc.isValid ());
+    QCOMPARE (result.timeReferenceRate, 0);
     QVERIFY (std::all_of (result.samples.cbegin () + result.frames,
                           result.samples.cend (), [] (short sample) {return !sample;}));
     QFile::remove (name);
+  }
+
+  Q_SLOT void preserves_bwf_capture_time_data ()
+  {
+    QTest::addColumn<int> ("sampleRate");
+    QTest::newRow ("native") << 12000;
+    QTest::newRow ("resampled") << 11025;
+  }
+
+  Q_SLOT void preserves_bwf_capture_time ()
+  {
+    QFETCH (int, sampleRate);
+    QTemporaryDir directory;
+    QVERIFY (directory.isValid ());
+    auto const name = directory.filePath (QStringLiteral ("260101_000000.wav"));
+    QAudioFormat format;
+    format.setCodec (QStringLiteral ("audio/pcm"));
+    format.setSampleRate (sampleRate);
+    format.setChannelCount (1);
+    format.setSampleSize (16);
+    format.setSampleType (QAudioFormat::SignedInt);
+    BWFFile file {format, name};
+    QVERIFY (file.open (QIODevice::WriteOnly));
+    QDateTime const date {QDate {2026, 9, 12}, QTime {0, 0}, Qt::UTC};
+    auto const reference = quint64 (sampleRate / 2 + 7);
+    file.bext_origination_date_time (date);
+    file.bext_time_reference (reference);
+    auto const samples = signed_samples (sampleRate);
+    QCOMPARE (file.write (samples), qint64 (samples.size ()));
+    QVERIFY (file.finalize ());
+
+    auto const result = Radio::load_wav_input (name, 13000);
+    QVERIFY (result.valid);
+    QCOMPARE (result.frames, 12000);
+    QCOMPARE (result.firstSampleUtc, date.addMSecs (500));
+    QCOMPARE (result.samplesSinceMidnight, reference);
+    QCOMPARE (result.timeReferenceRate, sampleRate);
+    QCOMPARE (result.fileDateTime, QStringLiteral ("260101_000000"));
+    QCOMPARE (result.yymmdd, 260101);
+  }
+
+  Q_SLOT void invalid_bwf_reference_does_not_replace_filename_time ()
+  {
+    QTemporaryDir directory;
+    QVERIFY (directory.isValid ());
+    auto const name = directory.filePath (QStringLiteral ("260911_235958.wav"));
+    QAudioFormat format;
+    format.setCodec (QStringLiteral ("audio/pcm"));
+    format.setSampleRate (12000);
+    format.setChannelCount (1);
+    format.setSampleSize (16);
+    format.setSampleType (QAudioFormat::SignedInt);
+    BWFFile file {format, name};
+    QVERIFY (file.open (QIODevice::WriteOnly));
+    file.bext_origination_date_time (QDateTime {QDate {2026, 9, 11}, QTime {23, 59, 58}, Qt::UTC});
+    file.bext_time_reference (quint64 {86400} * 12000);
+    QCOMPARE (file.write (signed_samples (100)), qint64 {200});
+    QVERIFY (file.finalize ());
+
+    auto const result = Radio::load_wav_input (name, 1000);
+    QVERIFY (result.valid);
+    QVERIFY (!result.firstSampleUtc.isValid ());
+    QCOMPARE (result.timeReferenceRate, 0);
+    QCOMPARE (result.nutc, 235958);
   }
 
   Q_SLOT void truncates_oversized_input_to_capacity ()

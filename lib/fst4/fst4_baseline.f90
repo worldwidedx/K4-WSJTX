@@ -1,11 +1,14 @@
-subroutine fst4_baseline(s,np,ia,ib,npct,sbase)
+module fst4_baseline_workspace
+contains
+subroutine fst4_baseline_owned(s,np,ia,ib,npct,sbase,sw)
 
 ! Fit baseline to spectrum (for FST4)
 ! Input:  s(npts)         Linear scale in power
 ! Output: sbase(npts)    Baseline
 
   implicit real*8 (a-h,o-z)
-  real*4 s(np),sw(np)
+  real*4 s(np)
+  real*4 :: sw(np)
   real*4 sbase(np)
   real*4 base
   real*8 x(1000),y(1000),a(5)
@@ -45,4 +48,13 @@ subroutine fst4_baseline(s,np,ia,ib,npct,sbase)
   sbase=10**(sbase/10.0)
 
   return
-end subroutine fst4_baseline
+end subroutine fst4_baseline_owned
+end module fst4_baseline_workspace
+
+subroutine fst4_baseline(s,np,ia,ib,npct,sbase)
+  use fst4_baseline_workspace, only: fst4_baseline_owned
+  real s(np),sbase(np)
+  real, allocatable :: scratch(:)
+  allocate(scratch(np))
+  call fst4_baseline_owned(s,np,ia,ib,npct,sbase,scratch)
+end subroutine

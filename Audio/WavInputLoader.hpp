@@ -4,6 +4,7 @@
 #include <vector>
 
 #include <QString>
+#include <QDateTime>
 
 namespace Radio
 {
@@ -12,6 +13,9 @@ struct WavInputResult
 {
   std::vector<short> samples;
   QString fileDateTime;
+  QDateTime firstSampleUtc;
+  quint64 samplesSinceMidnight {0};
+  int timeReferenceRate {0};
   int frames {0};
   int nutc {0};
   int yymmdd {0};

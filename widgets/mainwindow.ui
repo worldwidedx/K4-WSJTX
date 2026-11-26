@@ -351,13 +351,6 @@
        </widget>
       </item>
       <item>
-       <widget class="QCheckBox" name="cbIncludeTime">
-        <property name="text">
-         <string>Include Time</string>
-        </property>
-       </widget>
-      </item>
-      <item>
        <spacer name="horizontalSpacer_9">
         <property name="orientation">
          <enum>Qt::Horizontal</enum>
@@ -369,6 +362,137 @@
          </size>
         </property>
        </spacer>
+      </item>
+      <item>
+       <widget class="QWidget" name="jttyQsoFieldsWidget" native="true">
+        <property name="sizePolicy">
+         <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
+          <horstretch>0</horstretch>
+          <verstretch>0</verstretch>
+         </sizepolicy>
+        </property>
+        <layout class="QHBoxLayout" name="horizontalLayout_jttyQsoFields">
+         <property name="leftMargin">
+          <number>0</number>
+         </property>
+         <property name="topMargin">
+          <number>0</number>
+         </property>
+         <property name="rightMargin">
+          <number>0</number>
+         </property>
+         <property name="bottomMargin">
+          <number>0</number>
+         </property>
+         <item>
+          <widget class="QLabel" name="labelJttyCall">
+           <property name="text">
+            <string>Call:</string>
+           </property>
+           <property name="buddy">
+            <cstring>jttyCallEntry</cstring>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLineEdit" name="jttyCallEntry">
+           <property name="minimumSize">
+            <size>
+             <width>100</width>
+             <height>0</height>
+            </size>
+           </property>
+           <property name="maximumSize">
+            <size>
+             <width>120</width>
+             <height>16777215</height>
+            </size>
+           </property>
+           <property name="toolTip">
+            <string>Callsign being worked (the same as DX Call). F10 jumps here; double-click a callsign in a decode pane to fill it.</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <spacer name="horizontalSpacer_jttyQsoFields">
+           <property name="orientation">
+            <enum>Qt::Horizontal</enum>
+           </property>
+           <property name="sizeType">
+            <enum>QSizePolicy::Fixed</enum>
+           </property>
+           <property name="sizeHint" stdset="0">
+            <size>
+             <width>20</width>
+             <height>20</height>
+            </size>
+           </property>
+          </spacer>
+         </item>
+         <item>
+          <widget class="QLabel" name="labelJttySent">
+           <property name="text">
+            <string>Sent:</string>
+           </property>
+           <property name="buddy">
+            <cstring>jttySentEntry</cstring>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLineEdit" name="jttySentEntry">
+           <property name="minimumSize">
+            <size>
+             <width>120</width>
+             <height>0</height>
+            </size>
+           </property>
+           <property name="toolTip">
+            <string>Exchange sent to this station, saved in the log. Filled in from the serial number or the contest exchange; edit it if needed.</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <spacer name="horizontalSpacer_jttyQsoFields2">
+           <property name="orientation">
+            <enum>Qt::Horizontal</enum>
+           </property>
+           <property name="sizeType">
+            <enum>QSizePolicy::Fixed</enum>
+           </property>
+           <property name="sizeHint" stdset="0">
+            <size>
+             <width>20</width>
+             <height>20</height>
+            </size>
+           </property>
+          </spacer>
+         </item>
+         <item>
+          <widget class="QLabel" name="labelJttyReceived">
+           <property name="text">
+            <string>Rcvd:</string>
+           </property>
+           <property name="buddy">
+            <cstring>jttyReceivedEntry</cstring>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLineEdit" name="jttyReceivedEntry">
+           <property name="minimumSize">
+            <size>
+             <width>160</width>
+             <height>0</height>
+            </size>
+           </property>
+           <property name="toolTip">
+            <string>Exchange received from this station, saved in the log. Shift+double-click a word in a decode pane to add it.</string>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </widget>
       </item>
      </layout>
     </item>
@@ -1518,18 +1642,13 @@ Not available to nonstandard callsign holders.</string>
                     <item>
                      <widget class="QPushButton" name="pbBestSP">
                       <property name="toolTip">
-                       <string>Enable auto response to the first decode from a new DXCC or new call on the current band.</string>
+                       <string>After decoding finishes, select a new DXCC entity first, then a callsign not worked on this band. Arm before starting a QSO, with Wait &amp; Call and Wait &amp; Pounce inactive. Activating either cancels Best S+P; directed replies continue normally. Rx and Tx audio-frequency adjustments preserve arming. Configure selection in Settings &gt; Advanced &gt; Best S+P. Highlight colors, enabled rules, and rule order do not affect selection. Worked-before matching follows 'Highlight by Mode' and 'Include extra WAE entities' on Colors. Arming times out after two minutes.</string>
                       </property>
-                      <property name="styleSheet">
-                       <string notr="true">QPushButton:checked {
-	color: rgb(0, 0, 0);
-	background-color: red;
-	border-style: outset;
-	border-width: 1px;
-	border-radius: 5px;
-	border-color: black;
-	padding: 3px;
-}</string>
+                      <property name="accessibleName">
+                       <string>Best S+P</string>
+                      </property>
+                      <property name="accessibleDescription">
+                       <string>Best S+P is not armed.</string>
                       </property>
                       <property name="text">
                        <string>Best S+P</string>
@@ -1551,6 +1670,19 @@ When not checked you can view the calibration results.</string>
                       </property>
                       <property name="text">
                        <string>Measure</string>
+                      </property>
+                     </widget>
+                    </item>
+                    <item>
+                     <widget class="QCheckBox" name="freqcal_range_check_box">
+                      <property name="toolTip">
+                       <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Calibration skips reference frequencies outside the range that the rig reports.&lt;br/&gt;Check this if your radio can tune outside that range, for example an SDR that uses another radio's model.&lt;br/&gt;Checking or clearing it restarts calibration at the first usable reference.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+                      </property>
+                      <property name="accessibleDescription">
+                       <string>Check this to use calibration references outside the range that the rig reports.</string>
+                      </property>
+                      <property name="text">
+                       <string>Ignore range</string>
                       </property>
                      </widget>
                     </item>
@@ -2559,96 +2691,96 @@ Double-click to reset to the standard 73 message</string>
                          <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Select a specific CQ message.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
                         </property>
                         <property name="currentText">
-                         <string>CQ</string>
+                         <string notr="true">CQ</string>
                         </property>
                         <item>
                          <property name="text">
-                          <string>CQ</string>
+                          <string notr="true">CQ</string>
                          </property>
                         </item>
                         <item>
                          <property name="text">
-                          <string>CQ AF</string>
+                          <string notr="true">CQ AF</string>
                          </property>
                         </item>
                         <item>
                          <property name="text">
-                          <string>CQ AN</string>
+                          <string notr="true">CQ AN</string>
                          </property>
                         </item>
                         <item>
                          <property name="text">
-                          <string>CQ AS</string>
+                          <string notr="true">CQ AS</string>
                          </property>
                         </item>
                         <item>
                          <property name="text">
-                          <string>CQ EU</string>
+                          <string notr="true">CQ EU</string>
                          </property>
                         </item>
                         <item>
                          <property name="text">
-                          <string>CQ NA</string>
+                          <string notr="true">CQ NA</string>
                          </property>
                         </item>
                         <item>
                          <property name="text">
-                          <string>CQ OC</string>
+                          <string notr="true">CQ OC</string>
                          </property>
                         </item>
                         <item>
                          <property name="text">
-                          <string>CQ SA</string>
+                          <string notr="true">CQ SA</string>
                          </property>
                         </item>
                         <item>
                          <property name="text">
-                          <string>CQ 0</string>
+                          <string notr="true">CQ 0</string>
                          </property>
                         </item>
                         <item>
                          <property name="text">
-                          <string>CQ 1</string>
+                          <string notr="true">CQ 1</string>
                          </property>
                         </item>
                         <item>
                          <property name="text">
-                          <string>CQ 2</string>
+                          <string notr="true">CQ 2</string>
                          </property>
                         </item>
                         <item>
                          <property name="text">
-                          <string>CQ 3</string>
+                          <string notr="true">CQ 3</string>
                          </property>
                         </item>
                         <item>
                          <property name="text">
-                          <string>CQ 4</string>
+                          <string notr="true">CQ 4</string>
                          </property>
                         </item>
                         <item>
                          <property name="text">
-                          <string>CQ 5</string>
+                          <string notr="true">CQ 5</string>
                          </property>
                         </item>
                         <item>
                          <property name="text">
-                          <string>CQ 6</string>
+                          <string notr="true">CQ 6</string>
                          </property>
                         </item>
                         <item>
                          <property name="text">
-                          <string>CQ 7</string>
+                          <string notr="true">CQ 7</string>
                          </property>
                         </item>
                         <item>
                          <property name="text">
-                          <string>CQ 8</string>
+                          <string notr="true">CQ 8</string>
                          </property>
                         </item>
                         <item>
                          <property name="text">
-                          <string>CQ 9</string>
+                          <string notr="true">CQ 9</string>
                          </property>
                         </item>
                        </widget>
@@ -3819,82 +3951,58 @@ Double-click to reset to the standard 73 message</string>
                 <item>
                  <layout class="QGridLayout" name="gridLayout_15" columnstretch="1,1,1,1">
                   <item row="1" column="0">
-                   <widget class="QLineEdit" name="msg1">
+                   <widget class="QPushButton" name="pbSF1">
                     <property name="text">
-                     <string>CQ %M CQ</string>
-                    </property>
-                    <property name="alignment">
-                     <set>Qt::AlignCenter</set>
+                     <string>Shift+F1</string>
                     </property>
                    </widget>
                   </item>
                   <item row="1" column="1">
-                   <widget class="QLineEdit" name="msg2">
+                   <widget class="QPushButton" name="pbSF2">
                     <property name="text">
-                     <string>%H 599 %N</string>
-                    </property>
-                    <property name="alignment">
-                     <set>Qt::AlignCenter</set>
+                     <string>Shift+F2</string>
                     </property>
                    </widget>
                   </item>
                   <item row="1" column="2">
-                   <widget class="QLineEdit" name="msg3">
+                   <widget class="QPushButton" name="pbSF3">
                     <property name="text">
-                     <string>%H TU CQ %M CQ</string>
-                    </property>
-                    <property name="alignment">
-                     <set>Qt::AlignCenter</set>
+                     <string>Shift+F3</string>
                     </property>
                    </widget>
                   </item>
                   <item row="1" column="3">
-                   <widget class="QLineEdit" name="msg4">
+                   <widget class="QPushButton" name="pbSF4">
                     <property name="text">
-                     <string>%M</string>
-                    </property>
-                    <property name="alignment">
-                     <set>Qt::AlignCenter</set>
+                     <string>Shift+F4</string>
                     </property>
                    </widget>
                   </item>
                   <item row="3" column="0">
-                   <widget class="QLineEdit" name="msg5">
+                   <widget class="QPushButton" name="pbSF5">
                     <property name="text">
-                     <string>%H</string>
-                    </property>
-                    <property name="alignment">
-                     <set>Qt::AlignCenter</set>
+                     <string>Shift+F5</string>
                     </property>
                    </widget>
                   </item>
                   <item row="3" column="1">
-                   <widget class="QLineEdit" name="msg6">
+                   <widget class="QPushButton" name="pbSF6">
                     <property name="text">
-                     <string>TU NOW %Q 599 %N</string>
-                    </property>
-                    <property name="alignment">
-                     <set>Qt::AlignCenter</set>
+                     <string>Shift+F6</string>
                     </property>
                    </widget>
                   </item>
                   <item row="3" column="2">
-                   <widget class="QLineEdit" name="msg7">
+                   <widget class="QPushButton" name="pbSF7">
                     <property name="text">
-                     <string>%H AGN?</string>
-                    </property>
-                    <property name="alignment">
-                     <set>Qt::AlignCenter</set>
+                     <string>Shift+F7</string>
                     </property>
                    </widget>
                   </item>
                   <item row="3" column="3">
-                   <widget class="QLineEdit" name="msg8">
+                   <widget class="QPushButton" name="pbSF8">
                     <property name="text">
-                     <string>599 %N</string>
-                    </property>
-                    <property name="alignment">
-                     <set>Qt::AlignCenter</set>
+                     <string>Shift+F8</string>
                     </property>
                    </widget>
                   </item>
@@ -3985,6 +4093,39 @@ Double-click to reset to the standard 73 message</string>
              </item>
              <item row="2" column="0" colspan="3">
               <layout class="QGridLayout" name="gridLayout_4">
+               <item row="0" column="0">
+                <widget class="QLabel" name="label_jttyStyle">
+                 <property name="text">
+                  <string>Macro set </string>
+                 </property>
+                 <property name="alignment">
+                  <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
+                 </property>
+                </widget>
+               </item>
+               <item row="0" column="1">
+                <widget class="QComboBox" name="comboBoxJttyStyle">
+                 <property name="toolTip">
+                  <string>Choose the macro set for F1-F8 and Shift+F1-F8.</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="0" column="2" alignment="Qt::AlignLeft">
+                <widget class="QPushButton" name="pbEditJttyMacros">
+                 <property name="sizePolicy">
+                  <sizepolicy hsizetype="Maximum" vsizetype="Fixed">
+                   <horstretch>0</horstretch>
+                   <verstretch>0</verstretch>
+                  </sizepolicy>
+                 </property>
+                 <property name="toolTip">
+                  <string>Edit the macros, their button labels, and the macro sets.</string>
+                 </property>
+                 <property name="text">
+                  <string>Edit macros...</string>
+                 </property>
+                </widget>
+               </item>
                <item row="8" column="0">
                 <spacer name="verticalSpacer_8">
                  <property name="orientation">
@@ -3997,6 +4138,19 @@ Double-click to reset to the standard 73 message</string>
                   </size>
                  </property>
                 </spacer>
+               </item>
+               <item row="2" column="2" alignment="Qt::AlignLeft">
+                <widget class="QCheckBox" name="cbJttyEnterSends">
+                 <property name="toolTip">
+                  <string>Enter sends, as chosen for the macro set in Edit macros. Run: CQ, then call + exchange, then TU and log. S&amp;P: my call, then exchange, then TU and log. Chat: like Send message, sending the Tx box with PTT off or ending the over with PTT on.</string>
+                 </property>
+                 <property name="text">
+                  <string>Enter sends message</string>
+                 </property>
+                 <property name="checked">
+                  <bool>true</bool>
+                 </property>
+                </widget>
                </item>
                <item row="3" column="2">
                 <spacer name="horizontalSpacer_8">
@@ -4046,20 +4200,44 @@ Double-click to reset to the standard 73 message</string>
                 </widget>
                </item>
                <item row="1" column="0">
-                <widget class="QPushButton" name="pbSendMessage">
-                 <property name="minimumSize">
-                  <size>
-                   <width>0</width>
-                   <height>0</height>
-                  </size>
-                 </property>
-                 <property name="toolTip">
-                  <string>Send and clear the message. Press Enter in the field.</string>
-                 </property>
-                 <property name="text">
-                  <string>Send message</string>
-                 </property>
-                </widget>
+                <layout class="QVBoxLayout" name="verticalLayout_jttySend">
+                 <item>
+                  <widget class="QLabel" name="labelJttyPttState">
+                   <property name="alignment">
+                    <set>Qt::AlignCenter</set>
+                   </property>
+                   <property name="toolTip">
+                    <string>Transmit state. Rx: receiving. Tx: sending text. Diddle: PTT on, nothing to send. Tx → Rx: finishing what is queued, then back to receive. F9 turns PTT on and off; Esc stops immediately and clears the message.</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QPushButton" name="pbSendMessage">
+                   <property name="minimumSize">
+                    <size>
+                     <width>0</width>
+                     <height>0</height>
+                    </size>
+                   </property>
+                   <property name="toolTip">
+                    <string>Send and clear the message. Press Enter in the field.</string>
+                   </property>
+                   <property name="text">
+                    <string>Send message</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QLabel" name="labelJttyFrameCount">
+                   <property name="alignment">
+                    <set>Qt::AlignHCenter</set>
+                   </property>
+                   <property name="toolTip">
+                    <string>JTTY frames sent / total frames required for the current message.</string>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
                </item>
                <item row="2" column="0">
                 <widget class="QLabel" name="label_3">
@@ -4084,9 +4262,18 @@ Double-click to reset to the standard 73 message</string>
                 </widget>
                </item>
                <item row="1" column="1" colspan="4">
-                <widget class="QLineEdit" name="Tx_Message">
+                <widget class="QPlainTextEdit" name="Tx_Message">
+                 <property name="maximumSize">
+                  <size>
+                   <width>16777215</width>
+                   <height>60</height>
+                  </size>
+                 </property>
+                 <property name="tabChangesFocus">
+                  <bool>true</bool>
+                 </property>
                  <property name="toolTip">
-                  <string>Press Enter to send and clear the message.</string>
+                  <string>Ctrl+K sends now (one-shot). Alt+J starts a live session that keeps sending as you type, until Alt+K signs off. Ctrl+Shift+K clears the box. Ctrl+H inserts a chat opener.</string>
                  </property>
                 </widget>
                </item>
@@ -4101,7 +4288,7 @@ Double-click to reset to the standard 73 message</string>
                 </widget>
                </item>
                <item row="2" column="1">
-                <widget class="QLineEdit" name="lineEdit">
+                <widget class="QLineEdit" name="jttyNextCallEntry">
                  <property name="maximumSize">
                   <size>
                    <width>100</width>
@@ -4109,7 +4296,7 @@ Double-click to reset to the standard 73 message</string>
                   </size>
                  </property>
                  <property name="toolTip">
-                  <string>Callsign to be worked next.</string>
+                  <string>Callsign to be worked next, sent by %Q. Ctrl+double-click a callsign in a decode pane to fill it. A macro with both %Q and %L (Run F6, TU NOW) logs the current QSO and makes this the new call.</string>
                  </property>
                 </widget>
                </item>
@@ -4830,7 +5017,7 @@ QLabel[oob=&quot;true&quot;] {
               <enum>Qt::StrongFocus</enum>
              </property>
              <property name="toolTip">
-              <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Switch to Q65 mode.&lt;br&gt; Right-click to switch to Q65 Pileup mode.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+              <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Switch to Q65 mode.&lt;br&gt; Ctrl+right-click to switch to Q65 Pileup mode.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
              </property>
              <property name="text">
               <string>Q65</string>
@@ -5039,10 +5226,10 @@ QLabel[oob=&quot;true&quot;] {
               <bool>false</bool>
              </property>
              <property name="toolTip">
-              <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;If orange or red there has been a rig control failure, click to reset and read the dial frequency.  S implies split mode.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+              <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Orange or red indicates that rig control needs recovery. Click to retry rig control and restore the requested frequency. S implies split mode.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
              </property>
              <property name="accessibleDescription">
-              <string>If orange or red there has been a rig control failure, click to reset and read the dial frequency. S implies split mode.</string>
+              <string>Orange or red indicates that rig control needs recovery. Click to retry rig control and restore the requested frequency. S implies split mode.</string>
              </property>
              <property name="styleSheet">
               <string notr="true">QPushButton {
@@ -5113,7 +5300,9 @@ QPushButton[state=&quot;ok&quot;] {
     <addaction name="actionErase_list_of_Q65_callers"/>
     <addaction name="reset_cabrillo_log_action"/>
     <addaction name="actionExport_Cabrillo_log"/>
+    <addaction name="actionExport_EME_Cabrillo_log"/>
     <addaction name="actionOpen_log_directory"/>
+    <addaction name="actionOpen_ADIF_log_folder"/>
     <addaction name="separator"/>
     <addaction name="actionSettings"/>
     <addaction name="separator"/>
@@ -5514,7 +5703,7 @@ QPushButton[state=&quot;ok&quot;] {
   </action>
   <action name="actionErase_wsjtx_log_adi">
    <property name="text">
-    <string>Erase wsjtx_log.adi</string>
+    <string>Erase ADIF log</string>
    </property>
   </action>
   <action name="actionErase_Tx_Log">
@@ -5564,6 +5753,14 @@ QPushButton[state=&quot;ok&quot;] {
   <action name="actionOpen_log_directory">
    <property name="text">
     <string>Open log directory</string>
+   </property>
+  </action>
+  <action name="actionOpen_ADIF_log_folder">
+   <property name="text">
+    <string>Open ADIF log folder</string>
+   </property>
+   <property name="toolTip">
+    <string>Open the folder containing the ADIF log in use</string>
    </property>
   </action>
   <action name="actionJT4">
@@ -5776,6 +5973,14 @@ QPushButton[state=&quot;ok&quot;] {
   <action name="actionExport_Cabrillo_log">
    <property name="text">
     <string>Export Cabrillo log ...</string>
+   </property>
+  </action>
+  <action name="actionExport_EME_Cabrillo_log">
+   <property name="text">
+    <string>Export ARRL EME Cabrillo log ...</string>
+   </property>
+   <property name="toolTip">
+    <string>Cabrillo log for the ARRL EME contest from the ADIF log (or several logs, merged): the QSOs on the chosen days, with both grid squares on every line</string>
    </property>
   </action>
   <action name="actionQSG_FST4">
@@ -6664,6 +6869,7 @@ QPushButton[state=&quot;ok&quot;] {
   <tabstop>cbSWL</tabstop>
   <tabstop>pbBestSP</tabstop>
   <tabstop>measure_check_box</tabstop>
+  <tabstop>freqcal_range_check_box</tabstop>
   <tabstop>tabWidget</tabstop>
   <tabstop>txrb1</tabstop>
   <tabstop>txrb2</tabstop>

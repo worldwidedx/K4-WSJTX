@@ -820,7 +820,7 @@ void K4RemoteTransceiver::enqueue_jtty_pcm(QByteArray const& samples,
                                              qint64 enqueue_id) noexcept {
   if (samples.size() < int(sizeof(qint16)) ||
       samples.size() % int(sizeof(qint16)) != 0) {
-    Q_EMIT jtty_enqueue_failed(epoch, enqueue_id);
+    Q_EMIT jtty_enqueue_failed(epoch, enqueue_id, TxAudioQueueEnqueueFailure::Capacity);
     return;
   }
   auto const count = samples.size() / int(sizeof(qint16));
@@ -829,11 +829,12 @@ void K4RemoteTransceiver::enqueue_jtty_pcm(QByteArray const& samples,
   if (result.accepted)
     Q_EMIT jtty_enqueue_accepted(enqueue_id, count, result.progress);
   else
-    Q_EMIT jtty_enqueue_failed(epoch, enqueue_id);
+    Q_EMIT jtty_enqueue_failed(epoch, enqueue_id, result.failure);
 }
 
 void K4RemoteTransceiver::clear_jtty_pcm(TxAudioQueueEpoch epoch) noexcept {
   jtty_audio_queue_.clear(epoch);
+  jtty_audio_queue_.applyPendingReset();
 }
 
 void K4RemoteTransceiver::do_modulator_stop(bool) {
@@ -846,7 +847,7 @@ void K4RemoteTransceiver::do_modulator_stop(bool) {
 QVector<qint16> K4RemoteTransceiver::generate_tx_frame(int count) {
   QVector<qint16> result(count, 0);
   if (tx_kind_ == TxKind::Jtty) {
-    // The 3.2 JTTY encoder supplies already-rendered 48 kHz PCM. Keep
+    // The JTTY encoder supplies already-rendered 48 kHz PCM. Keep
     // packetizing silence after its last sample until the queue's drain guard
     // confirms the end of the transmission.
     for (int i = 0; i != count; ++i) {
@@ -965,6 +966,14 @@ void K4RemoteTransceiver::service_tx() {
     samples.resize(frame_samples_);
   send_audio(samples);
   if (tx_kind_ == TxKind::Jtty) {
+    auto const progress = jtty_audio_queue_.progress();
+    if (progress.epoch.isValid() &&
+        (progress.epoch != jtty_last_progress_.epoch ||
+         progress.served_samples != jtty_last_progress_.served_samples ||
+         progress.total_samples != jtty_last_progress_.total_samples)) {
+      jtty_last_progress_ = progress;
+      Q_EMIT jtty_progress(progress);
+    }
     auto const drain = jtty_audio_queue_.takeDrainReady();
     if (drain.ready)
       Q_EMIT jtty_drained(drain);

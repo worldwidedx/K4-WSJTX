@@ -35,17 +35,33 @@ install (TARGETS udp_daemon message_aggregator wsjtx_app_version
   BUNDLE DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT runtime
   )
 
-install (TARGETS jt9 wsprd fmtave fcal fmeasure
+# build-macos.yml stages /usr/local/wsjtx for the macOS package from
+# installed-cli-tools.txt, and collects the programs of the macOS release
+# tarballs from cli-tools.txt. cli-tools.txt also lists every program in
+# CMake/release-tarballs.txt whatever the build options, so a macOS release
+# build that lacks one fails naming it.
+set (wsjt_installed_cli_tools jt9 wsprd fmtave fcal fmeasure wsjt-codec)
+if (WSJT_BUILD_UTILS)
+  list (APPEND wsjt_installed_cli_tools
+    ft8code jt65code jt9code jt4code msk144code q65code fst4sim ft8sim q65sim
+    EchoCallSim testEchoCall echosim hash22calc cablog sjtty rjtty)
+endif ()
+install (TARGETS ${wsjt_installed_cli_tools}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT runtime
   BUNDLE DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT runtime
   )
-
-if (WSJT_BUILD_JT9STREAM)
-  install (TARGETS jt9stream
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT runtime
-    BUNDLE DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT runtime
-    )
-endif (WSJT_BUILD_JT9STREAM)
+string (JOIN "\n" _wsjt_installed_cli_tools_lines ${wsjt_installed_cli_tools})
+file (WRITE "${CMAKE_BINARY_DIR}/installed-cli-tools.txt"
+  "${_wsjt_installed_cli_tools_lines}\n")
+include ("${CMAKE_SOURCE_DIR}/CMake/Modules/read_release_tarballs.cmake")
+set_property (DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  "${CMAKE_SOURCE_DIR}/CMake/release-tarballs.txt")
+wsjt_read_release_tarballs ("${CMAKE_SOURCE_DIR}/CMake/release-tarballs.txt"
+  _wsjt_tarball_programs)
+set (_wsjt_cli_tools ${wsjt_installed_cli_tools} ${_wsjt_tarball_programs})
+list (REMOVE_DUPLICATES _wsjt_cli_tools)
+string (JOIN "\n" _wsjt_cli_tools_lines ${_wsjt_cli_tools})
+file (WRITE "${CMAKE_BINARY_DIR}/cli-tools.txt" "${_wsjt_cli_tools_lines}\n")
 
 if (NOT WSJT_SKIP_QMAP)
   install (TARGETS qmap
@@ -58,16 +74,6 @@ install (TARGETS map65
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT runtime
   BUNDLE DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT runtime
   )
-
-if(WSJT_BUILD_UTILS)
-install (TARGETS ft8code jt65code jt9code jt4code msk144code 
-  q65code fst4sim ft8sim q65sim EchoCallSim testEchoCall echosim
-  hash22calc cablog sjtty rjtty
-  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT runtime
-  BUNDLE DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT runtime
-  )
-  
-endif(WSJT_BUILD_UTILS)  
 
 install (PROGRAMS
   ${RIGCTL_EXE}
@@ -99,6 +105,7 @@ install (FILES
 
 install (FILES
   COPYING
+  doc/BOOST-LICENSE.txt
   AUTHORS
   THANKS
   NEWS
@@ -185,9 +192,11 @@ if (WIN32)
 
   if (NOT "$ENV{JTSDK_TOOLS}" STREQUAL "")
     file (TO_CMAKE_PATH "$ENV{JTSDK_TOOLS}" _jtsdk_tools_path)
+    _add_openssl_runtime_dir ("${_jtsdk_tools_path}/msys64/ucrt64/bin")
     _add_openssl_runtime_dir ("${_jtsdk_tools_path}/msys64/mingw64/bin")
   endif ()
 
+  _add_openssl_runtime_dir ("/ucrt64/bin")
   _add_openssl_runtime_dir ("/mingw64/bin")
 
   set (_openssl_runtime_dlls)
@@ -223,9 +232,9 @@ if (WIN32)
       "OpenSSL DLLs.\n"
       "Searched: ${_openssl_runtime_dirs}\n"
       "Install the MinGW OpenSSL package, for example:\n"
-      "  pacman -S mingw-w64-x86_64-openssl\n"
+      "  pacman -S mingw-w64-ucrt-x86_64-openssl\n"
       "Or point CMake at the DLL directory:\n"
-      "  -DWSJT_OPENSSL_RUNTIME_DIR=/path/to/mingw64/bin\n"
+      "  -DWSJT_OPENSSL_RUNTIME_DIR=/path/to/ucrt64/bin\n"
       "To build without bundling TLS runtime DLLs:\n"
       "  -DWSJT_ALLOW_MISSING_OPENSSL_RUNTIME_DLLS=ON"
     )
@@ -255,7 +264,6 @@ endif (WIN32)
 if (APPLE)
     install (FILES
         Darwin/ReadMe.txt
-        Darwin/com.wsjtx.sysctl.plist
         DESTINATION .
         #COMPONENT runtime
     )

@@ -14,6 +14,8 @@ class CheckCandidateTagTest(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.repo = Path(self.directory.name)
         self.git("init", "-q")
+        # Background auto-maintenance would race the directory's removal.
+        self.git("config", "maintenance.auto", "false")
         self.git(
             "-c", "user.name=Test", "-c", "user.email=test@example.com",
             "commit", "--allow-empty", "-qm", "first",

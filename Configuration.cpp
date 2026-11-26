@@ -1,4 +1,6 @@
 #include "Configuration.hpp"
+#include "FrequencyAdapter.hpp"
+#include "RadioModePolicy.hpp"
 
 //
 // Read me!
@@ -150,10 +152,20 @@
 #include <QAction>
 #include <QKeyEvent>
 #include <QScreen>
+#include <QScrollArea>
 #include <QShowEvent>
 #include <QTabBar>
 #include <QWindow>
 #include <QFileDialog>
+#include <QDesktopServices>
+#include <QFileInfo>
+#include <QListWidget>
+#include <QTextEdit>
+#include <QLabel>
+#include <QHBoxLayout>
+#include <QVBoxLayout>
+#include <QScrollArea>
+#include <QUrl>
 #include <QDir>
 #include <QTemporaryFile>
 #include <QFormLayout>
@@ -168,7 +180,10 @@
 #include <QLineEdit>
 #include <QRegularExpression>
 #include <QRegularExpressionValidator>
+#include <QKeyEvent>
 #include <QIntValidator>
+#include <QDoubleValidator>
+#include <QLocale>
 #include <QThread>
 #include <QTimer>
 #include <QStandardPaths>
@@ -178,6 +193,7 @@
 #include <QScopedValueRollback>
 #include <QCheckBox>
 #include <QScopedPointer>
+#include <QSignalBlocker>
 #include <QNetworkInterface>
 #include <QHostInfo>
 #include <QHostAddress>
@@ -190,12 +206,18 @@
 #include <QSerialPortInfo>
 #include <QItemSelectionModel>
 #include <QMenu>
+#include <QFrame>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QPushButton>
+#include <QSet>
 #include <vector>
 #include <utility>
 #include <iostream>
 
 #include "pimpl_impl.hpp"
 #include "Logger.hpp"
+#include "L10nLoader.hpp"
 #include "PerformanceTrace.hpp"
 #include "Transceiver/TxInhibitTransceiver.hpp"
 #include "qt_helpers.hpp"
@@ -218,11 +240,13 @@
 #include "models/IARURegions.hpp"
 #include "models/Modes.hpp"
 #include "models/FrequencyList.hpp"
+#include "models/FrequencySuggestions.hpp"
 #include "models/StationList.hpp"
 #include "Network/NetworkServerLookup.hpp"
 #include "Network/FoxVerifier.hpp"
 #include "widgets/MessageBox.hpp"
 #include "widgets/SettingsDialogLayout.hpp"
+#include "widgets/SuggestedFrequenciesDialog.hpp"
 #include "validators/MaidenheadLocatorValidator.hpp"
 #include "validators/CallsignValidator.hpp"
 #include "Network/LotWUsers.hpp"
@@ -237,6 +261,113 @@
 
 namespace
 {
+  bool is_psk_reporter_destination (QString host)
+  {
+    host = host.trimmed ();
+    if (host.endsWith ('.')) host.chop (1);
+    if (host.compare ("pskreporter.info", Qt::CaseInsensitive) == 0
+        || host.endsWith (".pskreporter.info", Qt::CaseInsensitive)) return true;
+
+    // The collector address is intentionally separate from the website's shared hosting.
+    QHostAddress const collector {QStringLiteral ("15.204.212.142")};
+    return QHostAddress {host}.isEqual (collector, QHostAddress::ConvertV4MappedToIPv4);
+  }
+
+  class LocationLineEditEnterFilter final : public QObject
+  {
+  public:
+    explicit LocationLineEditEnterFilter (QObject * parent) : QObject {parent} {}
+
+  protected:
+    bool eventFilter (QObject * watched, QEvent * event) override
+    {
+      if (event->type () == QEvent::KeyPress)
+        {
+          auto key_event = static_cast<QKeyEvent *> (event);
+          if (key_event->key () == Qt::Key_Return || key_event->key () == Qt::Key_Enter)
+            {
+              if (auto edit = qobject_cast<QLineEdit *> (watched))
+                {
+                  edit->clearFocus ();
+                  return true;
+                }
+            }
+        }
+      return QObject::eventFilter (watched, event);
+    }
+  };
+
+  // Centre of a four- or six-character Maidenhead locator, with
+  // conventional east-positive longitude.  Four-character locators are
+  // treated as their "mm" subsquare, as grid2deg() does.
+  bool grid_centre (QString grid, double& lat, double& lon)
+  {
+    grid = grid.trimmed ();
+    if (grid.size () < 4) return false;
+    grid = grid.left (6);
+    if (grid.size () < 6) grid += "mm";
+    if (grid.size () != 6) return false;
+    grid[0] = grid[0].toUpper ();
+    grid[1] = grid[1].toUpper ();
+    grid[4] = grid[4].toLower ();
+    grid[5] = grid[5].toLower ();
+    if (grid[0] < 'A' || grid[0] > 'R' || grid[1] < 'A' || grid[1] > 'R'
+        || !grid[2].isDigit () || !grid[3].isDigit ()
+        || grid[4] < 'a' || grid[4] > 'x' || grid[5] < 'a' || grid[5] > 'x') return false;
+    auto west = 180. - 20. * (grid[0].unicode () - 'A')
+      - 2. * (grid[2].unicode () - '0')
+      - 5. * ((grid[4].unicode () - 'a') + .5) / 60.;
+    lat = -90. + 10. * (grid[1].unicode () - 'A')
+      + (grid[3].unicode () - '0')
+      + 2.5 * ((grid[5].unicode () - 'a') + .5) / 60.;
+    lon = -west;
+    return true;
+  }
+
+  // True when lat/lon are just the centre of the locator, i.e. they were
+  // derived from My Grid rather than entered as precise coordinates.
+  // Coordinates are displayed and stored to six decimal places, so allow
+  // for that rounding.
+  bool coordinates_are_grid_centre (QString const& grid, double lat, double lon)
+  {
+    double centre_lat, centre_lon;
+    return grid_centre (grid, centre_lat, centre_lon)
+      && std::abs (lat - centre_lat) < 1.e-6 && std::abs (lon - centre_lon) < 1.e-6;
+  }
+
+  // Convert conventional signed decimal degrees to a six-character
+  // Maidenhead locator.  Longitude is east-positive here, matching the UI.
+  bool coordinates_to_grid (double lat, double lon, QString& grid)
+  {
+    if (lat < -90. || lat > 90. || lon < -180. || lon > 180.) return false;
+
+    auto east = lon;
+    auto lat_for_grid = lat;
+    if (east == 180.) east = std::nextafter (180., 0.);
+    if (lat_for_grid == 90.) lat_for_grid = std::nextafter (90., 0.);
+    auto x = east + 180.;
+    auto y = lat_for_grid + 90.;
+    int field_lon = static_cast<int> (std::floor (x / 20.));
+    int field_lat = static_cast<int> (std::floor (y / 10.));
+    x -= field_lon * 20.;
+    y -= field_lat * 10.;
+    int square_lon = static_cast<int> (std::floor (x / 2.));
+    int square_lat = static_cast<int> (std::floor (y));
+    x -= square_lon * 2.;
+    y -= square_lat;
+    int sub_lon = static_cast<int> (std::floor (x * 12.));
+    int sub_lat = static_cast<int> (std::floor (y * 24.));
+
+    grid.clear ();
+    grid += QChar::fromLatin1 (static_cast<char> ('A' + field_lon));
+    grid += QChar::fromLatin1 (static_cast<char> ('A' + field_lat));
+    grid += QChar::fromLatin1 (static_cast<char> ('0' + square_lon));
+    grid += QChar::fromLatin1 (static_cast<char> ('0' + square_lat));
+    grid += QChar::fromLatin1 (static_cast<char> ('a' + sub_lon));
+    grid += QChar::fromLatin1 (static_cast<char> ('a' + sub_lat));
+    return true;
+  }
+
   // these undocumented flag values when stored in (Qt::UserRole - 1)
   // of a ComboBox item model index allow the item to be enabled or
   // disabled
@@ -315,6 +446,7 @@ namespace
       case Cloudlog::ConnectionCheckStatus::Success:
         return QStringLiteral ("QPushButton {background-color: green;}");
       case Cloudlog::ConnectionCheckStatus::ReadOnlyKey:
+      case Cloudlog::ConnectionCheckStatus::InsufficientScope:
         return QStringLiteral ("QPushButton {background-color: orange;}");
       case Cloudlog::ConnectionCheckStatus::InvalidKey:
       case Cloudlog::ConnectionCheckStatus::StationProfileUnavailable:
@@ -431,8 +563,8 @@ public:
     QDateTime end_time = enable_dates_checkbox_->isChecked() ? end_date_time_edit_->dateTime()  : QDateTime();
     return {
             frequency_line_edit_.frequency(),
-            Modes::value(mode_combo_box_.currentText()),
-            IARURegions::value(region_combo_box_.currentText()),
+            mode_combo_box_.currentData (Qt::EditRole).value<Modes::Mode> (),
+            region_combo_box_.currentData (Qt::EditRole).value<IARURegions::Region> (),
             description_line_edit_.text(), source_line_edit_.text(),
             start_time,
             end_time,
@@ -452,6 +584,7 @@ private:
   void update_accept_button ()
   {
     button_box->button (QDialogButtonBox::Ok)->setEnabled (frequency_line_edit_.hasAcceptableInput ()
+        && region_combo_box_.currentIndex () >= 0 && mode_combo_box_.currentIndex () >= 0
         && dates_are_sane ());
   }
 
@@ -556,6 +689,7 @@ public:
 class Configuration::impl final
   : public QDialog
 {
+  friend class TestConfigurationRadio;
   Q_OBJECT;
 
 public:
@@ -580,6 +714,11 @@ public:
   bool frequency_change_allowed (RigFrequencyChangePolicy::ChangeKind) const;
   bool transceiver_frequency (Frequency, RigFrequencyChangePolicy::ChangeKind);
   bool transceiver_tx_frequency (Frequency, RigFrequencyChangePolicy::ChangeKind);
+  bool request_frequency (RigFrequency::Request const&, RigFrequencyChangePolicy::ChangeKind);
+  void dispatch_frequencies ();
+  void handle_frequency_result (RigFrequency::Result const&);
+  void handle_frequency_observation (RigFrequency::Evidence const&);
+  void reproject_frequencies ();
   void transceiver_mode (MODE);
   void transceiver_ptt (bool);
   void transceiver_audio (bool);
@@ -631,6 +770,7 @@ private:
   QStringList get_selected_network_interfaces (CheckableItemComboBox *);
   Q_SLOT void host_info_results (QHostInfo);
   void check_multicast (QHostAddress const&);
+  bool update_udp_destination_error (QLineEdit *, QLabel *);
 
   void find_tab (QWidget *);
 
@@ -642,7 +782,15 @@ private:
       (WSJT_RIG_NONE_CAN_SPLIT || !rig_is_dummy_) &&
       (rig_params_.split_mode != TransceiverFactory::split_mode_none);
   }
-  void set_cached_mode ();
+  MODE configured_mode () const;
+  void send_transceiver (MODE = Transceiver::UNK);
+  bool prepare_radio_mode ();
+  void handle_mode_status (Transceiver::ModeStatus const&, unsigned);
+  void notify_mode_control (RadioModePolicy::State);
+  enum class TestPttState { Idle, Preparing, Active };
+  void set_test_ptt_state (TestPttState, QString const& status = {});
+  void finish_test_ptt_preparation ();
+  void stop_test_ptt ();
   bool open_rig (bool force = false);
   bool rig_restart_required (TransceiverFactory::ParameterPack const&, bool) const;
   bool tx_inhibit_blocks_rig_restart (TransceiverFactory::ParameterPack const&, bool) const;
@@ -651,11 +799,15 @@ private:
   void close_rig (bool failed = false);
   TransceiverFactory::ParameterPack gather_rig_data ();
   void enumerate_rigs ();
+  void normalize_rig_selections (bool restore = false);
   void set_rig_invariants ();
+  enum class RadioValidationError { none, invalid_ptt_method, invalid_ptt_port, invalid_footswitch_port };
+  static bool footswitch_port_clashes (QString const& footswitch_port, QString const& cat_serial_port,
+                                       TransceiverFactory::PTTMethod, QString const& ptt_port);
+  void update_footswitch_controls ();
+  RadioValidationError validate_radio_settings ();
   bool validate ();
   void fill_port_combo_box (QComboBox *);
-  Frequency apply_calibration (Frequency) const;
-  Frequency remove_calibration (Frequency) const;
 
   void delete_frequencies ();
   void load_frequencies ();
@@ -663,6 +815,10 @@ private:
   void save_frequencies ();
   void reset_frequencies ();
   void insert_frequency ();
+  void show_suggested_frequencies ();
+  void refresh_suggestion_notice ();
+  void dismiss_suggestions ();
+  void persist_seen_suggestions ();
   void size_frequency_table_columns();
 
     FrequencyList_v2_101::FrequencyItems read_frequencies_file (QString const&);
@@ -675,14 +831,15 @@ private:
 
   Q_SLOT void on_font_push_button_clicked ();
   Q_SLOT void on_decoded_text_font_push_button_clicked ();
-  Q_SLOT void on_PTT_port_combo_box_activated (int);
-  Q_SLOT void on_CAT_port_combo_box_activated (int);
+  Q_SLOT void on_PTT_port_combo_box_currentTextChanged (QString const&);
+  Q_SLOT void on_CAT_port_combo_box_currentTextChanged (QString const&);
   Q_SLOT void on_CAT_serial_baud_combo_box_currentIndexChanged (int);
   Q_SLOT void on_CAT_poll_interval_spin_box_valueChanged (int);
   Q_SLOT void on_test_CAT_push_button_clicked ();
   Q_SLOT void on_test_PTT_push_button_clicked (bool checked);
   Q_SLOT void on_pbTestCloudlog_clicked ();
   Q_SLOT void on_cbCloudlog_toggled (bool checked);
+  Q_SLOT void on_cbCloudlogRadio_toggled (bool checked);
   Q_SLOT void on_cbEQSL_toggled (bool checked);
   Q_SLOT void on_force_DTR_combo_box_currentIndexChanged (int);
   Q_SLOT void on_force_RTS_combo_box_currentIndexChanged (int);
@@ -694,6 +851,10 @@ private:
   Q_SLOT void on_delete_macro_push_button_clicked (bool = false);
   Q_SLOT void on_move_macro_up_push_button_clicked (bool = false);
   Q_SLOT void on_move_macro_down_push_button_clicked (bool = false);
+  Q_SLOT void on_grid_line_edit_editingFinished ();
+  Q_SLOT void on_latitude_line_edit_editingFinished ();
+  Q_SLOT void on_longitude_line_edit_editingFinished ();
+  void update_home_coordinates_style ();
   Q_SLOT void on_add_macro_line_edit_editingFinished ();
   Q_SLOT void delete_macro ();
   void delete_selected_macros (QModelIndexList);
@@ -720,15 +881,20 @@ private:
   void update_DXCC_control_availability ();
   Q_SLOT void on_PWR_and_SWR_check_box_toggled (bool);
   void update_PWR_and_SWR_control_availability ();
+  void apply_color_preset (DecodeHighlightingModel::ColorPreset const& preset);
+  void reset_highlighting (QString const& confirmation, DecodeHighlightingModel::HighlightItems const& items);
+  QString adif_log_path (QString const& custom) const
+  {
+    return custom.isEmpty () ? writable_file_path (writeable_data_dir_, "wsjtx_log.adi") : custom;
+  }
   Q_SLOT void handle_k4_calibration_progress (QString const&, float);
   Q_SLOT void handle_k4_calibration_finished (bool, QString const&, float, QString const&);
   Q_SLOT void handle_k4_tx_error (QString const&);
   Q_SLOT void handle_k4_rf_power_setting (double, bool);
-  Q_SLOT void on_reset_highlighting_to_defaults_push_button_clicked (bool);
-  Q_SLOT void on_reset_highlighting_to_defaults2_push_button_clicked (bool);
   Q_SLOT void on_move_highlighting_up_push_button_clicked (bool = false);
   Q_SLOT void on_move_highlighting_down_push_button_clicked (bool = false);
   Q_SLOT void on_rescan_log_push_button_clicked (bool);
+  Q_SLOT void on_history_sources_push_button_clicked (bool);
   Q_SLOT void on_CTY_download_button_clicked (bool);
   Q_SLOT void on_CALL3_download_button_clicked (bool);
   Q_SLOT void on_CALL3_EME_download_button_clicked (bool);
@@ -808,6 +974,9 @@ private:
   Q_SIGNAL void stop_transceiver () const;
   Q_SIGNAL void enqueue_jtty_pcm (QByteArray const&, TxAudioQueueEpoch, qint64) const;
   Q_SIGNAL void clear_jtty_pcm (TxAudioQueueEpoch) const;
+  Q_SIGNAL void receive_discontinuity (JttyReceiveReason) const;
+  Q_SIGNAL void receive_stop_reason (JttyReceiveReason) const;
+  Q_SIGNAL void receive_drain (quint64 requestId) const;
 
   PerformanceTrace::Phase construction_trace_;
   Configuration * const self_;  // back pointer to public interface
@@ -821,6 +990,7 @@ private:
 
   QNetworkAccessManager * network_manager_;
   QSettings * settings_;
+  QString ui_language_preference_;
   bool use_default_geometry_ {false};
   LogBook * logbook_;
 
@@ -860,8 +1030,16 @@ private:
   FrequencyList_v2_101 next_frequencies_;
   StationList stations_;
   StationList next_stations_;
-  FrequencyDelta current_offset_;
-  FrequencyDelta current_tx_offset_;
+  FrequencyAdapter frequency_adapter_;
+  RadioModePolicy radio_mode_policy_;
+  TestPttState test_ptt_state_ = TestPttState::Idle;
+  Frequency observed_rx_frequency_ = 0;
+  bool deferred_frequency_retry_scheduled_ = false;
+  std::function<RigFrequencyChangePolicy::Activity ()> frequency_activity_provider_;
+  quint64 legacy_frequency_id_ = quint64 {1} << 63;
+  std::array<RigFrequencyChangePolicy::ChangeKind, 2> frequency_kinds_ {{
+    RigFrequencyChangePolicy::ChangeKind::TxPathCorrection,
+    RigFrequencyChangePolicy::ChangeKind::TxPathCorrection}};
 
   QAction * frequency_delete_action_;
   QAction * frequency_insert_action_;
@@ -869,7 +1047,13 @@ private:
   QAction * save_frequencies_action_;
   QAction * merge_frequencies_action_;
   QAction * reset_frequencies_action_;
+  QAction * suggested_frequencies_action_;
   FrequencyDialog * frequency_dialog_;
+  QFrame * suggestions_notice_ {nullptr};
+  QLabel * suggestions_notice_label_ {nullptr};
+  QPushButton * suggestions_browse_button_ {nullptr};
+  QPushButton * suggestions_dismiss_button_ {nullptr};
+  FrequencySuggestions::NoticeState suggestion_notice_state_;
 
   QAction station_delete_action_;
   QAction station_insert_action_;
@@ -878,6 +1062,16 @@ private:
   DecodeHighlightingModel decode_highlighing_model_;
   DecodeHighlightingModel next_decode_highlighing_model_;
   bool highlight_by_mode_;
+  bool best_sp_new_dxcc_ {true};
+  bool best_sp_new_call_on_band_ {true};
+  QString adif_log_file_;
+  QString next_adif_log_file_;
+  QStringList supplemental_history_files_;
+  QStringList next_supplemental_history_files_;
+  HistoryFolders supplemental_history_folders_;
+  HistoryFolders next_supplemental_history_folders_;
+  QString worked_before_status_;
+  QString worked_before_errors_;
   bool highlight_only_fields_;
   bool include_WAE_entities_;
   bool highlight_73_;
@@ -901,6 +1095,10 @@ private:
   QLabel * k4_calibration_status_ {nullptr};
   TransceiverFactory::Capabilities::PortType last_port_type_;
   bool rig_is_dummy_;
+  RigFrequency::Ranges rig_tuning_ranges_;
+  bool rig_ranges_known_ {false};      // set by the rig's own online update
+  bool rig_ranges_fixed_ {false};      // tests only: ranges set by hand
+  bool rig_range_override_ {false};    // FreqCal's "Ignore range" box
   bool is_tci_;
   bool rig_active_;
   bool tx_inhibit_active_ {false};
@@ -919,6 +1117,9 @@ private:
   // configuration fields that we publish
   QString my_callsign_;
   QString my_grid_;
+  double home_latitude_ {0.};
+  double home_longitude_ {0.};
+  bool have_home_coordinates_ {false};
   QString FD_exchange_;
   QString RTTY_exchange_;
   QString Contest_Name_;
@@ -967,6 +1168,7 @@ private:
   QString hamlib_backed_up_;
   QString cloudLogApiUrl_;
   QString cloudLogApiKey_;
+  QString cloudLogRadioName_;
   QDir voice_directory_;
   bool send_to_eqsl_;
   QString eqsl_username_;
@@ -1022,6 +1224,9 @@ private:
   int watchdog_;
   int tune_watchdog_time_;
   bool tune_watchdog_;
+  bool footswitch_enabled_ {false};
+  QString footswitch_port_;
+  int footswitch_pin_ {0};
   bool TX_messages_;
   bool enable_VHF_features_;
   bool decode_at_52s_;
@@ -1045,6 +1250,7 @@ private:
   bool filters_for_word2_;
   bool twoDays_;
   bool bCloudLog_;
+  bool cloudLogRadioEnabled_;
   int  SelectedActivity_;
   bool x2ToneSpacing_;
   bool x4ToneSpacing_;
@@ -1129,6 +1335,13 @@ QDir Configuration::data_dir () const {return m_->data_dir_;}
 QDir Configuration::writeable_data_dir () const {return m_->writeable_data_dir_;}
 QDir Configuration::temp_dir () const {return m_->temp_dir_;}
 
+void Configuration::set_ui_language_preference (QString const& language)
+{
+  auto const index = m_->ui_->language_combo_box->findData (language);
+  m_->ui_language_preference_ = index < 0 ? QString {} : language;
+  m_->ui_->language_combo_box->setCurrentIndex (index < 0 ? 0 : index);
+}
+
 void Configuration::select_tab (int index) {m_->ui_->configuration_tabs->setCurrentIndex (index);}
 int Configuration::exec () {return m_->exec ();}
 bool Configuration::is_active () const {return m_->isVisible ();}
@@ -1176,6 +1389,8 @@ bool Configuration::cloudlog_enabled () const {return m_->bCloudLog_;}
 QString Configuration::cloudlog_api_url () const {return m_->cloudLogApiUrl_;}
 QString Configuration::cloudlog_api_key () const {return m_->cloudLogApiKey_;}
 qint32 Configuration::cloudlog_api_station_id () const {return m_->cloudLogStationID_;}
+bool Configuration::cloudlog_radio_enabled () const {return m_->cloudLogRadioEnabled_;}
+QString Configuration::cloudlog_radio_name () const {return m_->cloudLogRadioName_;}
 bool Configuration::prompt_to_log () const {return m_->prompt_to_log_;}
 bool Configuration::autoLog() const {return m_->autoLog_;}
 bool Configuration::contestingOnly() const {return m_->contestingOnly_;}
@@ -1196,6 +1411,17 @@ bool Configuration::alternate_bindings() const {return m_->alternate_bindings_;}
 int Configuration::watchdog () const {return m_->watchdog_;}
 int Configuration::tune_watchdog_time () const {return m_->tune_watchdog_time_;}
 bool Configuration::tune_watchdog () const {return m_->tune_watchdog_;}
+bool Configuration::footswitch_enabled () const {return m_->footswitch_enabled_;}
+QString Configuration::footswitch_port () const {return m_->footswitch_port_;}
+int Configuration::footswitch_pin () const {return m_->footswitch_pin_;}
+bool Configuration::footswitch_port_clash () const
+{
+  auto const serial_CAT = TransceiverFactory::Capabilities::serial
+    == m_->transceiver_factory_.CAT_port_type (m_->rig_params_.rig_name);
+  return impl::footswitch_port_clashes (m_->footswitch_port_,
+                                        serial_CAT ? m_->rig_params_.serial_port : QString {},
+                                        m_->rig_params_.ptt_type, m_->rig_params_.ptt_port);
+}
 bool Configuration::TX_messages () const {return m_->TX_messages_;}
 bool Configuration::enable_VHF_features () const {return m_->enable_VHF_features_;}
 bool Configuration::decode_at_52s () const {return m_->decode_at_52s_;}
@@ -1255,6 +1481,20 @@ bool Configuration::pwrBandTuneMemory () const {return m_->pwrBandTuneMemory_;}
 LotWUsers const& Configuration::lotw_users () const {return m_->lotw_users_;}
 DecodeHighlightingModel const& Configuration::decode_highlighting () const {return m_->decode_highlighing_model_;}
 bool Configuration::highlight_by_mode () const {return m_->highlight_by_mode_;}
+bool Configuration::best_sp_new_dxcc () const {return m_->best_sp_new_dxcc_;}
+bool Configuration::best_sp_new_call_on_band () const {return m_->best_sp_new_call_on_band_;}
+QString Configuration::adif_log_file_path () const {return m_->adif_log_path (m_->adif_log_file_);}
+QStringList const& Configuration::supplemental_history_files () const {return m_->supplemental_history_files_;}
+HistoryFolders const& Configuration::supplemental_history_folders () const {return m_->supplemental_history_folders_;}
+void Configuration::set_worked_before_status (QString const& status, QString const& errors)
+{
+  m_->worked_before_status_ = status;
+  m_->worked_before_errors_ = errors;
+  m_->ui_->worked_before_status_line_edit->setText (status);
+  m_->ui_->worked_before_status_line_edit->setCursorPosition (0);
+  m_->ui_->worked_before_status_line_edit->setToolTip (tr ("Open History sources for the full scan report and diagnostic details."));
+  Q_EMIT worked_before_status_changed ();
+}
 bool Configuration::highlight_only_fields () const {return m_->highlight_only_fields_;}
 bool Configuration::include_WAE_entities () const {return m_->include_WAE_entities_;}
 bool Configuration::highlight_73 () const {return m_->highlight_73_;}
@@ -1300,14 +1540,14 @@ void Configuration::read_CALL3_version ()
 void Configuration::set_calibration (CalibrationParams params)
 {
   m_->calibration_ = params;
+  m_->reproject_frequencies ();
 }
 
 void Configuration::enable_calibration (bool on)
 {
-  auto target_frequency = m_->remove_calibration (m_->cached_rig_state_.frequency ()) - m_->current_offset_;
+  if (m_->frequency_calibration_disabled_ == !on) return;
   m_->frequency_calibration_disabled_ = !on;
-  transceiver_frequency (
-    target_frequency, RigFrequencyChangePolicy::ChangeKind::TxPathCorrection);
+  m_->reproject_frequencies ();
 }
 
 bool Configuration::is_transceiver_online () const
@@ -1350,12 +1590,78 @@ bool Configuration::transceiver_frequency (Frequency f, RigFrequencyChangePolicy
   return m_->transceiver_frequency (f, kind);
 }
 
+bool Configuration::request_frequency (RigFrequency::Request const& request,
+                                        RigFrequencyChangePolicy::ChangeKind kind)
+{
+  if (!m_->can_control_rig ("request_frequency")) return false;
+  return m_->request_frequency (request, kind);
+}
+
+bool Configuration::rig_ranges_pending () const
+{
+  return m_->rig_active_ && !m_->rig_ranges_known_;
+}
+
+void Configuration::set_rig_tuning_ranges_for_test (RigFrequency::Ranges const& ranges)
+{
+  m_->rig_tuning_ranges_ = ranges;
+  m_->rig_ranges_known_ = true;
+  m_->rig_ranges_fixed_ = true;
+}
+
+bool Configuration::rig_range_override () const {return m_->rig_range_override_;}
+void Configuration::set_rig_range_override (bool override_ranges)
+{
+  m_->rig_range_override_ = override_ranges;
+  SettingsGroup g {m_->settings_, "Configuration"};
+  m_->settings_->setValue ("RigRangeOverride", override_ranges);
+}
+
+bool Configuration::rig_cannot_tune (Frequency frequency) const
+{
+  if (!m_->rig_active_ || !frequency || m_->rig_range_override_) return false;
+  FrequencyAdapter::Projection projection;
+  projection.offset = m_->stations_.offset (frequency);
+  projection.intercept = m_->calibration_.intercept;
+  projection.slope_ppm = m_->calibration_.slope_ppm;
+  projection.calibrated = !m_->frequency_calibration_disabled_;
+  // tunable() is empty when no ranges are known, and then the tune is allowed.
+  return !RigFrequency::tunable (m_->rig_tuning_ranges_, projection.encode (frequency)).value_or (true);
+}
+
+quint64 Configuration::frequency_generation () const
+{
+  return m_->frequency_adapter_.generation ();
+}
+
+void Configuration::set_frequency_activity_provider (
+  std::function<RigFrequencyChangePolicy::Activity ()> provider)
+{
+  m_->frequency_activity_provider_ = std::move (provider);
+}
+
 bool Configuration::transceiver_tx_frequency (Frequency f, RigFrequencyChangePolicy::ChangeKind kind)
 {
   LOG_TRACE (f << ' ' << m_->cached_rig_state_);
   if (!m_->frequency_change_allowed (kind)) return false;
   if (!m_->can_control_rig ("transceiver_tx_frequency")) return false;
   return m_->transceiver_tx_frequency (f, kind);
+}
+
+bool Configuration::prepare_radio_mode ()
+{
+  return m_->prepare_radio_mode ();
+}
+
+bool Configuration::radio_mode_ready () const
+{
+  return m_->configured_mode () == Transceiver::UNK || m_->rig_is_dummy_
+    || m_->radio_mode_policy_.ready ();
+}
+
+bool Configuration::radio_mode_yielded () const
+{
+  return m_->configured_mode () != Transceiver::UNK && m_->radio_mode_policy_.yielded ();
 }
 
 void Configuration::transceiver_mode (MODE mode)
@@ -1394,6 +1700,40 @@ void Configuration::transceiver_period (double period)
 
   if (!m_->can_control_rig ("transceiver_period")) return;
   m_->transceiver_period (period);
+}
+
+void Configuration::transceiver_receive_policy (ReceivePolicy policy)
+{
+  m_->cached_rig_state_.receive_policy (policy);
+  if (m_->cached_rig_state_.online () && m_->can_control_rig ("transceiver_receive_policy"))
+    m_->send_transceiver ();
+}
+
+void Configuration::transceiver_receive_discontinuity (JttyReceiveReason reason)
+{
+  Q_EMIT m_->receive_discontinuity (reason);
+}
+
+void Configuration::transceiver_receive_context (quint64 context)
+{
+  m_->cached_rig_state_.receive_context (context);
+  if (m_->cached_rig_state_.online () && m_->can_control_rig ("transceiver_receive_context"))
+    m_->send_transceiver ();
+}
+
+void Configuration::transceiver_receive_stop_reason (JttyReceiveReason reason)
+{
+  Q_EMIT m_->receive_stop_reason (reason);
+}
+
+void Configuration::requestContinuousReceiveDrain (quint64 requestId)
+{
+  if (!m_->rig_active_)
+    {
+      Q_EMIT continuousReceiveDrained (requestId, {});
+      return;
+    }
+  Q_EMIT m_->receive_drain (requestId);
 }
 
 void Configuration::transceiver_blocksize (qint32 blocksize)
@@ -1546,6 +1886,24 @@ QString Configuration::my_grid() const
     the_grid = m_->dynamic_grid_;
   }
   return the_grid;
+}
+
+bool Configuration::has_precise_home_coordinates () const
+{
+  // Coordinates that are just the centre of My Grid add no precision, so
+  // leave the astronomical calculation on its original grid-based path.
+  return m_->have_home_coordinates_ && !(m_->use_dynamic_grid_ && m_->dynamic_grid_.size () >= 4)
+    && !coordinates_are_grid_centre (m_->my_grid_, m_->home_latitude_, m_->home_longitude_);
+}
+
+double Configuration::home_latitude () const
+{
+  return m_->home_latitude_;
+}
+
+double Configuration::home_longitude () const
+{
+  return m_->home_longitude_;
 }
 
 QString Configuration::Field_Day_Exchange() const
@@ -2092,8 +2450,6 @@ Configuration::impl::impl (Configuration * self, QNetworkAccessManager * network
   , next_frequencies_ {&bands_}
   , stations_ {&bands_}
   , next_stations_ {&bands_}
-  , current_offset_ {0}
-  , current_tx_offset_ {0}
   , frequency_dialog_ {new FrequencyDialog {&regions_, &modes_, this}}
   , station_delete_action_ {tr ("&Delete"), nullptr}
   , station_insert_action_ {tr ("&Insert ..."), nullptr}
@@ -2135,7 +2491,31 @@ Configuration::impl::impl (Configuration * self, QNetworkAccessManager * network
   }
   initialize_k4_remote_ui ();
 
+  ui_->language_combo_box->addItem (tr ("System default"), QString {});
+  ui_->language_combo_box->addItem (tr ("English"), QStringLiteral ("en"));
+  QList<QPair<QString, QString>> languages;
+  for (auto const& language : L10nLoader::available_languages ())
+    {
+      if (language == "en") continue;
+      QLocale const locale {language};
+      auto name = locale.nativeLanguageName ();
+      if (language.contains ('_')) name += " (" + locale.nativeCountryName () + ')';
+      languages.append ({name, language});
+    }
+  std::sort (languages.begin (), languages.end (), [] (auto const& left, auto const& right) {
+      return QString::localeAwareCompare (left.first, right.first) < 0;
+    });
+  for (auto const& language : languages)
+    ui_->language_combo_box->addItem (language.first, language.second);
+
   SettingsDialogLayout::install (*ui_);
+
+  connect (ui_->n1mm_server_name_line_edit, &QLineEdit::editingFinished, this, [this] {
+      update_udp_destination_error (ui_->n1mm_server_name_line_edit, ui_->n1mm_server_error_label);
+    });
+  connect (ui_->n1mm_server_name_line_edit, &QLineEdit::textChanged, this, [this] {
+      update_udp_destination_error (ui_->n1mm_server_name_line_edit, ui_->n1mm_server_error_label);
+    });
 
   installEventFilter (this);
   ui_->configuration_tabs->setFocusPolicy (Qt::StrongFocus);
@@ -2166,6 +2546,10 @@ Configuration::impl::impl (Configuration * self, QNetworkAccessManager * network
   update_rig_invariants_when_checked (ui_->CAT_handshake_button_group);
   update_rig_invariants_when_checked (ui_->PTT_method_button_group);
   update_rig_invariants_when_checked (ui_->split_mode_button_group);
+  update_rig_invariants_when_checked (ui_->TX_mode_button_group);
+  update_rig_invariants_when_checked (ui_->TX_audio_source_button_group);
+  connect (ui_->tci_audio_check_box, &QCheckBox::toggled, this, &Configuration::impl::stop_test_ptt);
+  connect (ui_->PWR_and_SWR_check_box, &QCheckBox::toggled, this, &Configuration::impl::stop_test_ptt);
 
   auto set_accessible_line_edit_names = [] (QList<QLineEdit *> const& line_edits,
                                             QString const& name_template) {
@@ -2251,20 +2635,48 @@ Configuration::impl::impl (Configuration * self, QNetworkAccessManager * network
   ui_->split_rig_radio_button->setAccessibleName (tr ("Rig split operation"));
   ui_->split_emulate_radio_button->setAccessibleName (tr ("Fake It split operation"));
   ui_->CAT_poll_interval_spin_box->setAccessibleName (tr ("CAT poll interval"));
+  ui_->footswitch_group_box->setAccessibleName (tr ("Footswitch T/R"));
+  ui_->footswitch_enable_check_box->setAccessibleName (tr ("Use footswitch"));
+  ui_->footswitch_port_combo_box->setAccessibleName (tr ("Footswitch port"));
+  ui_->footswitch_pin_combo_box->setAccessibleName (tr ("Footswitch input line"));
   ui_->calibration_slope_ppm_spin_box->setAccessibleName (tr ("Frequency calibration slope"));
   ui_->calibration_intercept_spin_box->setAccessibleName (tr ("Frequency calibration intercept"));
   ui_->frequencies_table_view->setAccessibleName (tr ("Working frequencies table"));
+  suggestions_notice_ = new QFrame {ui_->frequencies_tab};
+  suggestions_notice_->setFrameShape (QFrame::StyledPanel);
+  auto * suggestions_notice_layout = new QHBoxLayout {suggestions_notice_};
+  suggestions_notice_label_ = new QLabel {suggestions_notice_};
+  suggestions_notice_label_->setWordWrap (true);
+  suggestions_browse_button_ = new QPushButton {tr ("Browse suggestions..."), suggestions_notice_};
+  suggestions_dismiss_button_ = new QPushButton {tr ("Dismiss"), suggestions_notice_};
+  suggestions_notice_layout->addWidget (suggestions_notice_label_, 1);
+  suggestions_notice_layout->addWidget (suggestions_browse_button_);
+  suggestions_notice_layout->addWidget (suggestions_dismiss_button_);
+  ui_->horizontalLayout->insertWidget (0, suggestions_notice_);
+  suggestions_notice_->hide ();
+  connect (suggestions_browse_button_, &QPushButton::clicked,
+           this, &Configuration::impl::show_suggested_frequencies);
+  connect (suggestions_dismiss_button_, &QPushButton::clicked,
+           this, &Configuration::impl::dismiss_suggestions);
   ui_->stations_table_view->setAccessibleName (tr ("Station information table"));
   ui_->highlighting_list_view->setAccessibleName (tr ("Decode highlighting rules"));
   ui_->highlighting_list_view->setAccessibleDescription (tr ("Highlighting rules and priorities for decoded messages."));
   ui_->highlighting_actions_tool_button->setAccessibleName (tr ("Decode highlighting actions"));
-  ui_->highlighting_actions_tool_button->setAccessibleDescription (tr ("Change or reset colors for the selected highlighting rule."));
+  ui_->highlighting_actions_tool_button->setAccessibleDescription (
+    tr ("Change colors or restore Default 1 colors and enabled state for the selected highlighting rule."));
   ui_->move_highlighting_up_push_button->setAccessibleName (tr ("Move selected highlighting rule up"));
   ui_->move_highlighting_up_push_button->setAccessibleDescription (tr ("Move the selected highlighting rule earlier in priority order."));
   ui_->move_highlighting_down_push_button->setAccessibleName (tr ("Move selected highlighting rule down"));
   ui_->move_highlighting_down_push_button->setAccessibleDescription (tr ("Move the selected highlighting rule later in priority order."));
+  ui_->color_presets_tool_button->setAccessibleName (tr ("Decode highlighting color presets"));
+  ui_->color_presets_tool_button->setAccessibleDescription (tr ("Apply colors to all decode highlighting rules without changing which rules are enabled or their priority."));
+  ui_->reset_highlighting_tool_button->setAccessibleName (tr ("Reset decode highlighting"));
+  ui_->reset_highlighting_tool_button->setAccessibleDescription (tr ("Restore colors, enabled rules, and priority order to a complete default configuration."));
   ui_->highlight_orange_callsigns->setAccessibleName (tr ("Orange highlight callsigns and grids"));
   ui_->highlight_blue_callsigns->setAccessibleName (tr ("Blue highlight callsigns and grids"));
+  ui_->history_sources_push_button->setAccessibleName (tr ("Manage worked-before history sources"));
+  ui_->worked_before_status_line_edit->setAccessibleName (tr ("Worked-before history loading status"));
+  ui_->worked_before_status_line_edit->setAccessibleDescription (tr ("Last scan result. Open History sources for source paths and error details."));
 
   register_settings_focus_page (ui_->general_tab, {
     ui_->callsign_line_edit,
@@ -2284,6 +2696,7 @@ Configuration::impl::impl (Configuration * self, QNetworkAccessManager * network
     ui_->DXCC_check_box,
     ui_->ppfx_check_box,
     ui_->show_country_names_check_box,
+    ui_->language_combo_box,
     ui_->monitor_off_check_box,
     ui_->enable_VHF_features_check_box,
     ui_->repeat_Tx_check_box,
@@ -2341,6 +2754,9 @@ Configuration::impl::impl (Configuration * self, QNetworkAccessManager * network
     ui_->PTT_CAT_radio_button,
     ui_->PTT_RTS_radio_button,
     ui_->PTT_port_combo_box,
+    ui_->footswitch_enable_check_box,
+    ui_->footswitch_port_combo_box,
+    ui_->footswitch_pin_combo_box,
     ui_->TX_source_data_radio_button,
     ui_->TX_source_mic_radio_button,
     ui_->mode_none_radio_button,
@@ -2412,6 +2828,8 @@ Configuration::impl::impl (Configuration * self, QNetworkAccessManager * network
   register_settings_focus_page (ui_->frequencies_tab, {
     ui_->calibration_slope_ppm_spin_box,
     ui_->calibration_intercept_spin_box,
+    suggestions_browse_button_,
+    suggestions_dismiss_button_,
     ui_->frequencies_actions_tool_button,
     ui_->frequencies_table_view,
     ui_->stations_actions_tool_button,
@@ -2423,9 +2841,11 @@ Configuration::impl::impl (Configuration * self, QNetworkAccessManager * network
     ui_->highlighting_actions_tool_button,
     ui_->move_highlighting_up_push_button,
     ui_->move_highlighting_down_push_button,
-    ui_->reset_highlighting_to_defaults_push_button,
-    ui_->reset_highlighting_to_defaults2_push_button,
+    ui_->color_presets_tool_button,
+    ui_->reset_highlighting_tool_button,
+    ui_->history_sources_push_button,
     ui_->rescan_log_push_button,
+    ui_->worked_before_status_line_edit,
     ui_->highlight_by_mode_check_box,
     ui_->highlight_orange_check_box,
     ui_->highlight_orange_callsigns,
@@ -2453,6 +2873,8 @@ Configuration::impl::impl (Configuration * self, QNetworkAccessManager * network
     ui_->cbx4ToneSpacing,
     ui_->rbLowSidelobes,
     ui_->rbMaxSensitivity,
+    ui_->best_sp_new_dxcc_check_box,
+    ui_->best_sp_new_call_on_band_check_box,
     ui_->cbSpecialOpActivity,
     ui_->rbFox,
     ui_->cbSuperFox,
@@ -2479,6 +2901,8 @@ Configuration::impl::impl (Configuration * self, QNetworkAccessManager * network
     ui_->leCloudlogApiKey,
     ui_->cbCloudlogStationProfile,
     ui_->pbTestCloudlog,
+    ui_->cbCloudlogRadio,
+    ui_->leCloudlogRadioName,
     ui_->cbEQSL,
     ui_->eqsluser_edit,
     ui_->eqslpasswd_edit,
@@ -2620,6 +3044,12 @@ Configuration::impl::impl (Configuration * self, QNetworkAccessManager * network
     PerformanceTrace::Phase settings_read {"configuration.settings_read"};
     read_settings ();
   }
+  {
+    SettingsGroup g {settings_, "Configuration"};
+    suggestion_notice_state_ = FrequencySuggestions::NoticeState {
+      settings_->value ("SeenSuggestedFrequencyKeys").toStringList (),
+      settings_->contains ("SeenSuggestedFrequencyKeys")};
+  }
 
   // set up dynamic loading of audio devices
   connect (ui_->sound_input_combo_box, &LazyFillComboBox::about_to_show_popup, [this] () {
@@ -2663,6 +3093,27 @@ Configuration::impl::impl (Configuration * self, QNetworkAccessManager * network
   //
   ui_->callsign_line_edit->setValidator (new CallsignValidator {this});
   ui_->grid_line_edit->setValidator (new MaidenheadLocatorValidator {this});
+  auto latitude_validator = new QDoubleValidator {-90.0, 90.0, 8, this};
+  latitude_validator->setNotation (QDoubleValidator::StandardNotation);
+  latitude_validator->setLocale (QLocale::c ());
+  ui_->latitude_line_edit->setValidator (latitude_validator);
+  auto longitude_validator = new QDoubleValidator {-180.0, 180.0, 8, this};
+  longitude_validator->setNotation (QDoubleValidator::StandardNotation);
+  longitude_validator->setLocale (QLocale::c ());
+  ui_->longitude_line_edit->setValidator (longitude_validator);
+
+  auto location_enter_filter = new LocationLineEditEnterFilter {this};
+  ui_->grid_line_edit->installEventFilter (location_enter_filter);
+  ui_->latitude_line_edit->installEventFilter (location_enter_filter);
+  ui_->longitude_line_edit->installEventFilter (location_enter_filter);
+  // My Grid is only checked once editing is finished (see
+  // on_grid_line_edit_editingFinished), since a partly typed locator
+  // would briefly make grid-derived coordinates look user-entered.
+  for (auto edit : {ui_->latitude_line_edit, ui_->longitude_line_edit})
+    {
+      connect (edit, &QLineEdit::textChanged, this, &Configuration::impl::update_home_coordinates_style);
+    }
+
   ui_->add_macro_line_edit->setValidator (new QRegularExpressionValidator {message_alphabet, this});
   ui_->Field_Day_Exchange->setValidator (new QRegularExpressionValidator {field_day_exchange_re, this});
   ui_->RTTY_Exchange->setValidator (new QRegularExpressionValidator {RTTY_roundup_exchange_re, this});
@@ -2722,6 +3173,14 @@ Configuration::impl::impl (Configuration * self, QNetworkAccessManager * network
   ui_->PTT_port_combo_box->setItemData (ui_->PTT_port_combo_box->count () - 1, "Delegate to proxy CAT service", Qt::ToolTipRole);
 
   //
+  // setup footswitch port and input pin combo boxes
+  //
+  fill_port_combo_box (ui_->footswitch_port_combo_box);
+  ui_->footswitch_pin_combo_box->addItems ({"CTS", "DSR", "DCD", "RI"});
+  connect (ui_->footswitch_enable_check_box, &QCheckBox::toggled,
+           this, &Configuration::impl::update_footswitch_controls);
+
+  //
   // setup hooks to keep audio channels aligned with devices
   //
   {
@@ -2754,6 +3213,14 @@ Configuration::impl::impl (Configuration * self, QNetworkAccessManager * network
   frequencies_.sort (FrequencyList_v2_101::frequency_column);
 
   ui_->frequencies_table_view->setModel (&next_frequencies_);
+  connect (&next_frequencies_, &QAbstractItemModel::dataChanged,
+           this, [this] { refresh_suggestion_notice (); });
+  connect (&next_frequencies_, &QAbstractItemModel::rowsInserted,
+           this, [this] { refresh_suggestion_notice (); });
+  connect (&next_frequencies_, &QAbstractItemModel::rowsRemoved,
+           this, [this] { refresh_suggestion_notice (); });
+  connect (&next_frequencies_, &QAbstractItemModel::modelReset,
+           this, [this] { refresh_suggestion_notice (); });
   ui_->frequencies_table_view->setTabKeyNavigation (false);
   ui_->frequencies_table_view->horizontalHeader ()->setSectionResizeMode (QHeaderView::ResizeToContents);
 
@@ -2779,6 +3246,11 @@ Configuration::impl::impl (Configuration * self, QNetworkAccessManager * network
   ui_->frequencies_table_view->insertAction (nullptr, frequency_insert_action_);
   connect (frequency_insert_action_, &QAction::triggered, this, &Configuration::impl::insert_frequency);
 
+  suggested_frequencies_action_ = new QAction {tr ("Add suggested frequencies ..."), ui_->frequencies_table_view};
+  ui_->frequencies_table_view->insertAction (nullptr, suggested_frequencies_action_);
+  connect (suggested_frequencies_action_, &QAction::triggered,
+           this, &Configuration::impl::show_suggested_frequencies);
+
   load_frequencies_action_ = new QAction {tr ("&Load ..."), ui_->frequencies_table_view};
   ui_->frequencies_table_view->insertAction (nullptr, load_frequencies_action_);
   connect (load_frequencies_action_, &QAction::triggered, this, &Configuration::impl::load_frequencies);
@@ -2799,6 +3271,7 @@ Configuration::impl::impl (Configuration * self, QNetworkAccessManager * network
   frequencies_actions_menu->addAction (frequency_insert_action_);
   frequencies_actions_menu->addAction (frequency_delete_action_);
   frequencies_actions_menu->addSeparator ();
+  frequencies_actions_menu->addAction (suggested_frequencies_action_);
   frequencies_actions_menu->addAction (load_frequencies_action_);
   frequencies_actions_menu->addAction (save_frequencies_action_);
   frequencies_actions_menu->addAction (merge_frequencies_action_);
@@ -2849,6 +3322,56 @@ Configuration::impl::impl (Configuration * self, QNetworkAccessManager * network
         }
     });
   ui_->highlighting_actions_tool_button->setMenu (highlighting_actions_menu);
+
+  auto color_presets_menu = new QMenu {ui_->color_presets_tool_button};
+  auto default_colors_action = color_presets_menu->addAction (tr ("Default 1 colors (original)"));
+  connect (default_colors_action, &QAction::triggered, this, [this] {
+      apply_color_preset (DecodeHighlightingModel::default_color_preset ());
+    });
+  auto default2_colors_action = color_presets_menu->addAction (tr ("Default 2 colors (alternative)"));
+  connect (default2_colors_action, &QAction::triggered, this, [this] {
+      apply_color_preset (DecodeHighlightingModel::default2_color_preset ());
+    });
+  color_presets_menu->addSeparator ();
+  auto red_green_colors_action = color_presets_menu->addAction (tr ("Red/green color-vision friendly"));
+  connect (red_green_colors_action, &QAction::triggered, this, [this] {
+      apply_color_preset (DecodeHighlightingModel::red_green_color_vision_preset ());
+    });
+  auto blue_yellow_colors_action = color_presets_menu->addAction (tr ("Blue/yellow color-vision friendly"));
+  connect (blue_yellow_colors_action, &QAction::triggered, this, [this] {
+      apply_color_preset (DecodeHighlightingModel::blue_yellow_color_vision_preset ());
+    });
+  auto high_contrast_colors_action = color_presets_menu->addAction (tr ("High contrast"));
+  connect (high_contrast_colors_action, &QAction::triggered, this, [this] {
+      apply_color_preset (DecodeHighlightingModel::high_contrast_color_preset ());
+    });
+  color_presets_menu->addSeparator ();
+  auto dark_shack_colors_action = color_presets_menu->addAction (tr ("Dark shack"));
+  connect (dark_shack_colors_action, &QAction::triggered, this, [this] {
+      apply_color_preset (DecodeHighlightingModel::dark_shack_color_preset ());
+    });
+  auto solarized_colors_action = color_presets_menu->addAction (tr ("Solarized"));
+  connect (solarized_colors_action, &QAction::triggered, this, [this] {
+      apply_color_preset (DecodeHighlightingModel::solarized_color_preset ());
+    });
+  auto monochrome_colors_action = color_presets_menu->addAction (tr ("Monochrome"));
+  connect (monochrome_colors_action, &QAction::triggered, this, [this] {
+      apply_color_preset (DecodeHighlightingModel::monochrome_color_preset ());
+    });
+  ui_->color_presets_tool_button->setMenu (color_presets_menu);
+
+  auto reset_highlighting_menu = new QMenu {ui_->reset_highlighting_tool_button};
+  auto reset_default_action = reset_highlighting_menu->addAction (tr ("Default 1"));
+  connect (reset_default_action, &QAction::triggered, this, [this] {
+      reset_highlighting (tr ("Reset all decode highlighting and priorities to Default 1 values"),
+                          DecodeHighlightingModel::default_items ());
+    });
+  auto reset_default2_action = reset_highlighting_menu->addAction (tr ("Default 2"));
+  connect (reset_default2_action, &QAction::triggered, this, [this] {
+      reset_highlighting (tr ("Reset all decode highlighting and priorities to Default 2 values"),
+                          DecodeHighlightingModel::default_items2 ());
+    });
+  ui_->reset_highlighting_tool_button->setMenu (reset_highlighting_menu);
 
   {
     PerformanceTrace::Phase rig_models {"configuration.rig_models"};
@@ -2981,6 +3504,7 @@ void Configuration::impl::initialize_models ()
 {
   QScopedValueRollback<bool> initializing_models {initializing_models_, true};
 
+  ui_->language_combo_box->setCurrentIndex (ui_->language_combo_box->findData (ui_language_preference_));
   next_audio_input_device_ = audio_input_device_;
   next_audio_input_channel_ = audio_input_channel_;
   next_audio_output_device_ = audio_output_device_;
@@ -3006,6 +3530,10 @@ void Configuration::impl::initialize_models ()
   ui_->grid_line_edit->setPalette (pal);
   ui_->callsign_line_edit->setText (my_callsign_);
   ui_->grid_line_edit->setText (my_grid_);
+  ui_->latitude_line_edit->setText (have_home_coordinates_ ? QString::number (home_latitude_, 'f', 6) : QString {});
+  ui_->longitude_line_edit->setText (have_home_coordinates_ ? QString::number (home_longitude_, 'f', 6) : QString {});
+  if (!have_home_coordinates_) on_grid_line_edit_editingFinished ();
+  update_home_coordinates_style ();
   ui_->use_dynamic_grid->setChecked(use_dynamic_grid_);
   ui_->CW_id_interval_spin_box->setValue (id_interval_);
   ui_->align_spin_box->setValue (align_steps_);
@@ -3067,6 +3595,10 @@ void Configuration::impl::initialize_models ()
   ui_->alternate_bindings_check_box->setChecked (alternate_bindings_);
   ui_->tx_watchdog_spin_box->setValue (watchdog_);
   ui_->tune_watchdog_check_box->setChecked(tune_watchdog_);
+  ui_->footswitch_enable_check_box->setChecked (footswitch_enabled_);
+  ui_->footswitch_port_combo_box->setCurrentText (footswitch_port_);
+  ui_->footswitch_pin_combo_box->setCurrentIndex (footswitch_pin_);
+  update_footswitch_controls ();
   ui_->tune_watchdog_spin_box->setValue (tune_watchdog_time_);
   ui_->TX_messages_check_box->setChecked (TX_messages_);
   ui_->enable_VHF_features_check_box->setChecked(enable_VHF_features_);
@@ -3095,6 +3627,8 @@ void Configuration::impl::initialize_models ()
   ui_->cbEQSL->setChecked(send_to_eqsl_);
   ui_->leCloudlogApiUrl->setText(cloudLogApiUrl_);
   ui_->leCloudlogApiKey->setText(cloudLogApiKey_);
+  ui_->cbCloudlogRadio->setChecked (cloudLogRadioEnabled_);
+  ui_->leCloudlogRadioName->setText (cloudLogRadioName_);
   ui_->cbCloudlogStationProfile->clear ();
   if (cloudLogStationID_ > 0)
     {
@@ -3151,6 +3685,7 @@ void Configuration::impl::initialize_models ()
   ui_->udp_TTL_spin_box->setValue (udp_TTL_);
   ui_->accept_udp_requests_check_box->setChecked (accept_udp_requests_);
   ui_->n1mm_server_name_line_edit->setText (n1mm_server_name_);
+  update_udp_destination_error (ui_->n1mm_server_name_line_edit, ui_->n1mm_server_error_label);
   ui_->n1mm_server_port_spin_box->setValue (n1mm_server_port_);
   ui_->enable_n1mm_broadcast_check_box->setChecked (broadcast_to_n1mm_);
   ui_->udpWindowToFront->setChecked(udpWindowToFront_);
@@ -3172,14 +3707,24 @@ void Configuration::impl::initialize_models ()
       ui_->PTT_port_combo_box->setCurrentText (rig_params_.ptt_port);
     }
 
-  ui_->region_combo_box->setCurrentIndex (region_);
+  ui_->region_combo_box->setCurrentIndex (
+    ui_->region_combo_box->findData (QVariant::fromValue (region_), Qt::EditRole));
 
   next_macros_.setStringList (macros_.stringList ());
   next_frequencies_.frequency_list (frequencies_.frequency_list ());
+  if (suggestion_notice_state_.acknowledge_present_catalog (
+        FrequencyList_v2_101::default_items (), frequencies_.frequency_list ()))
+    persist_seen_suggestions ();
+  refresh_suggestion_notice ();
   next_stations_.station_list (stations_.station_list ());
 
   next_decode_highlighing_model_.items (decode_highlighing_model_.items ());
   ui_->highlight_by_mode_check_box->setChecked (highlight_by_mode_);
+  ui_->best_sp_new_dxcc_check_box->setChecked (best_sp_new_dxcc_);
+  ui_->best_sp_new_call_on_band_check_box->setChecked (best_sp_new_call_on_band_);
+  next_adif_log_file_ = adif_log_file_;
+  next_supplemental_history_files_ = supplemental_history_files_;
+  next_supplemental_history_folders_ = supplemental_history_folders_;
   ui_->only_fields_check_box->setChecked (highlight_only_fields_);
   ui_->include_WAE_check_box->setChecked (include_WAE_entities_);
   ui_->highlight_73_check_box->setChecked (highlight_73_);
@@ -3214,11 +3759,14 @@ void Configuration::impl::initialize_models ()
 
   check_visibility ();
 
+  normalize_rig_selections (true);
+  initializing_models_ = false;
   set_rig_invariants ();
 }
 
 void Configuration::impl::done (int r)
 {
+  stop_test_ptt ();
   // do this here since window is still on screen at this point
   SettingsGroup g {settings_, "Configuration"};
   settings_->setValue ("window/geometry", saveGeometry ());
@@ -3231,7 +3779,6 @@ void Configuration::impl::read_settings ()
 {
   SettingsGroup g {settings_, "Configuration"};
   LOG_INFO(QString{"Configuration Settings (%1)"}.arg(settings_->fileName()));
-  QStringList keys = settings_->allKeys();
 
   use_default_geometry_ = !settings_->contains ("window/geometry");
   if (!use_default_geometry_)
@@ -3241,6 +3788,14 @@ void Configuration::impl::read_settings ()
 
   my_callsign_ = settings_->value ("MyCall", QString {}).toString ();
   my_grid_ = settings_->value ("MyGrid", QString {}).toString ();
+  have_home_coordinates_ = settings_->contains ("HomeLatitude") && settings_->contains ("HomeLongitude");
+  if (have_home_coordinates_)
+    {
+      home_latitude_ = settings_->value ("HomeLatitude").toDouble ();
+      home_longitude_ = settings_->value ("HomeLongitude").toDouble ();
+      have_home_coordinates_ = home_latitude_ >= -90. && home_latitude_ <= 90.
+        && home_longitude_ >= -180. && home_longitude_ <= 180.;
+    }
   FD_exchange_ = settings_->value ("Field_Day_Exchange",QString {}).toString ();
   RTTY_exchange_ = settings_->value ("RTTY_Exchange",QString {}).toString ();
   Contest_Name_ = settings_->value ("Contest_Name",QString {}).toString ();
@@ -3387,6 +3942,7 @@ void Configuration::impl::read_settings ()
   type_2_msg_gen_ = settings_->value ("Type2MsgGen", QVariant::fromValue (Configuration::type_2_msg_3_full)).value<Configuration::Type2MsgGen> ();
 
   monitor_off_at_startup_ = settings_->value ("MonitorOFF", false).toBool ();
+  rig_range_override_ = settings_->value ("RigRangeOverride", false).toBool ();
   monitor_last_used_ = settings_->value ("MonitorLastUsed", false).toBool ();
   spot_to_psk_reporter_ = settings_->value ("PSKReporter", false).toBool ();
   psk_reporter_tcpip_ = settings_->value ("PSKReporterTCPIP", false).toBool ();
@@ -3464,7 +4020,36 @@ void Configuration::impl::read_settings ()
   auto highlight_items = settings_->value ("DecodeHighlighting", QVariant::fromValue (DecodeHighlightingModel::default_items ())).value<DecodeHighlightingModel::HighlightItems> ();
   if (!highlight_items.size ()) highlight_items = DecodeHighlightingModel::default_items ();
   decode_highlighing_model_.items (highlight_items);
+  auto selection_setting = [&] (char const * key, DecodeHighlightingModel::Highlight type) {
+    if (!settings_->contains (key))
+      {
+        auto const enabled = !settings_->contains ("DecodeHighlighting") || std::any_of (
+          highlight_items.cbegin (), highlight_items.cend (), [type] (auto const& item) {
+            return item.type_ == type && item.enabled_;
+          });
+        settings_->setValue (key, enabled);
+      }
+    return settings_->value (key).toBool ();
+  };
+  best_sp_new_dxcc_ = selection_setting ("BestSPNewDXCC", DecodeHighlightingModel::Highlight::DXCC);
+  best_sp_new_call_on_band_ = selection_setting ("BestSPNewCallOnBand", DecodeHighlightingModel::Highlight::CallBand);
   highlight_by_mode_ = settings_->value("HighlightByMode", false).toBool ();
+  adif_log_file_ = settings_->value ("AdifLogFile").toString ().trimmed ();
+  if (!adif_log_file_.isEmpty ())
+    adif_log_file_ = QDir::cleanPath (writeable_data_dir_.absoluteFilePath (adif_log_file_));
+  supplemental_history_files_ = WorkedBefore::normalize_history_files (
+    settings_->value ("SupplementalHistoryFiles").toStringList (),
+    adif_log_path (adif_log_file_));
+  supplemental_history_folders_.clear ();
+  auto const history_folder_count = settings_->beginReadArray ("SupplementalHistoryFolders");
+  for (int index = 0; index < history_folder_count; ++index)
+    {
+      settings_->setArrayIndex (index);
+      supplemental_history_folders_.append ({settings_->value ("Path").toString (),
+                                             settings_->value ("IncludeSubfolders", false).toBool ()});
+    }
+  settings_->endArray ();
+  supplemental_history_folders_ = WorkedBefore::normalize_history_folders (supplemental_history_folders_);
   highlight_only_fields_ = settings_->value("OnlyFieldsSought", false).toBool ();
   include_WAE_entities_ = settings_->value("IncludeWAEEntities", false).toBool ();
   highlight_73_ = settings_->value("Highlight73", true).toBool ();
@@ -3532,6 +4117,9 @@ void Configuration::impl::read_settings ()
   alternate_bindings_ = settings_->value ("AlternateBindings", false).toBool ();
   watchdog_ = settings_->value ("TxWatchdog", 6).toInt ();
   tune_watchdog_ = settings_->value("TuneWatchdog",true).toBool ();
+  footswitch_enabled_ = settings_->value ("FootswitchEnabled", false).toBool ();
+  footswitch_port_ = settings_->value ("FootswitchPort").toString ();
+  footswitch_pin_ = qBound (0, settings_->value ("FootswitchPin", 0).toInt (), 3);
   tune_watchdog_time_ = settings_->value ("TuneWatchdogTime", 90).toInt ();
   TX_messages_ = settings_->value ("Tx2QSO", true).toBool ();
   enable_VHF_features_ = settings_->value("VHFUHF",false).toBool ();
@@ -3560,6 +4148,8 @@ void Configuration::impl::read_settings ()
   cloudLogApiUrl_ = settings_->value ("CloudLogApiUrl", QString {}).toString ();
   cloudLogApiKey_ = settings_->value ("CloudLogApiKey", QString {}).toString ();
   cloudLogStationID_ = settings_->value("CloudLogStationID",1).toInt ();
+  cloudLogRadioEnabled_ = settings_->value ("CloudLogRadioEnabled", false).toBool ();
+  cloudLogRadioName_ = settings_->value ("CloudLogRadioName", QStringLiteral ("WSJT-X")).toString ();
   SelectedActivity_ = settings_->value("SelectedActivity",1).toInt ();
   x2ToneSpacing_ = settings_->value("x2ToneSpacing",false).toBool ();
   x4ToneSpacing_ = settings_->value("x4ToneSpacing",false).toBool ();
@@ -3572,6 +4162,16 @@ void Configuration::impl::read_settings ()
   udp_TTL_ = settings_->value ("UDPTTL", 1).toInt ();
   udp_server_port_ = settings_->value ("UDPServerPort", 2237).toUInt ();
   n1mm_server_name_ = settings_->value ("N1MMServer", "127.0.0.1").toString ();
+  auto clear_psk_reporter_destination = [this] (QString& host, char const * key) {
+      if (is_psk_reporter_destination (host))
+        {
+          host.clear ();
+          // A missing key would restore localhost rather than disable the feed.
+          settings_->setValue (key, host);
+        }
+    };
+  clear_psk_reporter_destination (udp_server_name_, "UDPServer");
+  clear_psk_reporter_destination (n1mm_server_name_, "N1MMServer");
   n1mm_server_port_ = settings_->value ("N1MMServerPort", 2333).toUInt ();
   broadcast_to_n1mm_ = settings_->value ("BroadcastToN1MM", false).toBool ();
   accept_udp_requests_ = settings_->value ("AcceptUDPRequests", false).toBool ();
@@ -3612,7 +4212,7 @@ void Configuration::impl::read_settings ()
   // but its endpoint comes from K4Remote/Host and K4Remote/Port.  Do not apply
   // the legacy TCI "missing CATTCIPort" fallback to this sole radio.
 #ifdef WIN32
-  QTimer::singleShot (2500, [=] {display_file_information ();});
+  QTimer::singleShot (2500, this, &Configuration::impl::display_file_information);
 #else
   ui_->hamlib_groupBox->setTitle("Hamlib Version");
   ui_->rbHamlib64->setVisible(false);
@@ -3621,7 +4221,7 @@ void Configuration::impl::read_settings ()
   ui_->revert_update_button->setVisible(false);
   ui_->backed_up_text->setVisible(false);
   ui_->backed_up->setVisible(false);
-  QTimer::singleShot (2500, [=] {display_file_information ();});
+  QTimer::singleShot (2500, this, &Configuration::impl::display_file_information);
 #endif
 }
 
@@ -3659,6 +4259,16 @@ void Configuration::impl::write_settings ()
 
   settings_->setValue ("MyCall", my_callsign_);
   settings_->setValue ("MyGrid", my_grid_);
+  if (have_home_coordinates_)
+    {
+      settings_->setValue ("HomeLatitude", home_latitude_);
+      settings_->setValue ("HomeLongitude", home_longitude_);
+    }
+  else
+    {
+      settings_->remove ("HomeLatitude");
+      settings_->remove ("HomeLongitude");
+    }
   settings_->setValue ("Field_Day_Exchange", FD_exchange_);
   settings_->setValue ("RTTY_Exchange", RTTY_exchange_);
   settings_->setValue ("Contest_Name", Contest_Name_);
@@ -3764,6 +4374,19 @@ void Configuration::impl::write_settings ()
   settings_->setValue ("FrequenciesForRegionModes_v2", QVariant::fromValue (frequencies_.frequency_list ()));
   settings_->setValue ("DecodeHighlighting", QVariant::fromValue (decode_highlighing_model_.items ()));
   settings_->setValue ("HighlightByMode", highlight_by_mode_);
+  settings_->setValue ("BestSPNewDXCC", best_sp_new_dxcc_);
+  settings_->setValue ("BestSPNewCallOnBand", best_sp_new_call_on_band_);
+  settings_->setValue ("AdifLogFile", adif_log_file_);
+  settings_->setValue ("SupplementalHistoryFiles", supplemental_history_files_);
+  settings_->beginWriteArray ("SupplementalHistoryFolders", supplemental_history_folders_.size ());
+  for (int index = 0; index < supplemental_history_folders_.size (); ++index)
+    {
+      settings_->setArrayIndex (index);
+      auto const& folder = supplemental_history_folders_.at (index);
+      settings_->setValue ("Path", folder.path);
+      settings_->setValue ("IncludeSubfolders", folder.include_subfolders);
+    }
+  settings_->endArray ();
   settings_->setValue ("OnlyFieldsSought", highlight_only_fields_);
   settings_->setValue ("IncludeWAEEntities", include_WAE_entities_);
   settings_->setValue ("Highlight73", highlight_73_);
@@ -3804,6 +4427,10 @@ void Configuration::impl::write_settings ()
   settings_->setValue ("AlternateBindings", alternate_bindings_);
   settings_->setValue ("TxWatchdog", watchdog_);
   settings_->setValue ("TuneWatchdog", tune_watchdog_);
+  settings_->setValue ("FootswitchEnabled", footswitch_enabled_);
+  settings_->setValue ("FootswitchPort", footswitch_port_);
+  settings_->setValue ("FootswitchPin", footswitch_pin_);
+  settings_->remove ("FootswitchInvert"); // option withdrawn: normally open switch only
   settings_->setValue ("TuneWatchdogTime", tune_watchdog_time_);
   settings_->setValue ("Tx2QSO", TX_messages_);
   settings_->setValue ("CATForceDTR", rig_params_.force_dtr);
@@ -3840,6 +4467,8 @@ void Configuration::impl::write_settings ()
   settings_->setValue ("CloudLogApiUrl", cloudLogApiUrl_);
   settings_->setValue ("CloudLogApiKey", cloudLogApiKey_);
   settings_->setValue ("CloudLogStationID", cloudLogStationID_);
+  settings_->setValue ("CloudLogRadioEnabled", cloudLogRadioEnabled_);
+  settings_->setValue ("CloudLogRadioName", cloudLogRadioName_);
   settings_->setValue ("x2ToneSpacing", x2ToneSpacing_);
   settings_->setValue ("x4ToneSpacing", x4ToneSpacing_);
   settings_->setValue ("OpCall", opCall_);
@@ -3893,17 +4522,100 @@ void Configuration::impl::write_settings ()
   settings_->sync ();
 }
 
+void Configuration::impl::normalize_rig_selections (bool restore)
+{
+  QSignalBlocker cat_signals {ui_->CAT_port_combo_box};
+  QSignalBlocker ptt_signals {ui_->PTT_port_combo_box};
+  auto const rig = ui_->rig_combo_box->currentText ();
+  auto const port_type = transceiver_factory_.CAT_port_type (rig);
+  if (TransceiverFactory::basic_transceiver_name_ != rig
+      && (restore || port_type != last_port_type_))
+    {
+      last_port_type_ = port_type;
+      switch (port_type)
+        {
+        case TransceiverFactory::Capabilities::serial:
+          fill_port_combo_box (ui_->CAT_port_combo_box);
+          ui_->CAT_port_combo_box->addItem ("USB");
+          ui_->CAT_port_combo_box->setItemData (ui_->CAT_port_combo_box->count () - 1, "Custom USB device", Qt::ToolTipRole);
+          ui_->CAT_port_combo_box->setCurrentText (rig_params_.serial_port);
+          if (ui_->CAT_port_combo_box->currentText ().isEmpty () && ui_->CAT_port_combo_box->count ())
+            {
+              ui_->CAT_port_combo_box->setCurrentText (ui_->CAT_port_combo_box->itemText (0));
+            }
+          ui_->CAT_port_label->setText (tr ("Serial Port:"));
+          ui_->CAT_port_combo_box->setToolTip (tr ("Serial port used for CAT control"));
+          ui_->CAT_port_combo_box->setEnabled (true);
+          break;
+
+        case TransceiverFactory::Capabilities::tci:
+          ui_->CAT_port_combo_box->clear ();
+          ui_->CAT_port_combo_box->setCurrentText (rig_params_.tci_port);
+          ui_->CAT_port_label->setText (tr ("TCI Server:"));
+          ui_->CAT_port_combo_box->setToolTip (tr ("Optional hostname and port of TCI service.\n"
+                                                 "Leave blank for a sensible default on this machine.\n"
+                                                 "Formats:\n"
+                                                 "\thostname:port\n"
+                                                 "\tIPv4-address:port\n"
+                                                 "\t[IPv6-address]:port"));
+          ui_->CAT_port_combo_box->setEnabled (true);
+          break;
+
+        case TransceiverFactory::Capabilities::network:
+          ui_->CAT_port_combo_box->clear ();
+          ui_->CAT_port_combo_box->setCurrentText (rig_params_.network_port);
+          ui_->CAT_port_label->setText (tr ("Network Server:"));
+          ui_->CAT_port_combo_box->setToolTip (tr ("Optional hostname and port of network service.\n"
+                                                   "Leave blank for a sensible default on this machine.\n"
+                                                   "Formats:\n"
+                                                   "\thostname:port\n"
+                                                   "\tIPv4-address:port\n"
+                                                   "\t[IPv6-address]:port"));
+          ui_->CAT_port_combo_box->setEnabled (true);
+          break;
+
+        case TransceiverFactory::Capabilities::usb:
+          ui_->CAT_port_combo_box->clear ();
+          ui_->CAT_port_combo_box->setCurrentText (rig_params_.usb_port);
+          ui_->CAT_port_label->setText (tr ("USB Device:"));
+          ui_->CAT_port_combo_box->setToolTip (tr ("Optional device identification.\n"
+                                                   "Leave blank for a sensible default for the rig.\n"
+                                                   "Format:\n"
+                                                   "\t[VID[:PID[:VENDOR[:PRODUCT]]]]"));
+          ui_->CAT_port_combo_box->setEnabled (true);
+          break;
+
+        default:
+          ui_->CAT_port_combo_box->clear ();
+          ui_->CAT_port_combo_box->setEnabled (false);
+          break;
+        }
+    }
+  auto const indirect_ptt = transceiver_factory_.has_CAT_indirect_serial_PTT (rig);
+  ui_->PTT_port_combo_box->setItemData (ui_->PTT_port_combo_box->findText ("CAT")
+                                     , indirect_ptt ? combo_box_item_enabled : combo_box_item_disabled
+                                     , Qt::UserRole - 1);
+  auto const ptt_port = ui_->PTT_port_combo_box->currentText ();
+  if (("CAT" == ptt_port && !indirect_ptt) || "USB" == ptt_port)
+    {
+      ui_->PTT_port_combo_box->setCurrentIndex (-1);
+      ui_->PTT_port_combo_box->clearEditText ();
+    }
+}
+
 void Configuration::impl::set_rig_invariants ()
 {
+  if (initializing_models_) return;
+
+  stop_test_ptt ();
+
+  normalize_rig_selections ();
   auto const& rig = ui_->rig_combo_box->currentText ();
   auto const& ptt_port = ui_->PTT_port_combo_box->currentText ();
   auto ptt_method = static_cast<TransceiverFactory::PTTMethod> (ui_->PTT_method_button_group->checkedId ());
 
   auto CAT_PTT_enabled = transceiver_factory_.has_CAT_PTT (rig);
-  auto CAT_indirect_serial_PTT = transceiver_factory_.has_CAT_indirect_serial_PTT (rig);
   auto asynchronous_CAT = transceiver_factory_.has_asynchronous_CAT (rig);
-  auto is_hw_handshake = ui_->CAT_handshake_group_box->isEnabled ()
-    && TransceiverFactory::handshake_hardware == static_cast<TransceiverFactory::Handshake> (ui_->CAT_handshake_button_group->checkedId ());
   is_tci_ = ui_->rig_combo_box->currentText ().startsWith ("TCI Cli")
     || ui_->rig_combo_box->currentText () == QStringLiteral ("Elecraft K4 Remote");
   ui_->tci_audio_check_box->setVisible(is_tci_);
@@ -3921,6 +4633,8 @@ void Configuration::impl::set_rig_invariants ()
   auto port_type = transceiver_factory_.CAT_port_type (rig);
 
   bool is_serial_CAT (TransceiverFactory::Capabilities::serial == port_type);
+  auto const is_hw_handshake = is_serial_CAT
+    && TransceiverFactory::handshake_hardware == static_cast<TransceiverFactory::Handshake> (ui_->CAT_handshake_button_group->checkedId ());
   auto const& cat_port = ui_->CAT_port_combo_box->currentText ();
 
   // only enable CAT option if transceiver has CAT PTT
@@ -3932,20 +4646,6 @@ void Configuration::impl::set_rig_invariants ()
   ui_->PTT_port_combo_box->setEnabled (enable_ptt_port);
   ui_->PTT_port_label->setEnabled (enable_ptt_port);
 
-  if (CAT_indirect_serial_PTT)
-    {
-      ui_->PTT_port_combo_box->setItemData (ui_->PTT_port_combo_box->findText ("CAT")
-                                            , combo_box_item_enabled, Qt::UserRole - 1);
-    }
-  else
-    {
-      ui_->PTT_port_combo_box->setItemData (ui_->PTT_port_combo_box->findText ("CAT")
-                                            , combo_box_item_disabled, Qt::UserRole - 1);
-      if ("CAT" == ui_->PTT_port_combo_box->currentText () && ui_->PTT_port_combo_box->currentIndex () > 0)
-        {
-          ui_->PTT_port_combo_box->setCurrentIndex (ui_->PTT_port_combo_box->currentIndex () - 1);
-        }
-    }
   ui_->PTT_RTS_radio_button->setEnabled (!((is_serial_CAT && ptt_port == cat_port && is_hw_handshake) || is_tci_));
 
   if (QStringLiteral ("None") == rig)
@@ -3976,75 +4676,6 @@ void Configuration::impl::set_rig_invariants ()
       ui_->test_CAT_push_button->setEnabled (true);
       ui_->test_PTT_push_button->setEnabled (false);
       ui_->TX_audio_source_group_box->setEnabled (transceiver_factory_.has_CAT_PTT_mic_data (rig) && TransceiverFactory::PTT_method_CAT == ptt_method);
-      if (port_type != last_port_type_)
-        {
-          last_port_type_ = port_type;
-          switch (port_type)
-            {
-            case TransceiverFactory::Capabilities::serial:
-              fill_port_combo_box (ui_->CAT_port_combo_box);
-              ui_->CAT_port_combo_box->setCurrentText (rig_params_.serial_port);
-              if (ui_->CAT_port_combo_box->currentText ().isEmpty () && ui_->CAT_port_combo_box->count ())
-                {
-                  ui_->CAT_port_combo_box->setCurrentText (ui_->CAT_port_combo_box->itemText (0));
-                }
-              ui_->CAT_port_label->setText (tr ("Serial Port:"));
-              ui_->CAT_port_combo_box->setToolTip (tr ("Serial port used for CAT control"));
-              ui_->CAT_port_combo_box->setEnabled (true);
-              break;
-
-            case TransceiverFactory::Capabilities::tci:
-              ui_->CAT_port_combo_box->clear ();
-              ui_->CAT_port_combo_box->setCurrentText (rig_params_.tci_port);
-              ui_->CAT_port_label->setText (tr ("TCI Server:"));
-              ui_->CAT_port_combo_box->setToolTip (tr ("Optional hostname and port of TCI service.\n"
-                                                     "Leave blank for a sensible default on this machine.\n"
-                                                     "Formats:\n"
-                                                     "\thostname:port\n"
-                                                     "\tIPv4-address:port\n"
-                                                     "\t[IPv6-address]:port"));
-              ui_->CAT_port_combo_box->setEnabled (true);
-              break;
-
-            case TransceiverFactory::Capabilities::k4_remote:
-              ui_->CAT_port_combo_box->clear ();
-              ui_->CAT_port_combo_box->setCurrentText (rig_params_.k4_host);
-              ui_->CAT_port_label->setText (tr ("Host:"));
-              ui_->CAT_port_combo_box->setToolTip (
-                tr ("K4 remote host name, IPv4 address, or .local name."));
-              ui_->CAT_port_combo_box->setEnabled (true);
-              break;
-
-            case TransceiverFactory::Capabilities::network:
-              ui_->CAT_port_combo_box->clear ();
-              ui_->CAT_port_combo_box->setCurrentText (rig_params_.network_port);
-              ui_->CAT_port_label->setText (tr ("Network Server:"));
-              ui_->CAT_port_combo_box->setToolTip (tr ("Optional hostname and port of network service.\n"
-                                                       "Leave blank for a sensible default on this machine.\n"
-                                                       "Formats:\n"
-                                                       "\thostname:port\n"
-                                                       "\tIPv4-address:port\n"
-                                                       "\t[IPv6-address]:port"));
-              ui_->CAT_port_combo_box->setEnabled (true);
-              break;
-
-            case TransceiverFactory::Capabilities::usb:
-              ui_->CAT_port_combo_box->clear ();
-              ui_->CAT_port_combo_box->setCurrentText (rig_params_.usb_port);
-              ui_->CAT_port_label->setText (tr ("USB Device:"));
-              ui_->CAT_port_combo_box->setToolTip (tr ("Optional device identification.\n"
-                                                       "Leave blank for a sensible default for the rig.\n"
-                                                       "Format:\n"
-                                                       "\t[VID[:PID[:VENDOR[:PRODUCT]]]]"));
-              ui_->CAT_port_combo_box->setEnabled (true);
-              break;
-
-            default:
-              ui_->CAT_port_combo_box->clear ();
-              ui_->CAT_port_combo_box->setEnabled (false);
-              break;
-            }
-        }
       ui_->CAT_serial_port_parameters_group_box->setEnabled (is_serial_CAT);
       ui_->force_DTR_combo_box->setEnabled (is_serial_CAT
                                             && (cat_port != ptt_port
@@ -4062,8 +4693,144 @@ void Configuration::impl::set_rig_invariants ()
                                               || TransceiverFactory::basic_transceiver_name_ != rig);
 }
 
+auto Configuration::impl::validate_radio_settings () -> RadioValidationError
+{
+  set_rig_invariants ();
+
+  if (!ui_->PTT_method_button_group->checkedButton ()->isEnabled ())
+    {
+      return RadioValidationError::invalid_ptt_method;
+    }
+
+  auto ptt_method = static_cast<TransceiverFactory::PTTMethod> (ui_->PTT_method_button_group->checkedId ());
+  auto ptt_port = ui_->PTT_port_combo_box->currentText ();
+  auto const ptt_port_index = ui_->PTT_port_combo_box->findText (ptt_port);
+  if ((TransceiverFactory::PTT_method_DTR == ptt_method || TransceiverFactory::PTT_method_RTS == ptt_method)
+      && (ptt_port.trimmed ().isEmpty ()
+          || (ptt_port_index >= 0
+              && combo_box_item_disabled == ui_->PTT_port_combo_box->itemData (ptt_port_index, Qt::UserRole - 1))))
+    {
+      return RadioValidationError::invalid_ptt_port;
+    }
+
+  if (ui_->footswitch_enable_check_box->isChecked ())
+    {
+      auto const serial_CAT = TransceiverFactory::Capabilities::serial
+        == transceiver_factory_.CAT_port_type (ui_->rig_combo_box->currentText ());
+      auto const footswitch_port = ui_->footswitch_port_combo_box->currentText ().trimmed ();
+      if (footswitch_port.isEmpty ()
+          || footswitch_port_clashes (footswitch_port,
+                                      serial_CAT ? ui_->CAT_port_combo_box->currentText () : QString {},
+                                      ptt_method, ptt_port))
+        {
+          return RadioValidationError::invalid_footswitch_port;
+        }
+    }
+
+  return RadioValidationError::none;
+}
+
+bool Configuration::impl::footswitch_port_clashes (QString const& footswitch_port,
+                                                   QString const& cat_serial_port,
+                                                   TransceiverFactory::PTTMethod ptt_method,
+                                                   QString const& ptt_port)
+{
+  // Reduce a port name to the device it identifies, so different names for
+  // the same adapter match: \\.\COM4 and COM4 on Windows; on Linux and
+  // macOS symlinks such as /dev/serial/by-id/... resolve to /dev/ttyUSB0.
+  auto device = [] (QString port) {
+    port = port.trimmed ().remove (QRegularExpression {R"(^\\\\\.\\)"});
+#ifndef Q_OS_WIN
+    if (!port.isEmpty () && !port.startsWith ('/')) port.prepend ("/dev/");
+    auto const canonical = QFileInfo {port}.canonicalFilePath ();
+    if (!canonical.isEmpty ()) port = canonical;
+#endif
+    return port;
+  };
+#ifdef Q_OS_WIN
+  auto constexpr case_sensitivity = Qt::CaseInsensitive;
+#else
+  auto constexpr case_sensitivity = Qt::CaseSensitive;
+#endif
+  auto same = [&] (QString const& a, QString const& b) {
+    return !b.trimmed ().isEmpty ()
+      && 0 == QString::compare (device (a), device (b), case_sensitivity);
+  };
+  if (footswitch_port.trimmed ().isEmpty ()) return false;
+  if (same (footswitch_port, cat_serial_port)) return true;
+  return (TransceiverFactory::PTT_method_DTR == ptt_method
+          || TransceiverFactory::PTT_method_RTS == ptt_method)
+    && same (footswitch_port, ptt_port);
+}
+
+void Configuration::impl::update_footswitch_controls ()
+{
+  auto const enabled = ui_->footswitch_enable_check_box->isChecked ();
+  ui_->footswitch_port_label->setEnabled (enabled);
+  ui_->footswitch_port_combo_box->setEnabled (enabled);
+  ui_->footswitch_pin_label->setEnabled (enabled);
+  ui_->footswitch_pin_combo_box->setEnabled (enabled);
+}
+
 bool Configuration::impl::validate ()
 {
+  auto const primary_invalid = update_udp_destination_error (ui_->udp_server_line_edit, ui_->udp_server_error_label);
+  auto const adif_invalid = update_udp_destination_error (ui_->n1mm_server_name_line_edit, ui_->n1mm_server_error_label);
+  if (primary_invalid || adif_invalid)
+    {
+      find_tab (primary_invalid ? ui_->udp_server_line_edit : ui_->n1mm_server_name_line_edit);
+      auto error = primary_invalid ? ui_->udp_server_error_label : ui_->n1mm_server_error_label;
+      // Focus scrolling and the expanded layout must settle before revealing the explanation.
+      QTimer::singleShot (0, this, [this, error] {
+          if (error->isVisible ())
+            if (auto scroll = SettingsDialogLayout::pageScrollArea (ui_->reporting_tab))
+              scroll->ensureWidgetVisible (error);
+        });
+      return false;
+    }
+
+  auto const radio_error = validate_radio_settings ();
+
+  // Latitude/longitude are conventional signed decimal degrees.  Allow both
+  // fields to be empty (legacy/grid-only configuration), but if either is
+  // supplied require a complete, in-range pair before accepting Settings.
+  auto const latitude_text = ui_->latitude_line_edit->text ().trimmed ();
+  auto const longitude_text = ui_->longitude_line_edit->text ().trimmed ();
+  if (!latitude_text.isEmpty () || !longitude_text.isEmpty ())
+    {
+      if (!ui_->latitude_line_edit->hasAcceptableInput ()
+          || !ui_->longitude_line_edit->hasAcceptableInput ())
+        {
+          find_tab (ui_->latitude_line_edit);
+          MessageBox::critical_message (this, tr ("Invalid station coordinates"),
+                                        tr ("Latitude must be between -90 and +90 degrees, "
+                                            "and longitude between -180 and +180 degrees."));
+          return false;
+        }
+    }
+
+  // Do not rely on editingFinished having synchronized My Grid with the
+  // coordinate fields before OK is clicked.  A valid coordinate pair must
+  // lie inside the displayed six-character locator.
+  if (!latitude_text.isEmpty () && !longitude_text.isEmpty ())
+    {
+      bool lat_ok {false};
+      bool lon_ok {false};
+      auto lat = latitude_text.toDouble (&lat_ok);
+      auto lon = longitude_text.toDouble (&lon_ok);
+      QString coordinate_grid;
+      auto grid = ui_->grid_line_edit->text ().trimmed ().left (6);
+      if (grid.size () < 6) grid += "mm";
+      if (lat_ok && lon_ok && coordinates_to_grid (lat, lon, coordinate_grid)
+          && coordinate_grid.compare (grid, Qt::CaseInsensitive) != 0)
+        {
+          find_tab (ui_->grid_line_edit);
+          MessageBox::critical_message (this, tr ("Inconsistent station location"),
+                                        tr ("Latitude and longitude must lie within the My Grid locator."));
+          return false;
+        }
+    }
+
   if (ui_->CAT_port_combo_box->currentText ().trimmed ().isEmpty ())
     {
       find_tab (ui_->CAT_port_combo_box);
@@ -4100,23 +4867,26 @@ bool Configuration::impl::validate ()
       // don't reject as we can work without an audio output
     }
 
-  if (!ui_->PTT_method_button_group->checkedButton ()->isEnabled ())
+  if (RadioValidationError::invalid_ptt_method == radio_error)
     {
       find_tab (ui_->PTT_method_button_group->checkedButton ());
       MessageBox::critical_message (this, tr ("Invalid PTT method"));
       return false;
     }
 
-  auto ptt_method = static_cast<TransceiverFactory::PTTMethod> (ui_->PTT_method_button_group->checkedId ());
-  auto ptt_port = ui_->PTT_port_combo_box->currentText ();
-  auto const ptt_port_index = ui_->PTT_port_combo_box->findText (ptt_port);
-  if ((TransceiverFactory::PTT_method_DTR == ptt_method || TransceiverFactory::PTT_method_RTS == ptt_method)
-      && (ptt_port.isEmpty ()
-          || (ptt_port_index >= 0
-              && combo_box_item_disabled == ui_->PTT_port_combo_box->itemData (ptt_port_index, Qt::UserRole - 1))))
+  if (RadioValidationError::invalid_ptt_port == radio_error)
     {
       find_tab (ui_->PTT_port_combo_box);
       MessageBox::critical_message (this, tr ("Invalid PTT port"));
+      return false;
+    }
+
+  if (RadioValidationError::invalid_footswitch_port == radio_error)
+    {
+      find_tab (ui_->footswitch_port_combo_box);
+      MessageBox::critical_message (this, tr ("Invalid footswitch port"),
+                                    tr ("Select a serial port for the footswitch that is not "
+                                        "used for CAT or PTT."));
       return false;
     }
 
@@ -4158,6 +4928,9 @@ int Configuration::impl::exec ()
                                    // require the Transceiver to be
                                    // re-opened
   rig_changed_ = false;
+
+  // pick up USB serial adapters plugged in since the dialog was last shown
+  fill_port_combo_box (ui_->footswitch_port_combo_box);
 
   initialize_models ();
 
@@ -4241,6 +5014,7 @@ TransceiverFactory::ParameterPack Configuration::impl::gather_rig_data ()
 
 void Configuration::impl::accept ()
 {
+  stop_test_ptt ();
   // Called when OK button is clicked.
   if (!validate ())
     {
@@ -4357,6 +5131,16 @@ void Configuration::impl::accept ()
 
   my_callsign_ = ui_->callsign_line_edit->text ();
   my_grid_ = ui_->grid_line_edit->text ();
+  bool lat_ok {false};
+  bool lon_ok {false};
+  auto lat = ui_->latitude_line_edit->text ().toDouble (&lat_ok);
+  auto lon = ui_->longitude_line_edit->text ().toDouble (&lon_ok);
+  have_home_coordinates_ = lat_ok && lon_ok && lat >= -90. && lat <= 90. && lon >= -180. && lon <= 180.;
+  if (have_home_coordinates_)
+    {
+      home_latitude_ = lat;
+      home_longitude_ = lon;
+    }
   FD_exchange_= ui_->Field_Day_Exchange->text ().toUpper ();
   RTTY_exchange_= ui_->RTTY_Exchange->text ().toUpper ();
   Contest_Name_= ui_->Contest_Name->text ().toUpper ();
@@ -4407,6 +5191,8 @@ void Configuration::impl::accept ()
 
   read_voice_directory ();
 
+  auto const previous_decodes_from_top = decodes_from_top_;
+
   spot_to_psk_reporter_ = ui_->psk_reporter_check_box->isChecked ();
   psk_reporter_tcpip_ = ui_->psk_reporter_tcpip_check_box->isChecked ();
   eqsl_username_ = ui_->eqsluser_edit->text ();
@@ -4450,9 +5236,15 @@ void Configuration::impl::accept ()
   alternate_bindings_ = ui_->alternate_bindings_check_box->isChecked ();
   watchdog_ = ui_->tx_watchdog_spin_box->value ();
   tune_watchdog_ = ui_->tune_watchdog_check_box->isChecked ();
+  footswitch_enabled_ = ui_->footswitch_enable_check_box->isChecked ();
+  footswitch_port_ = ui_->footswitch_port_combo_box->currentText ().trimmed ();
+  footswitch_pin_ = qMax (0, ui_->footswitch_pin_combo_box->currentIndex ());
   tune_watchdog_time_ = ui_->tune_watchdog_spin_box->value ();
   TX_messages_ = ui_->TX_messages_check_box->isChecked ();
   data_mode_ = static_cast<DataMode> (ui_->TX_mode_button_group->checkedId ());
+  auto const previous_mode_control = radio_mode_policy_.state ();
+  radio_mode_policy_.configure (configured_mode ());
+  notify_mode_control (previous_mode_control);
   bLowSidelobes_ = ui_->rbLowSidelobes->isChecked();
   save_directory_.setPath (ui_->save_path_display_label->text ());
   azel_directory_.setPath (ui_->azel_path_display_label->text ());
@@ -4483,11 +5275,20 @@ void Configuration::impl::accept ()
   cloudLogApiUrl_ = ui_->leCloudlogApiUrl->text ();
   cloudLogApiKey_ = ui_->leCloudlogApiKey->text ();
   cloudLogStationID_ = cloudlog_station_profile_id ();
+  cloudLogRadioEnabled_ = ui_->cbCloudlogRadio->isChecked ();
+  cloudLogRadioName_ = ui_->leCloudlogRadioName->text ().trimmed ();
+  if (cloudLogRadioName_.isEmpty ())
+    {
+      cloudLogRadioName_ = QStringLiteral ("WSJT-X");
+    }
   SelectedActivity_ = ui_->special_op_activity_button_group->checkedId();
   x2ToneSpacing_ = ui_->cbx2ToneSpacing->isChecked ();
   x4ToneSpacing_ = ui_->cbx4ToneSpacing->isChecked ();
+  auto const calibration_changed = calibration_.intercept != ui_->calibration_intercept_spin_box->value ()
+    || calibration_.slope_ppm != ui_->calibration_slope_ppm_spin_box->value ();
   calibration_.intercept = ui_->calibration_intercept_spin_box->value ();
   calibration_.slope_ppm = ui_->calibration_slope_ppm_spin_box->value ();
+  if (calibration_changed) reproject_frequencies ();
   sortAlphabetically_ = ui_->cbSortAlphabetically->isChecked ();
   hideCARD_ = ui_->cbHideCARD->isChecked ();
   AzElExtraLines_ = ui_->checkBoxAzElExtraLines->isChecked ();
@@ -4541,7 +5342,12 @@ void Configuration::impl::accept ()
       macros_.setStringList (next_macros_.stringList ());
     }
 
-  region_ = IARURegions::value (ui_->region_combo_box->currentText ());
+  auto const region_key = ui_->region_combo_box->currentData (Qt::EditRole);
+  if (region_key.userType () == qMetaTypeId<IARURegions::Region> ())
+    {
+      auto const region = region_key.value<IARURegions::Region> ();
+      if (region >= IARURegions::ALL && region < IARURegions::SENTINAL) region_ = region;
+    }
 
   if (frequencies_.frequency_list () != next_frequencies_.frequency_list ())
     {
@@ -4561,6 +5367,8 @@ void Configuration::impl::accept ()
       Q_EMIT self_->decode_highlighting_changed (decode_highlighing_model_);
     }
   highlight_by_mode_ = ui_->highlight_by_mode_check_box->isChecked ();
+  best_sp_new_dxcc_ = ui_->best_sp_new_dxcc_check_box->isChecked ();
+  best_sp_new_call_on_band_ = ui_->best_sp_new_call_on_band_check_box->isChecked ();
   highlight_only_fields_ = ui_->only_fields_check_box->isChecked ();
   include_WAE_entities_ = ui_->include_WAE_check_box->isChecked ();
   highlight_73_ = ui_->highlight_73_check_box->isChecked ();
@@ -4608,11 +5416,42 @@ void Configuration::impl::accept ()
   alert_QSYmessage_ = ui_->cbQSYmessage->isChecked();
   alert_Enabled_ = ui_->pbAlerts->isChecked();
 
+  auto const language = ui_->language_combo_box->currentData ().toString ();
+  if (language != ui_language_preference_)
+    {
+      ui_language_preference_ = language;
+      Q_EMIT self_->ui_language_preference_changed (language);
+    }
+
+  auto const adif_log_file = next_adif_log_file_.trimmed ().isEmpty ()
+    ? QString {} : QDir::cleanPath (writeable_data_dir_.absoluteFilePath (next_adif_log_file_.trimmed ()));
+  auto history_files = WorkedBefore::normalize_history_files (
+    next_supplemental_history_files_, adif_log_path (adif_log_file));
+  auto history_folders = WorkedBefore::normalize_history_folders (next_supplemental_history_folders_);
+  bool history_changed = adif_log_file != adif_log_file_
+    || history_files != supplemental_history_files_
+    || history_folders != supplemental_history_folders_;
+  adif_log_file_ = adif_log_file;
+  next_adif_log_file_ = adif_log_file;
+  supplemental_history_files_ = history_files;
+  next_supplemental_history_files_ = history_files;
+  supplemental_history_folders_ = history_folders;
+  next_supplemental_history_folders_ = history_folders;
   write_settings ();		// make visible to all
+  if (history_changed) Q_EMIT self_->supplemental_history_sources_changed ();
+  if (previous_decodes_from_top != decodes_from_top_)
+    {
+      Q_EMIT self_->decodes_from_top_changed (decodes_from_top_);
+    }
+  if (suggestion_notice_state_.commit (FrequencyList_v2_101::default_items (),
+                                       frequencies_.frequency_list ()))
+    persist_seen_suggestions ();
 }
 
 void Configuration::impl::reject ()
 {
+  stop_test_ptt ();
+  suggestion_notice_state_.cancel ();
   if (dns_lookup_id_ > -1)
     {
       QHostInfo::abortHostLookup (dns_lookup_id_);
@@ -4652,23 +5491,25 @@ void Configuration::impl::on_font_push_button_clicked ()
   next_font_ = QFontDialog::getFont (0, next_font_, this);
 }
 
-void Configuration::impl::on_reset_highlighting_to_defaults_push_button_clicked (bool /*checked*/)
+void Configuration::impl::apply_color_preset (DecodeHighlightingModel::ColorPreset const& preset)
 {
-  if (MessageBox::Yes == MessageBox::query_message (this
-                                                    , tr ("Reset Decode Highlighting")
-                                                    , tr ("Reset all decode highlighting and priorities to Default 1 values")))
+  if (!next_decode_highlighing_model_.apply_color_preset (preset))
     {
-      next_decode_highlighing_model_.items (DecodeHighlightingModel::default_items ());
+      MessageBox::warning_message (
+        this,
+        tr ("Color Preset Error"),
+        tr ("The selected color preset could not be applied. "
+            "Reset decode highlighting to a default configuration and try again."));
     }
 }
 
-void Configuration::impl::on_reset_highlighting_to_defaults2_push_button_clicked (bool /*checked*/)
+void Configuration::impl::reset_highlighting (QString const& confirmation, DecodeHighlightingModel::HighlightItems const& items)
 {
-    if (MessageBox::Yes == MessageBox::query_message (this
-                             , tr ("Reset Decode Highlighting")
-                             , tr ("Reset all decode highlighting and priorities to Default 2 values")))
+  if (MessageBox::Yes == MessageBox::query_message (this
+                                                    , tr ("Reset Decode Highlighting")
+                                                    , confirmation))
     {
-      next_decode_highlighing_model_.items (DecodeHighlightingModel::default_items2 ());
+      next_decode_highlighing_model_.items (items);
     }
 }
 
@@ -4677,6 +5518,329 @@ void Configuration::impl::on_rescan_log_push_button_clicked (bool /*clicked*/)
   if (logbook_) {
     logbook_->rescan ();
   }
+}
+
+void Configuration::impl::on_history_sources_push_button_clicked (bool /*clicked*/)
+{
+  // These outlive the dialog's child widgets, whose handlers refer to them.
+  QString primary_path = adif_log_path (next_adif_log_file_);
+  QString chosen_log = next_adif_log_file_;
+  QDialog dialog {this};
+  dialog.setWindowTitle (tr ("Worked-before history sources"));
+  auto outer_layout = new QVBoxLayout {&dialog};
+  auto scroll = new QScrollArea {&dialog};
+  scroll->setWidgetResizable (true);
+  scroll->setFrameShape (QFrame::NoFrame);
+  auto content = new QWidget;
+  auto layout = new QVBoxLayout {content};
+  scroll->setWidget (content);
+  outer_layout->addWidget (scroll);
+  auto explanation = new QLabel {tr ("The WSJT-X log receives new QSOs. Additional ADIF sources supply read-only "
+                                    "worked-before history; contacts are not copied into the WSJT-X log. "
+                                    "Aliases of the primary log refer to the same writable file. "
+                                    "Source and log file changes take effect after Settings OK."), &dialog};
+  explanation->setWordWrap (true);
+  layout->addWidget (explanation);
+
+  auto primary_label = new QLabel {tr ("WSJT-X log (new QSOs are saved here):"), &dialog};
+  primary_label->setWordWrap (true);
+  layout->addWidget (primary_label);
+  auto primary = new QLineEdit {QDir::toNativeSeparators (primary_path), &dialog};
+  primary->setReadOnly (true);
+  primary->setAccessibleName (tr ("Writable WSJT-X ADIF log"));
+  primary_label->setBuddy (primary);
+  auto primary_layout = new QHBoxLayout;
+  primary_layout->addWidget (primary);
+  auto primary_folder = new QPushButton {tr ("Open folder"), &dialog};
+  primary_folder->setAutoDefault (false);
+  primary_folder->setFocusPolicy (Qt::StrongFocus);
+  primary_folder->setAccessibleName (tr ("Open writable log folder"));
+  primary_layout->addWidget (primary_folder);
+  layout->addLayout (primary_layout);
+  connect (primary_folder, &QPushButton::clicked, &dialog, [primary] {
+      QDesktopServices::openUrl (QUrl::fromLocalFile (QFileInfo {QDir::fromNativeSeparators (primary->text ())}.absolutePath ()));
+    });
+  auto log_actions = new QHBoxLayout;
+  auto change_log = new QPushButton {tr ("Change &log..."), &dialog};
+  auto default_log = new QPushButton {tr ("Default log"), &dialog};
+  change_log->setObjectName ("adif_log_change");
+  default_log->setObjectName ("adif_log_default");
+  change_log->setAccessibleName (tr ("Choose a different writable ADIF log file"));
+  default_log->setAccessibleName (tr ("Use the default writable ADIF log file"));
+  for (auto button : {change_log, default_log})
+    {
+      button->setAutoDefault (false);
+      button->setFocusPolicy (Qt::StrongFocus);
+    }
+  default_log->setEnabled (!chosen_log.isEmpty ());
+  log_actions->addWidget (change_log);
+  log_actions->addWidget (default_log);
+  log_actions->addStretch ();
+  layout->addLayout (log_actions);
+  change_log->setToolTip (tr ("Choose the file that receives new QSOs. To share one log between WSJT-X instances, "
+                             "choose the same file in each. Appends use a lock file next to it, so that folder must be writable."));
+  default_log->setToolTip (tr ("Go back to wsjtx_log.adi in the log directory."));
+  change_log->setAccessibleDescription (change_log->toolTip ());
+  default_log->setAccessibleDescription (default_log->toolTip ());
+
+  auto sources_label = new QLabel {tr ("Additional ADIF &history sources (read-only):"), &dialog};
+  sources_label->setWordWrap (true);
+  layout->addWidget (sources_label);
+  auto sources = new QListWidget {&dialog};
+  sources->setObjectName ("history_sources_list");
+  sources->setAccessibleName (tr ("Additional read-only ADIF history sources"));
+  sources->setAccessibleDescription (tr ("Source types, full paths, and folder scope. Removing a source does not delete its files."));
+  sources->setSelectionMode (QAbstractItemView::ExtendedSelection);
+  sources->setTextElideMode (Qt::ElideNone);
+  sources->setHorizontalScrollBarPolicy (Qt::ScrollBarAsNeeded);
+  sources->setMinimumHeight (sources->fontMetrics ().lineSpacing () * 4 + sources->frameWidth () * 2);
+  sources->setMaximumHeight (140);
+  sources_label->setBuddy (sources);
+  auto update_item = [&primary_path] (QListWidgetItem * item) {
+      auto const path = item->data (Qt::UserRole).toString ();
+      auto const is_folder = item->data (Qt::UserRole + 1).toBool ();
+      auto label = (is_folder ? tr ("Folder") : tr ("File")) + " — " + QDir::toNativeSeparators (path);
+      if (is_folder)
+        label += " — " + (item->data (Qt::UserRole + 2).toBool ()
+                            ? tr ("Includes subfolders") : tr ("This folder only"));
+      else
+        {
+          auto const primary_canonical = QFileInfo {primary_path}.canonicalFilePath ();
+          auto const canonical = QFileInfo {path}.canonicalFilePath ();
+#ifdef Q_OS_WIN
+          bool const same_primary = !primary_canonical.isEmpty ()
+            && canonical.compare (primary_canonical, Qt::CaseInsensitive) == 0;
+#else
+          bool const same_primary = !primary_canonical.isEmpty () && canonical == primary_canonical;
+#endif
+          if (same_primary) label += " — " + tr ("Same file as primary log");
+        }
+      item->setText (label);
+      item->setData (Qt::AccessibleTextRole, label);
+      item->setToolTip (label);
+    };
+  auto append_item = [sources, update_item] (QString const& path, bool is_folder, bool recursive) {
+      auto item = new QListWidgetItem {sources};
+      item->setData (Qt::UserRole, path);
+      item->setData (Qt::UserRole + 1, is_folder);
+      item->setData (Qt::UserRole + 2, recursive);
+      update_item (item);
+      return item;
+    };
+  auto selected_paths = [sources] {
+      QStringList paths;
+      for (int row = 0; row != sources->count (); ++row)
+        if (!sources->item (row)->data (Qt::UserRole + 1).toBool ())
+          paths.append (sources->item (row)->data (Qt::UserRole).toString ());
+      return paths;
+    };
+  auto selected_folders = [sources] {
+      HistoryFolders folders;
+      for (int row = 0; row != sources->count (); ++row)
+        {
+          auto const item = sources->item (row);
+          if (item->data (Qt::UserRole + 1).toBool ())
+            folders.append ({item->data (Qt::UserRole).toString (), item->data (Qt::UserRole + 2).toBool ()});
+        }
+      return folders;
+    };
+  for (auto const& path : next_supplemental_history_files_) append_item (path, false, false);
+  for (auto const& folder : next_supplemental_history_folders_)
+    append_item (folder.path, true, folder.include_subfolders);
+  layout->addWidget (sources);
+  auto recursive = new QCheckBox {tr ("Include &subfolders"), &dialog};
+  recursive->setObjectName ("history_include_subfolders");
+  recursive->setAccessibleName (tr ("Include subfolders"));
+  recursive->setToolTip (tr ("Also include ADIF files in folders beneath the selected folder."));
+  recursive->setAccessibleDescription (recursive->toolTip ());
+  recursive->setFocusPolicy (Qt::StrongFocus);
+  layout->addWidget (recursive);
+  auto discovery_hint = new QLabel {tr ("All .adi and .adif files in added folders are used for worked-before history. "
+                                       "New files in added folders are included at startup, when you rescan, or when another change triggers a reload."), &dialog};
+  discovery_hint->setWordWrap (true);
+  auto actions = new QHBoxLayout;
+  auto add = new QPushButton {tr ("Add &files..."), &dialog};
+  auto add_folder = new QPushButton {tr ("Add f&older..."), &dialog};
+  auto remove = new QPushButton {tr ("&Remove"), &dialog};
+  auto folder = new QPushButton {tr ("Open fol&der"), &dialog};
+  add->setObjectName ("history_add_files");
+  add_folder->setObjectName ("history_add_folder");
+  remove->setObjectName ("history_remove");
+  folder->setObjectName ("history_open_folder");
+  add->setAccessibleName (tr ("Add read-only ADIF history files"));
+  add_folder->setAccessibleName (tr ("Add read-only ADIF history folder"));
+  remove->setAccessibleName (tr ("Remove selected history sources"));
+  folder->setAccessibleName (tr ("Open selected history source folder"));
+  for (auto button : {add, add_folder, remove, folder})
+    {
+      button->setAutoDefault (false);
+      button->setFocusPolicy (Qt::StrongFocus);
+    }
+  actions->addWidget (add);
+  actions->addWidget (add_folder);
+  actions->addStretch ();
+  layout->addLayout (actions);
+  auto selection_actions = new QHBoxLayout;
+  selection_actions->addWidget (remove);
+  selection_actions->addWidget (folder);
+  selection_actions->addStretch ();
+  layout->addLayout (selection_actions);
+  layout->addWidget (discovery_hint);
+  auto hint = new QLabel {&dialog};
+  hint->setWordWrap (true);
+  layout->addWidget (hint);
+  auto update_actions = [sources, remove, folder, recursive] {
+      auto const selected = sources->selectedItems ();
+      remove->setEnabled (!selected.isEmpty ());
+      folder->setEnabled (selected.size () == 1);
+      QSignalBlocker blocker {recursive};
+      bool const single_folder = selected.size () == 1 && selected.first ()->data (Qt::UserRole + 1).toBool ();
+      recursive->setEnabled (single_folder);
+      recursive->setChecked (single_folder && selected.first ()->data (Qt::UserRole + 2).toBool ());
+    };
+  connect (sources, &QListWidget::itemSelectionChanged, &dialog, update_actions);
+  update_actions ();
+  connect (recursive, &QCheckBox::toggled, &dialog, [sources, update_item] (bool checked) {
+      auto const selected = sources->selectedItems ();
+      if (selected.size () == 1 && selected.first ()->data (Qt::UserRole + 1).toBool ())
+        {
+          selected.first ()->setData (Qt::UserRole + 2, checked);
+          update_item (selected.first ());
+        }
+    });
+  connect (add, &QPushButton::clicked, &dialog, [&dialog, sources, hint, append_item, selected_paths, &primary_path] {
+      auto paths = QFileDialog::getOpenFileNames (&dialog, tr ("Add read-only ADIF history"),
+                                                 QFileInfo {primary_path}.absolutePath (),
+                                                 tr ("ADIF files (*.adi *.adif);;All files (*)"));
+      if (paths.isEmpty ()) return;
+      auto const existing = selected_paths ();
+      auto const proposed = existing + paths;
+      auto const normalized = WorkedBefore::normalize_history_files (proposed, primary_path);
+      for (auto const& path : normalized)
+        if (!existing.contains (path)) append_item (path, false, false);
+      hint->setText (normalized.size () < proposed.size ()
+        ? tr ("Already selected files and the writable WSJT-X log were skipped.") : QString {});
+      if (sources->count ()) sources->setCurrentRow (sources->count () - 1);
+      sources->setFocus ();
+    });
+  connect (add_folder, &QPushButton::clicked, &dialog,
+           [&dialog, sources, hint, append_item, selected_folders, &primary_path] {
+      auto const path = QFileDialog::getExistingDirectory (&dialog, tr ("Add read-only ADIF history folder"),
+                                                          QFileInfo {primary_path}.absolutePath (),
+                                                          QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+      if (path.isEmpty ()) return;
+      auto const existing = selected_folders ();
+      auto proposed = existing;
+      proposed.append ({path, false});
+      auto const normalized = WorkedBefore::normalize_history_folders (proposed);
+      QListWidgetItem * item = nullptr;
+      if (normalized.size () > existing.size ())
+        item = append_item (normalized.last ().path, true, false);
+      else
+        {
+          auto const normalized_path = WorkedBefore::normalize_history_folders ({{path, false}}).first ().path;
+          for (int row = 0; row != sources->count (); ++row)
+            {
+              auto candidate = sources->item (row);
+              if (!candidate->data (Qt::UserRole + 1).toBool ()) continue;
+#ifdef Q_OS_WIN
+              if (candidate->data (Qt::UserRole).toString ().compare (normalized_path, Qt::CaseInsensitive) == 0)
+#else
+              if (candidate->data (Qt::UserRole).toString () == normalized_path)
+#endif
+                { item = candidate; break; }
+            }
+        }
+      sources->setCurrentItem (item, QItemSelectionModel::ClearAndSelect);
+      hint->setText (normalized.size () == existing.size () ? tr ("This folder is already selected.") : QString {});
+      sources->setFocus ();
+    });
+  connect (remove, &QPushButton::clicked, &dialog, [sources, hint] {
+      for (auto item : sources->selectedItems ()) delete item;
+      hint->setText (tr ("Removed from this selection. The files have not been deleted."));
+      sources->setFocus ();
+    });
+  connect (folder, &QPushButton::clicked, &dialog, [sources] {
+      auto const selected = sources->selectedItems ();
+      if (selected.size () == 1)
+        {
+          auto const item = selected.first ();
+          auto const path = item->data (Qt::UserRole).toString ();
+          QDesktopServices::openUrl (QUrl::fromLocalFile (
+            item->data (Qt::UserRole + 1).toBool () ? path : QFileInfo {path}.absolutePath ()));
+        }
+    });
+
+  auto status_label = new QLabel {tr ("Last scan of saved sources:"), &dialog};
+  status_label->setWordWrap (true);
+  layout->addWidget (status_label);
+  auto status = new QTextEdit {&dialog};
+  status->setReadOnly (true);
+  status->setMaximumHeight (130);
+  status->setMinimumHeight (status->fontMetrics ().lineSpacing () * 3 + status->frameWidth () * 2);
+  status->setAccessibleName (tr ("Worked-before scan result and source errors"));
+  status_label->setBuddy (status);
+  auto update_status = [this, status] {
+      auto summary = worked_before_status_.isEmpty () ? tr ("Worked-before history has not been scanned.") : worked_before_status_;
+      status->setPlainText (summary + (worked_before_errors_.isEmpty () ? QString {} : "\n\n" + worked_before_errors_));
+    };
+  update_status ();
+  connect (self_, &Configuration::worked_before_status_changed, &dialog, update_status);
+  layout->addWidget (status);
+  auto rescan = new QPushButton {tr ("Rescan saved sources"), &dialog};
+  rescan->setAutoDefault (false);
+  rescan->setFocusPolicy (Qt::StrongFocus);
+  rescan->setEnabled (logbook_);
+  rescan->setToolTip (tr ("Scan the currently saved sources. This dialog's source changes take effect after Settings OK."));
+  connect (rescan, &QPushButton::clicked, &dialog, [this] { on_rescan_log_push_button_clicked (false); });
+  layout->addWidget (rescan);
+  auto apply_log_choice = [this, primary, default_log, sources, update_item, hint, &primary_path, &chosen_log] {
+      auto const previous = primary_path;
+      primary_path = adif_log_path (chosen_log);
+      if (primary_path != previous)
+        hint->setText (tr ("The previous log is no longer read for worked-before status unless you add it as a history source."));
+      primary->setText (QDir::toNativeSeparators (primary_path));
+      primary->setCursorPosition (0);
+      default_log->setEnabled (!chosen_log.isEmpty ());
+      for (int row = 0; row != sources->count (); ++row) update_item (sources->item (row));
+    };
+  connect (change_log, &QPushButton::clicked, &dialog, [this, &dialog, primary, apply_log_choice, &chosen_log] {
+      auto const path = QFileDialog::getSaveFileName (&dialog, tr ("Writable WSJT-X ADIF log"),
+                                                     QDir::fromNativeSeparators (primary->text ()),
+                                                     tr ("ADIF files (*.adi *.adif);;All files (*)"),
+                                                     nullptr, QFileDialog::DontConfirmOverwrite);
+      if (path.isEmpty ()) return;
+      auto absolute = [] (QString const& file) {return QDir::cleanPath (QFileInfo {file}.absoluteFilePath ());};
+      chosen_log = absolute (path);
+      auto const default_path = absolute (adif_log_path ({}));
+#ifdef Q_OS_WIN
+      if (chosen_log.compare (default_path, Qt::CaseInsensitive) == 0) chosen_log.clear ();
+#else
+      if (chosen_log == default_path) chosen_log.clear ();
+#endif
+      apply_log_choice ();
+    });
+  connect (default_log, &QPushButton::clicked, &dialog, [apply_log_choice, &chosen_log] {
+      chosen_log.clear ();
+      apply_log_choice ();
+    });
+  auto buttons = new QDialogButtonBox {QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog};
+  buttons->button (QDialogButtonBox::Ok)->setFocusPolicy (Qt::StrongFocus);
+  buttons->button (QDialogButtonBox::Cancel)->setFocusPolicy (Qt::StrongFocus);
+  connect (buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+  connect (buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+  outer_layout->addWidget (buttons);
+  dialog.resize (650, 680);
+  auto screen = windowHandle () ? windowHandle ()->screen () : QGuiApplication::primaryScreen ();
+  if (screen) dialog.resize (dialog.size ().boundedTo (screen->availableGeometry ().size () - QSize {40, 60}));
+  primary->setCursorPosition (0);
+  sources->setFocus ();
+  if (dialog.exec () == QDialog::Accepted)
+    {
+      next_adif_log_file_ = chosen_log;
+      next_supplemental_history_files_ = selected_paths ();
+      next_supplemental_history_folders_ = selected_folders ();
+    }
 }
 
 void Configuration::impl::on_CTY_download_button_clicked (bool /*clicked*/)
@@ -4876,11 +6040,11 @@ void Configuration::impl::after_hamlib_downloaded ()
 {
   QDir dataPath = QCoreApplication::applicationDirPath();
   QFile::rename(dataPath.absolutePath() + "/" + "libhamlib-4.dll", dataPath.absolutePath() + "/" + "libhamlib-4_old.dll");
-  QTimer::singleShot (1000, [=] {
+  QTimer::singleShot (1000, this, [=] {
     QFile::rename(dataPath.absolutePath() + "/" + "libhamlib-4_new.dll", dataPath.absolutePath() + "/" + "libhamlib-4.dll");
     ui_->in_use->setText("Download completed. Restart the program.");
   });
-  QTimer::singleShot (1500, [=] {
+  QTimer::singleShot (1500, this, [=] {
     MessageBox::information_message (this, tr ("Hamlib Update successful \n\nNew Hamlib will be used after restart"));
     ui_->revert_update_button->setEnabled (true);
     ui_->hamlib_download_button->setEnabled (true);
@@ -4896,10 +6060,10 @@ void Configuration::impl::on_revert_update_button_clicked (bool /*clicked*/)
     ui_->revert_update_button->setEnabled (false);
     ui_->hamlib_download_button->setEnabled (false);
     QFile::rename(dataPath.absolutePath() + "/" + "libhamlib-4.dll", dataPath.absolutePath() + "/" + "libhamlib-4_new.dll");
-    QTimer::singleShot (1000, [=] {
+    QTimer::singleShot (1000, this, [=] {
       QFile::copy(dataPath.absolutePath() + "/" + "libhamlib-4_old.dll", dataPath.absolutePath() + "/" + "libhamlib-4.dll");
     });
-    QTimer::singleShot (2000, [=] {
+    QTimer::singleShot (2000, this, [=] {
       MessageBox::information_message (this, tr ("Hamlib successfully reverted \n\nReverted Hamlib will be used after restart"));
       ui_->revert_update_button->setEnabled (true);
       ui_->hamlib_download_button->setEnabled (true);
@@ -4950,12 +6114,12 @@ void Configuration::impl::update_DXCC_control_availability ()
   ui_->show_country_names_check_box->setEnabled (enabled);
 }
 
-void Configuration::impl::on_PTT_port_combo_box_activated (int /* index */)
+void Configuration::impl::on_PTT_port_combo_box_currentTextChanged (QString const& /* text */)
 {
   set_rig_invariants ();
 }
 
-void Configuration::impl::on_CAT_port_combo_box_activated (int /* index */)
+void Configuration::impl::on_CAT_port_combo_box_currentTextChanged (QString const& /* text */)
 {
   set_rig_invariants ();
 }
@@ -5014,7 +6178,8 @@ void Configuration::impl::on_pbTestCloudlog_clicked ()
 {
   cloudlog_.checkConnection ({ui_->leCloudlogApiUrl->text (),
                               ui_->leCloudlogApiKey->text (),
-                              cloudlog_station_profile_id ()});
+                              cloudlog_station_profile_id (), ui_->cbCloudlogRadio->isChecked (),
+                              ui_->cbCloudlog->isChecked ()});
 }
 
 void Configuration::impl::handle_cloudlog_connection_check_result (Cloudlog::ConnectionCheckResult const& result)
@@ -5084,14 +6249,23 @@ qint32 Configuration::impl::cloudlog_station_profile_id () const
 
 void Configuration::impl::on_cbCloudlog_toggled (bool checked)
 {
-  ui_->api_url_label->setEnabled (checked);
-  ui_->api_key_label->setEnabled (checked);
+  auto const radio_enabled = ui_->cbCloudlogRadio->isChecked ();
+  auto const enabled = checked || radio_enabled;
+  ui_->api_url_label->setEnabled (enabled);
+  ui_->api_key_label->setEnabled (enabled);
   ui_->station_profile_label->setEnabled (checked);
-  ui_->leCloudlogApiUrl->setEnabled (checked);
-  ui_->leCloudlogApiKey->setEnabled (checked);
+  ui_->leCloudlogApiUrl->setEnabled (enabled);
+  ui_->leCloudlogApiKey->setEnabled (enabled);
   ui_->cbCloudlogStationProfile->setEnabled (checked);
-  ui_->pbTestCloudlog->setEnabled (checked);
+  ui_->pbTestCloudlog->setEnabled (enabled);
+  ui_->cloudlog_radio_name_label->setEnabled (radio_enabled);
+  ui_->leCloudlogRadioName->setEnabled (radio_enabled);
   ui_->pbTestCloudlog->setStyleSheet ("QPushButton {background-color: none;}");
+}
+
+void Configuration::impl::on_cbCloudlogRadio_toggled (bool)
+{
+  on_cbCloudlog_toggled (ui_->cbCloudlog->isChecked ());
 }
 
 void Configuration::impl::on_cbEQSL_toggled (bool checked)
@@ -5106,6 +6280,13 @@ void Configuration::impl::on_cbEQSL_toggled (bool checked)
 
 void Configuration::impl::on_test_PTT_push_button_clicked (bool checked)
 {
+  if (test_ptt_state_ != TestPttState::Idle || !checked)
+    {
+      bool const active = test_ptt_state_ == TestPttState::Active;
+      stop_test_ptt ();
+      if (!checked && !active) self_->transceiver_ptt (false);
+      return;
+    }
   auto const showing_requested_ptt = tx_inhibit_active_;
   if (!showing_requested_ptt)
     {
@@ -5134,12 +6315,66 @@ void Configuration::impl::on_test_PTT_push_button_clicked (bool checked)
 
   if (open_rig ())
     {
-      Q_EMIT self_->transceiver_ptt (checked);
+      if (self_->radio_mode_ready ())
+        {
+          set_test_ptt_state (TestPttState::Active);
+          self_->transceiver_ptt (true);
+        }
+      else
+        {
+          set_test_ptt_state (TestPttState::Preparing,
+            tr ("Preparing radio mode. Click Cancel PTT test to cancel."));
+          if (prepare_radio_mode ()) finish_test_ptt_preparation ();
+          else set_test_ptt_state (TestPttState::Idle,
+            tr ("Cannot prepare the radio mode for the PTT test. Check CAT and wait for transmit activity to stop, then try again."));
+        }
     }
   else if (showing_requested_ptt)
     {
       ui_->test_PTT_push_button->setChecked (!checked);
     }
+}
+
+void Configuration::impl::set_test_ptt_state (TestPttState state, QString const& status)
+{
+  test_ptt_state_ = state;
+  ui_->test_PTT_push_button->setText (state == TestPttState::Preparing
+    ? tr ("Cancel PTT test") : tr ("Test PTT"));
+  if (state == TestPttState::Preparing) ui_->test_PTT_push_button->setEnabled (true);
+  if (state != TestPttState::Active) ui_->test_PTT_push_button->setChecked (false);
+  ui_->test_PTT_push_button->setAccessibleDescription (status);
+  ui_->test_PTT_status_label->setText (status);
+  ui_->test_PTT_status_label->setVisible (!status.isEmpty ());
+}
+
+void Configuration::impl::stop_test_ptt ()
+{
+  if (test_ptt_state_ == TestPttState::Idle) return;
+  bool const active = test_ptt_state_ == TestPttState::Active;
+  set_test_ptt_state (TestPttState::Idle);
+  if (active) self_->transceiver_ptt (false);
+}
+
+void Configuration::impl::finish_test_ptt_preparation ()
+{
+  if (test_ptt_state_ != TestPttState::Preparing) return;
+  if (self_->radio_mode_yielded ())
+    {
+      set_test_ptt_state (TestPttState::Idle,
+        tr ("The radio mode could not be confirmed. Check the radio mode and CAT settings, then try Test PTT again."));
+      return;
+    }
+  if (!self_->radio_mode_ready ()) return;
+  if (!isVisible () || !rig_active_ || !cached_rig_state_.online () || tx_inhibit_active_
+      || rig_restart_required (gather_rig_data (), false)
+      || !frequency_change_allowed (RigFrequencyChangePolicy::ChangeKind::NominalQsy))
+    {
+      set_test_ptt_state (TestPttState::Idle,
+        tr ("PTT test canceled because the radio is no longer ready to transmit."));
+      return;
+    }
+  set_test_ptt_state (TestPttState::Active);
+  self_->transceiver_ptt (true);
 }
 
 void Configuration::impl::on_force_DTR_combo_box_currentIndexChanged (int /* index */)
@@ -5186,6 +6421,95 @@ void Configuration::impl::on_TCI_spin_box_valueChanged(double a)
   volume_ = a;
 }
 
+
+void Configuration::impl::on_grid_line_edit_editingFinished ()
+{
+  double centre_lat, centre_lon;
+  if (!grid_centre (ui_->grid_line_edit->text (), centre_lat, centre_lon))
+    {
+      update_home_coordinates_style ();
+      return;
+    }
+  auto grid = ui_->grid_line_edit->text ().trimmed ().left (6);
+  if (grid.size () < 6) grid += "mm";
+
+  // If the currently displayed precise coordinates already lie in this
+  // six-character square, re-entering the same locator must not discard
+  // their extra precision.
+  bool lat_ok {false};
+  bool lon_ok {false};
+  auto current_lat = ui_->latitude_line_edit->text ().toDouble (&lat_ok);
+  auto current_lon = ui_->longitude_line_edit->text ().toDouble (&lon_ok);
+  if (lat_ok && lon_ok && current_lat >= -90. && current_lat <= 90.
+      && current_lon >= -180. && current_lon <= 180.)
+    {
+      QString coordinate_grid;
+      coordinates_to_grid (current_lat, current_lon, coordinate_grid);
+      if (coordinate_grid.compare (grid, Qt::CaseInsensitive) == 0)
+        {
+          update_home_coordinates_style ();
+          return;
+        }
+    }
+
+  ui_->latitude_line_edit->setText (QString::number (centre_lat, 'f', 6));
+  ui_->longitude_line_edit->setText (QString::number (centre_lon, 'f', 6));
+  update_home_coordinates_style ();
+}
+
+void Configuration::impl::update_home_coordinates_style ()
+{
+  // Highlight coordinates entered by the user; those derived from the
+  // centre of My Grid keep the normal appearance.
+  bool lat_ok {false};
+  bool lon_ok {false};
+  auto lat = ui_->latitude_line_edit->text ().toDouble (&lat_ok);
+  auto lon = ui_->longitude_line_edit->text ().toDouble (&lon_ok);
+  bool user_entered = lat_ok && lon_ok
+    && !coordinates_are_grid_centre (ui_->grid_line_edit->text (), lat, lon);
+  for (auto edit : {ui_->latitude_line_edit, ui_->longitude_line_edit})
+    {
+      QPalette pal;
+      if (user_entered)
+        {
+          pal = edit->palette ();
+          pal.setColor (QPalette::Base, "#ffffcc");
+          pal.setColor (QPalette::Text, Qt::black);
+        }
+      edit->setPalette (pal);
+    }
+  auto tip = user_entered ? tr ("Precise coordinates entered by user; used for astronomical calculations.")
+                          : tr ("Centre of the My Grid locator; enter precise coordinates for more accurate astronomical calculations.");
+  ui_->latitude_line_edit->setToolTip (tr ("Home-station latitude in decimal degrees. North is positive; south is negative.") + '\n' + tip);
+  ui_->longitude_line_edit->setToolTip (tr ("Home-station longitude in decimal degrees. East is positive; west is negative.") + '\n' + tip);
+}
+
+void Configuration::impl::on_latitude_line_edit_editingFinished ()
+{
+  on_longitude_line_edit_editingFinished ();
+}
+
+void Configuration::impl::on_longitude_line_edit_editingFinished ()
+{
+  // Clearing both fields reverts to the My Grid position, so show it.
+  if (ui_->latitude_line_edit->text ().trimmed ().isEmpty ()
+      && ui_->longitude_line_edit->text ().trimmed ().isEmpty ())
+    {
+      on_grid_line_edit_editingFinished ();
+      return;
+    }
+
+  bool lat_ok {false};
+  bool lon_ok {false};
+  auto lat = ui_->latitude_line_edit->text ().toDouble (&lat_ok);
+  auto lon = ui_->longitude_line_edit->text ().toDouble (&lon_ok);
+  if (!lat_ok || !lon_ok || lat < -90. || lat > 90. || lon < -180. || lon > 180.) return;
+
+  QString grid;
+  if (!coordinates_to_grid (lat, lon, grid)) return;
+  ui_->grid_line_edit->setText (grid);
+  update_home_coordinates_style ();
+}
 
 void Configuration::impl::on_add_macro_line_edit_editingFinished ()
 {
@@ -5362,31 +6686,26 @@ void Configuration::impl::on_add_macro_push_button_clicked (bool /* checked */)
 void Configuration::impl::on_udp_server_line_edit_textChanged (QString const&)
 {
   udp_server_name_edited_ = true;
+  if (dns_lookup_id_ > -1)
+    {
+      QHostInfo::abortHostLookup (dns_lookup_id_);
+      dns_lookup_id_ = -1;
+    }
+  update_udp_destination_error (ui_->udp_server_line_edit, ui_->udp_server_error_label);
+}
+
+bool Configuration::impl::update_udp_destination_error (QLineEdit * edit, QLabel * error)
+{
+  auto const invalid = is_psk_reporter_destination (edit->text ());
+  error->setVisible (invalid);
+  edit->setAccessibleDescription (invalid ? error->text () : QString {});
+  return invalid;
 }
 
 void Configuration::impl::on_udp_server_line_edit_editingFinished ()
 {
-  if (this->isVisible())
-  {
-    int q1,q2,q3,q4;
-    char tmpbuf[2];
-    int n = sscanf(ui_->udp_server_line_edit->text ().trimmed ().toLatin1(), "%d.%d.%d.%d.%1s", &q1, &q2, &q3, &q4, tmpbuf);
-    const char *iperr;
-    switch(n)
-    {
-      case 0: iperr = "Error before first number";break;
-      case 1: iperr = "Error between first and second number";break;
-      case 2: iperr = "Error between second and third number";break;
-      case 3: iperr = "Error between third and fourth number";break;
-      case 4: iperr = ""; break;
-      case 5: iperr = "Invalid characters after IP address"; break;
-      default: iperr = "Unknown error parsing network address";
-    }
-    if (n != 4)
-    {
-       MessageBox::warning_message (this, tr ("Error in network address"), tr (iperr));
-       return;
-    }
+  if (update_udp_destination_error (ui_->udp_server_line_edit, ui_->udp_server_error_label)) return;
+  if (!isVisible ()) return;
 
   if (udp_server_name_edited_)
     {
@@ -5407,7 +6726,6 @@ void Configuration::impl::on_udp_server_line_edit_editingFinished ()
           check_multicast (ha);
         }
     }
-  }
 }
 
 void Configuration::impl::host_info_results (QHostInfo host_info)
@@ -5507,7 +6825,34 @@ FrequencyList_v2_101::FrequencyItems Configuration::impl::read_frequencies_file 
     {
       try
         {
-          list = FrequencyList_v2_101::from_json_file(&frequencies_file);
+          FrequencyList_v2_101::ImportReport report;
+          list = FrequencyList_v2_101::from_json_file (&frequencies_file, &report);
+          if (report.skipped ())
+            {
+              QStringList reasons;
+              if (report.invalid_frequency)
+                reasons << tr ("Invalid frequency: %1").arg (report.invalid_frequency);
+              if (report.invalid_region)
+                reasons << tr ("Unknown region: %1").arg (report.invalid_region);
+              if (!report.unknown_modes.isEmpty ())
+                {
+                  QStringList examples;
+                  int unknown_count = 0;
+                  for (auto it = report.unknown_modes.cbegin (); it != report.unknown_modes.cend (); ++it)
+                    {
+                      unknown_count += it.value ();
+                      if (examples.size () < 3)
+                        examples << tr ("%1 (%2)").arg (it.key ()).arg (it.value ());
+                    }
+                  reasons << tr ("Unknown mode: %1 (%2)").arg (unknown_count).arg (examples.join (", "));
+                }
+              if (report.invalid_item)
+                reasons << tr ("Invalid dates: %1").arg (report.invalid_item);
+              MessageBox::warning_message (this, tr ("Some working frequencies were skipped"),
+                                           tr ("Imported %1 of %2 entries. Skipped %3:\n%4")
+                                             .arg (report.imported).arg (report.entries).arg (report.skipped ())
+                                             .arg (reasons.join ("\n")));
+            }
         }
       catch (ReadFileException const &e)
         {
@@ -5615,6 +6960,61 @@ void Configuration::impl::reset_frequencies ()
       next_frequencies_.reset_to_defaults ();
     }
     size_frequency_table_columns ();
+    refresh_suggestion_notice ();
+}
+
+void Configuration::impl::persist_seen_suggestions ()
+{
+  SettingsGroup g {settings_, "Configuration"};
+  settings_->setValue ("SeenSuggestedFrequencyKeys", suggestion_notice_state_.seen_keys ());
+}
+
+void Configuration::impl::dismiss_suggestions ()
+{
+  suggestion_notice_state_.dismiss (FrequencyList_v2_101::default_items ());
+  persist_seen_suggestions ();
+  suggestions_notice_->hide ();
+}
+
+void Configuration::impl::refresh_suggestion_notice ()
+{
+  auto const visibility = suggestion_notice_state_.visibility (
+    FrequencyList_v2_101::default_items (), next_frequencies_.frequency_list ());
+  suggestions_notice_label_->setText (
+    visibility == FrequencySuggestions::NoticeState::Visibility::New
+      ? tr ("New suggested frequencies are available. Choose any you want to add without resetting your list.")
+      : tr ("Suggested frequencies are available. Choose any you want to add without resetting your list."));
+  suggestions_notice_->setVisible (visibility != FrequencySuggestions::NoticeState::Visibility::Hidden);
+}
+
+void Configuration::impl::show_suggested_frequencies ()
+{
+  QSet<QString> new_keys;
+  {
+    SettingsGroup g {settings_, "Configuration"};
+    if (settings_->contains ("SeenSuggestedFrequencyKeys"))
+      {
+        auto const seen = settings_->value ("SeenSuggestedFrequencyKeys").toStringList ();
+        for (auto const& item : FrequencyList_v2_101::default_items ())
+          {
+            auto const key = FrequencySuggestions::key (item);
+            if (!seen.contains (key)) new_keys.insert (key);
+          }
+      }
+  }
+
+  SuggestedFrequenciesDialog dialog {FrequencyList_v2_101::default_items (),
+                                     next_frequencies_.frequency_list (), bands_,
+                                     new_keys, this};
+  if (dialog.exec () == QDialog::Accepted)
+    {
+      auto additions = FrequencySuggestions::prepare_additions (
+        dialog.selected_items (), next_frequencies_.frequency_list (), bands_);
+      suggestion_notice_state_.selected_additions (additions);
+      next_frequencies_.frequency_list_merge (additions);
+      size_frequency_table_columns ();
+    }
+  refresh_suggestion_notice ();
 }
 
 void Configuration::impl::insert_frequency ()
@@ -6212,14 +7612,31 @@ bool Configuration::impl::open_rig (bool force)
       try
         {
           if (is_tci_ && rig_active_ && tci_audio_) restart_tci_device_ = true;
+          // The running footswitch still holds its saved port, which the
+          // settings being opened (e.g. Test CAT) may now use for CAT or PTT.
+          if (footswitch_enabled_
+              && footswitch_port_clashes (footswitch_port_,
+                                          TransceiverFactory::Capabilities::serial
+                                          == transceiver_factory_.CAT_port_type (rig_data.rig_name)
+                                          ? rig_data.serial_port : QString {},
+                                          rig_data.ptt_type, rig_data.ptt_port))
+            {
+              Q_EMIT self_->footswitch_port_needed ();
+            }
           close_rig ();
+          frequency_adapter_.default_projection (
+            {0, calibration_.intercept, calibration_.slope_ppm, !frequency_calibration_disabled_});
 
           auto const txvolume = cached_rig_state_.txvolume ();
+          auto const receive_policy = cached_rig_state_.receive_policy ();
+          auto const receive_context = cached_rig_state_.receive_context ();
 
           // create a new Transceiver object
           auto rig = transceiver_factory_.create (rig_data, transceiver_thread_);
           cached_rig_state_ = Transceiver::TransceiverState {};
           cached_rig_state_.txvolume (txvolume);
+          cached_rig_state_.receive_policy (receive_policy);
+          cached_rig_state_.receive_context (receive_context);
 
           // hook up Configuration transceiver control signals to Transceiver slots
           //
@@ -6230,31 +7647,64 @@ bool Configuration::impl::open_rig (bool force)
                                        rig.get (), &Transceiver::enqueue_jtty_pcm);
           rig_connections_ << connect (this, &Configuration::impl::clear_jtty_pcm,
                                        rig.get (), &Transceiver::clear_jtty_pcm);
+          rig_connections_ << connect (this, &Configuration::impl::receive_discontinuity,
+                                       rig.get (), &Transceiver::receive_discontinuity);
+          rig_connections_ << connect (this, &Configuration::impl::receive_stop_reason,
+                                       rig.get (), &Transceiver::receive_stop_reason);
+          rig_connections_ << connect (this, &Configuration::impl::receive_drain,
+                                       rig.get (), &Transceiver::requestContinuousReceiveDrain);
 
           // hook up Transceiver signals to Configuration signals
           //
           // these connections cross the thread boundary
           rig_connections_ << connect (rig.get (), &Transceiver::resolution, this, [=] (int resolution) {
               rig_resolution_ = resolution;
+              frequency_adapter_.resolution (FrequencyAdapter::resolution_hz (resolution));
             });
           rig_connections_ << connect (rig.get (), &Transceiver::tciframeswritten, this, &Configuration::impl::handle_transceiver_tciframeswritten);
           rig_connections_ << connect (rig.get (), &Transceiver::receiveAudio, self_, &Configuration::transceiverReceiveAudio);
+          rig_connections_ << connect (rig.get (), &Transceiver::continuousAudioAvailable,
+                                       self_, &Configuration::continuousAudioAvailable);
+          rig_connections_ << connect (rig.get (), &Transceiver::continuousReceptionStopped,
+                                       self_, &Configuration::continuousReceptionStopped);
+          rig_connections_ << connect (rig.get (), &Transceiver::continuousReceiveDrained,
+                                       self_, &Configuration::continuousReceiveDrained);
           rig_connections_ << connect (rig.get (), &Transceiver::tci_mod_active, this, &Configuration::impl::handle_transceiver_tci_mod_active);
-  rig_connections_ << connect (rig.get (), &Transceiver::txSourceCommitted, self_, &Configuration::txSourceCommitted);
-  rig_connections_ << connect (rig.get (), &Transceiver::rawTxPlayoutSnapshot, self_, &Configuration::rawTxPlayoutSnapshot);
-  rig_connections_ << connect (rig.get (), &Transceiver::jtty_drained, self_, &Configuration::transceiver_jtty_drained);
-  rig_connections_ << connect (rig.get (), &Transceiver::jtty_enqueue_accepted, self_, &Configuration::transceiver_jtty_enqueue_accepted);
-  rig_connections_ << connect (rig.get (), &Transceiver::jtty_enqueue_failed, self_, &Configuration::transceiver_jtty_enqueue_failed);
-  rig_connections_ << connect (rig.get (), &Transceiver::remote_input_calibration_progress,
-                                       this, &Configuration::impl::handle_k4_calibration_progress);
+          rig_connections_ << connect (rig.get (), &Transceiver::txSourceCommitted, self_, &Configuration::txSourceCommitted);
+          rig_connections_ << connect (rig.get (), &Transceiver::rawTxPlayoutSnapshot, self_, &Configuration::rawTxPlayoutSnapshot);
+          rig_connections_ << connect (rig.get (), &Transceiver::jtty_drained, self_, &Configuration::transceiver_jtty_drained);
+          rig_connections_ << connect (rig.get (), &Transceiver::jtty_progress, self_, &Configuration::transceiver_jtty_progress);
+          rig_connections_ << connect (rig.get (), &Transceiver::jtty_enqueue_accepted, self_, &Configuration::transceiver_jtty_enqueue_accepted);
+          rig_connections_ << connect (rig.get (), &Transceiver::jtty_enqueue_failed, self_, &Configuration::transceiver_jtty_enqueue_failed);
+          auto const frequency_generation = frequency_adapter_.generation ();
+          rig_connections_ << connect (rig.get (), &Transceiver::mode_status, this,
+            [this, frequency_generation] (Transceiver::ModeStatus const& status, unsigned sequence) {
+              if (frequency_generation == frequency_adapter_.generation ()) handle_mode_status (status, sequence);
+            });
+          rig_connections_ << connect (rig.get (), &Transceiver::update, this,
+            [this, frequency_generation] (TransceiverState const& state, unsigned sequence) {
+              if (frequency_generation == frequency_adapter_.generation ()) handle_transceiver_update (state, sequence);
+            });
+          rig_connections_ << connect (rig.get (), &Transceiver::frequency_result, this,
+            [this, frequency_generation] (RigFrequency::Result const& result) {
+              if (frequency_generation == frequency_adapter_.generation ()) handle_frequency_result (result);
+            });
+          rig_connections_ << connect (rig.get (), &Transceiver::frequency_observation, this,
+            [this, frequency_generation] (RigFrequency::Evidence evidence) {
+              if (frequency_generation != frequency_adapter_.generation ()) return;
+              if (!evidence.generation && !evidence.operation) evidence.generation = frequency_generation;
+              handle_frequency_observation (evidence);
+            });
+          rig_connections_ << connect (rig.get (), &Transceiver::failure, this,
+            [this, frequency_generation] (QString const& reason) {
+              if (frequency_generation == frequency_adapter_.generation ()) handle_transceiver_failure (reason);
+            });
           rig_connections_ << connect (rig.get (), &Transceiver::remote_input_calibration_finished,
                                        this, &Configuration::impl::handle_k4_calibration_finished);
           rig_connections_ << connect (rig.get (), &Transceiver::remote_tx_error,
                                        this, &Configuration::impl::handle_k4_tx_error);
-  rig_connections_ << connect (rig.get (), &Transceiver::rf_power_setting,
+          rig_connections_ << connect (rig.get (), &Transceiver::rf_power_setting,
                                this, &Configuration::impl::handle_k4_rf_power_setting);
-          rig_connections_ << connect (rig.get (), &Transceiver::update, this, &Configuration::impl::handle_transceiver_update);
-          rig_connections_ << connect (rig.get (), &Transceiver::failure, this, &Configuration::impl::handle_transceiver_failure);
           if (auto inhibit = qobject_cast<TxInhibitTransceiver *> (rig.get ()))
             {
               auto const generation = tx_inhibit_generation_;
@@ -6270,6 +7720,9 @@ bool Configuration::impl::open_rig (bool force)
                         quint32 expiries, quint32 invalid) {
                   if (generation != tx_inhibit_generation_) return;
                   tx_inhibit_active_ = inhibited;
+                  if (inhibited && test_ptt_state_ == TestPttState::Preparing)
+                    set_test_ptt_state (TestPttState::Idle,
+                      tr ("PTT test canceled because TX inhibit is active."));
                   if (inhibited)
                     {
                       ui_->test_PTT_push_button->setChecked (cached_rig_state_.ptt ());
@@ -6346,23 +7799,83 @@ void Configuration::impl::warn_tx_inhibit_restart_blocked ()
         "settings that require restarting the radio."));
 }
 
-void Configuration::impl::set_cached_mode ()
+auto Configuration::impl::configured_mode () const -> MODE
 {
-  MODE mode {Transceiver::UNK};
-  // override cache mode with what we want to enforce which includes
-  // UNK (unknown) where we want to leave the rig mode untouched
   switch (data_mode_)
     {
-    case data_mode_USB: mode = Transceiver::USB; break;
-    case data_mode_data: mode = Transceiver::DIG_U; break;
-    default: break;
+    case data_mode_USB: return Transceiver::USB;
+    case data_mode_data: return Transceiver::DIG_U;
+    default: return Transceiver::UNK;
     }
+}
 
-  cached_rig_state_.mode (mode);
+void Configuration::impl::notify_mode_control (RadioModePolicy::State previous)
+{
+  if (radio_mode_policy_.yielded () && previous != RadioModePolicy::State::Yielded)
+    {
+      auto const cancelled = frequency_adapter_.cancel_pending ();
+      cached_rig_state_.frequency_request (RigFrequency::Path::Rx, {});
+      cached_rig_state_.frequency_request (RigFrequency::Path::Tx, {});
+      if (observed_rx_frequency_) cached_rig_state_.frequency (observed_rx_frequency_);
+      if (test_ptt_state_ == TestPttState::Active) stop_test_ptt ();
+      for (auto const& request : cancelled)
+        Q_EMIT self_->frequency_result (
+          {request, RigFrequency::Outcome::Deferred, RigFrequency::Basis::Retained, 0});
+    }
+  if (previous != radio_mode_policy_.state ())
+    Q_EMIT self_->radio_mode_control_changed (
+      radio_mode_policy_.yielded (), radio_mode_policy_.ready ());
+}
+
+void Configuration::impl::send_transceiver (MODE mode)
+{
+  auto command = cached_rig_state_;
+  command.mode (mode);
+  auto const sequence = ++transceiver_command_number_;
+  if (mode != Transceiver::UNK && !command.ptt ())
+    {
+      auto const previous = radio_mode_policy_.state ();
+      radio_mode_policy_.configure (configured_mode ());
+      radio_mode_policy_.prepare (sequence);
+      notify_mode_control (previous);
+    }
+  Q_EMIT set_transceiver (command, sequence);
+}
+
+bool Configuration::impl::prepare_radio_mode ()
+{
+  auto const previous = radio_mode_policy_.state ();
+  auto const desired = configured_mode ();
+  radio_mode_policy_.configure (desired);
+  notify_mode_control (previous);
+  if (desired == Transceiver::UNK || rig_is_dummy_) return true;
+  if (radio_mode_policy_.state () == RadioModePolicy::State::Preparing) return true;
+  if (radio_mode_policy_.ready () && radio_mode_policy_.has_prepared ()
+      && cached_rig_state_.mode () == desired) return true;
+  if (!frequency_change_allowed (RigFrequencyChangePolicy::ChangeKind::NominalQsy)
+      || !have_rig () || !cached_rig_state_.frequency ()) return false;
+  cached_rig_state_.online (true);
+  send_transceiver (desired);
+  return true;
+}
+
+void Configuration::impl::handle_mode_status (Transceiver::ModeStatus const& status,
+                                               unsigned sequence)
+{
+  auto const previous = radio_mode_policy_.state ();
+  radio_mode_policy_.configure (configured_mode ());
+  radio_mode_policy_.observe (status, sequence);
+  if (radio_mode_policy_.ready () && status.mode == configured_mode ()
+      && (status.kind == Transceiver::ModeStatusKind::Observed
+          || status.kind == Transceiver::ModeStatusKind::Applied))
+    cached_rig_state_.mode (status.mode);
+  notify_mode_control (previous);
+  finish_test_ptt_preparation ();
 }
 
 RigFrequencyChangePolicy::Activity Configuration::impl::frequency_change_activity () const
 {
+  if (frequency_activity_provider_) return frequency_activity_provider_ ();
   return {false, false, false, false, false, false, false,
           cached_rig_state_.ptt (), cached_rig_state_.tune ()};
 }
@@ -6376,195 +7889,253 @@ bool Configuration::impl::frequency_change_allowed (RigFrequencyChangePolicy::Ch
 bool Configuration::impl::transceiver_frequency (
   Frequency f, RigFrequencyChangePolicy::ChangeKind kind)
 {
-  return RigFrequencyChangePolicy::applyIfAllowed (
-    kind, frequency_change_activity (), tx_frequency_corrections_allowed_, [this, f] {
-      cached_rig_state_.online (true); // we want the rig online
-      set_cached_mode ();
-
-      // apply any offset & calibration
-      // we store the offset here for use in feedback from the rig, we
-      // cannot absolutely determine if the offset should apply but by
-      // simply picking an offset when the Rx frequency is set and
-      // sticking to it we get sane behaviour
-      current_offset_ = stations_.offset (f);
-      cached_rig_state_.frequency (apply_calibration (f + current_offset_));
-
-      // qDebug () << "Configuration::impl::transceiver_frequency: n:" << transceiver_command_number_ + 1 << "f:" << f;
-      LOG_TRACE ("emitting set_transceiver: requested state:" << cached_rig_state_);
-      Q_EMIT set_transceiver (cached_rig_state_, ++transceiver_command_number_);
-    });
+  return request_frequency ({frequency_adapter_.generation (), ++legacy_frequency_id_,
+                             RigFrequency::Path::Rx, f}, kind);
 }
 
 bool Configuration::impl::transceiver_tx_frequency (
   Frequency f, RigFrequencyChangePolicy::ChangeKind kind)
 {
-  if (!RigFrequencyChangePolicy::tx_path_frequency_supported (f != 0, split_mode ()))
+  return request_frequency ({frequency_adapter_.generation (), ++legacy_frequency_id_,
+                             RigFrequency::Path::Tx, f}, kind);
+}
+
+bool Configuration::impl::request_frequency (
+  RigFrequency::Request const& request, RigFrequencyChangePolicy::ChangeKind kind)
+{
+  if (radio_mode_policy_.yielded () || !frequency_change_allowed (kind)
+      || (request.path == RigFrequency::Path::Tx
+          && !RigFrequencyChangePolicy::tx_path_frequency_supported (request.target != 0, split_mode ())))
+    return false;
+  FrequencyAdapter::Projection projection;
+  projection.offset = request.target ? stations_.offset (request.target) : 0;
+  projection.intercept = calibration_.intercept;
+  projection.slope_ppm = calibration_.slope_ppm;
+  projection.calibrated = !frequency_calibration_disabled_;
+  if (!frequency_adapter_.submit (request, projection)) return false;
+  frequency_kinds_[request.path == RigFrequency::Path::Rx ? 0 : 1] = kind;
+  dispatch_frequencies ();
+  return true;
+}
+
+void Configuration::impl::dispatch_frequencies ()
+{
+  for (auto path : {RigFrequency::Path::Rx, RigFrequency::Path::Tx})
     {
-      return false;
-    }
-  return RigFrequencyChangePolicy::applyIfAllowed (
-    kind, frequency_change_activity (), tx_frequency_corrections_allowed_, [this, f] {
-      Q_ASSERT (!f || split_mode ());
-      if (split_mode ())
+      if (radio_mode_policy_.yielded ()
+          || !frequency_change_allowed (frequency_kinds_[path == RigFrequency::Path::Rx ? 0 : 1])) continue;
+      auto command = frequency_adapter_.take_dispatch (path);
+      if (!command) continue;
+      cached_rig_state_.online (true);
+      cached_rig_state_.frequency_request (*command);
+      if (path == RigFrequency::Path::Rx) cached_rig_state_.frequency (command->target);
+      else
         {
-          cached_rig_state_.online (true); // we want the rig online
-          set_cached_mode ();
-          cached_rig_state_.split (f);
-          cached_rig_state_.tx_frequency (f);
-
-          // lookup offset for tx and apply calibration
-          if (f)
-            {
-              // apply and offset and calibration
-              // we store the offset here for use in feedback from the rig, we
-              // cannot absolutely determine if the offset should apply but by
-              // simply picking an offset when the Rx frequency is set and
-              // sticking to it we get sane behaviour
-              current_tx_offset_ = stations_.offset (f);
-              cached_rig_state_.tx_frequency (apply_calibration (f + current_tx_offset_));
-            }
-
-          // qDebug () << "Configuration::impl::transceiver_tx_frequency: n:" << transceiver_command_number_ + 1 << "f:" << f;
-          LOG_TRACE ("emitting set_transceiver: requested state:" << cached_rig_state_);
-          Q_EMIT set_transceiver (cached_rig_state_, ++transceiver_command_number_);
+          cached_rig_state_.tx_frequency (command->target);
+          cached_rig_state_.split (command->target != 0);
         }
-    });
+      send_transceiver (
+        frequency_kinds_[path == RigFrequency::Path::Rx ? 0 : 1]
+          == RigFrequencyChangePolicy::ChangeKind::NominalQsy
+        ? configured_mode () : Transceiver::UNK);
+    }
+}
+
+void Configuration::impl::handle_frequency_result (RigFrequency::Result const& result)
+{
+  auto translated = frequency_adapter_.complete (result);
+  if (!translated) return;
+  if (result.outcome != RigFrequency::Outcome::Pending
+      && RigFrequency::same_operation (cached_rig_state_.frequency_request (result.request.path), result.request))
+    cached_rig_state_.frequency_request (result.request.path, {});
+  Q_EMIT self_->frequency_result (*translated);
+  if (translated->outcome == RigFrequency::Outcome::Deferred && !deferred_frequency_retry_scheduled_)
+    {
+      deferred_frequency_retry_scheduled_ = true;
+      auto const generation = frequency_adapter_.generation ();
+      QTimer::singleShot (500, this, [this, generation] {
+        if (generation != frequency_adapter_.generation ()) return;
+        deferred_frequency_retry_scheduled_ = false;
+        frequency_adapter_.resume_deferred ();
+        dispatch_frequencies ();
+      });
+    }
+  if (translated->outcome == RigFrequency::Outcome::Failed
+      || translated->outcome == RigFrequency::Outcome::Rejected)
+    {
+      close_rig (true);
+      Q_EMIT self_->frequency_failure (
+        tr ("Frequency application could not be established. Retry rig control to restore the requested frequency."));
+      return;
+    }
+  dispatch_frequencies ();
+}
+
+void Configuration::impl::handle_frequency_observation (RigFrequency::Evidence const& evidence)
+{
+  if (evidence.path == RigFrequency::Path::Rx
+      && evidence.basis == RigFrequency::Basis::Readback && evidence.value)
+    observed_rx_frequency_ = evidence.value;
+  auto translated = frequency_adapter_.observe (evidence);
+  if (!translated) return;
+  if (!translated->operation)
+    {
+      if (evidence.path == RigFrequency::Path::Rx) cached_rig_state_.frequency (evidence.value);
+      else cached_rig_state_.tx_frequency (evidence.value);
+      cached_rig_state_.frequency_request (evidence.path, {});
+    }
+  Q_EMIT self_->frequency_observation (*translated);
+}
+
+void Configuration::impl::reproject_frequencies ()
+{
+  frequency_adapter_.default_projection (
+    {0, calibration_.intercept, calibration_.slope_ppm, !frequency_calibration_disabled_});
+  if (!rig_active_) return;
+  for (auto path : {RigFrequency::Path::Rx, RigFrequency::Path::Tx})
+    {
+      auto const snapshot = frequency_adapter_.snapshot (path);
+      auto const mapping = snapshot.queued ? snapshot.queued : snapshot.pending ? snapshot.pending : snapshot.established;
+      if (!mapping) continue;
+      FrequencyAdapter::Projection projection;
+      projection.offset = mapping->projection.offset;
+      projection.intercept = calibration_.intercept;
+      projection.slope_ppm = calibration_.slope_ppm;
+      projection.calibrated = !frequency_calibration_disabled_;
+      frequency_adapter_.submit (
+        {frequency_adapter_.generation (), ++legacy_frequency_id_, path, mapping->request.target}, projection);
+      frequency_kinds_[path == RigFrequency::Path::Rx ? 0 : 1] = RigFrequencyChangePolicy::ChangeKind::TxPathCorrection;
+    }
+  dispatch_frequencies ();
 }
 
 void Configuration::impl::transceiver_mode (MODE m)
 {
   cached_rig_state_.online (true); // we want the rig online
-  cached_rig_state_.mode (m);
-  // qDebug () << "Configuration::impl::transceiver_mode: n:" << transceiver_command_number_ + 1 << "m:" << m;
-  LOG_TRACE ("emitting set_transceiver: requested state:" << cached_rig_state_);
-  Q_EMIT set_transceiver (cached_rig_state_, ++transceiver_command_number_);
+  send_transceiver (m);
 }
 
 void Configuration::impl::transceiver_ptt (bool on)
 {
+  if (on && !self_->radio_mode_ready ()) return;
   cached_rig_state_.online (true); // we want the rig online
-  set_cached_mode ();
   cached_rig_state_.ptt (on);
   // qDebug () << "Configuration::impl::transceiver_ptt: n:" << transceiver_command_number_ + 1 << "on:" << on;
   LOG_TRACE ("emitting set_transceiver: requested state:" << cached_rig_state_);
-  Q_EMIT set_transceiver (cached_rig_state_, ++transceiver_command_number_);
+  send_transceiver (on ? configured_mode () : Transceiver::UNK);
+  if (!on)
+    {
+      frequency_adapter_.resume_deferred ();
+      dispatch_frequencies ();
+    }
 }
 
 void Configuration::impl::transceiver_audio (bool on)
 {
   cached_rig_state_.online (true); // we want the rig online
-  set_cached_mode ();
   if (cached_rig_state_.audio() != on)
   {
     cached_rig_state_.audio (on);
 //    printf("%s(%0.1f) Configuration #:%d audio: %d\n",QDateTime::currentDateTimeUtc().toString("hh:mm:ss.zzz").toStdString().c_str(),transceiver_command_number_+1,on);
-    Q_EMIT set_transceiver (cached_rig_state_, ++transceiver_command_number_);
+    send_transceiver ();
   }
 }
 
 void Configuration::impl::transceiver_tune (bool on)
 {
+  if (on && !self_->radio_mode_ready ()) return;
   cached_rig_state_.online (true); // we want the rig online
-  set_cached_mode ();
   //cached_rig_state_.ptt (on);
   cached_rig_state_.tune (on);
   // qDebug () << "Configuration::impl::transceiver_ptt: n:" << transceiver_command_number_ + 1 << "on:" << on;
   LOG_TRACE ("emitting set_transceiver: requested state:" << cached_rig_state_);
-  Q_EMIT set_transceiver (cached_rig_state_, ++transceiver_command_number_);
+  send_transceiver ();
 }
 
 
 void Configuration::impl::transceiver_period (double period)
 {
   cached_rig_state_.online (true); // we want the rig online
-  set_cached_mode ();
 //    printf("%s(%0.1f) Configuration #:%d period: %0.1f cached: %0.1f\n",QDateTime::currentDateTimeUtc().toString("hh:mm:ss.zzz").toStdString().c_str(),transceiver_command_number_+1,period,cached_rig_state_.period());
   cached_rig_state_.period (period);
-  Q_EMIT set_transceiver (cached_rig_state_, ++transceiver_command_number_);
+  send_transceiver ();
 }
 
 void Configuration::impl::transceiver_blocksize (qint32 blocksize)
 {
   cached_rig_state_.online (true); // we want the rig online
-  set_cached_mode ();
   if (cached_rig_state_.blocksize() != blocksize)
   {
 //    printf("%s(%0.1f) Configuration #:%d blocksize: %d cached:%d\n",QDateTime::currentDateTimeUtc().toString("hh:mm:ss.zzz").toStdString().c_str(),transceiver_command_number_+1,blocksize,cached_rig_state_.blocksize());
     cached_rig_state_.blocksize (blocksize);
-    Q_EMIT set_transceiver (cached_rig_state_, ++transceiver_command_number_);
+    send_transceiver ();
   }
 }
 
 void Configuration::impl::transceiver_spread (double spread)
 {
   cached_rig_state_.online (true); // we want the rig online
-  set_cached_mode ();
   if (cached_rig_state_.spread() != spread)
   {
 //    printf("%s(%0.1f) Configuration #:%d spread: %0.1f cached: %0.1f\n",QDateTime::currentDateTimeUtc().toString("hh:mm:ss.zzz").toStdString().c_str(),transceiver_command_number_+1,spread,cached_rig_state_.spread());
     cached_rig_state_.spread (spread);
-    Q_EMIT set_transceiver (cached_rig_state_, ++transceiver_command_number_);
+    send_transceiver ();
   }
 }
 
 void Configuration::impl::transceiver_nsym (int nsym)
 {
   cached_rig_state_.online (true); // we want the rig online
-  set_cached_mode ();
   if (cached_rig_state_.nsym() != nsym)
   {
 //    printf("%s(%0.1f) Configuration #:%d nsym: %d cached:%d\n",QDateTime::currentDateTimeUtc().toString("hh:mm:ss.zzz").toStdString().c_str(),transceiver_command_number_+1,nsym,cached_rig_state_.nsym());
     cached_rig_state_.nsym (nsym);
-    Q_EMIT set_transceiver (cached_rig_state_, ++transceiver_command_number_);
+    send_transceiver ();
   }
 }
 
 void Configuration::impl::transceiver_trfrequency (double trfrequency)
 {
   cached_rig_state_.online (true); // we want the rig online
-  set_cached_mode ();
   if (cached_rig_state_.trfrequency() != trfrequency)
   {
 //    printf("%s(%0.1f) Configuration #:%d trfrequency: %0.1f cached: %0.1f\n",QDateTime::currentDateTimeUtc().toString("hh:mm:ss.zzz").toStdString().c_str(),transceiver_command_number_+1,trfrequency,cached_rig_state_.trfrequency());
     cached_rig_state_.trfrequency (trfrequency);
-    Q_EMIT set_transceiver (cached_rig_state_, ++transceiver_command_number_);
+    send_transceiver ();
   }
 }
 
 void Configuration::impl::transceiver_txvolume (double txvolume, bool force)
 {
   cached_rig_state_.online (true); // we want the rig online
-  set_cached_mode ();
   if (force || cached_rig_state_.txvolume() != txvolume)
   {
 //    printf("%s(%0.1f) Configuration #:%d txvolume: %0.1f cached: %0.1f\n",QDateTime::currentDateTimeUtc().toString("hh:mm:ss.zzz").toStdString().c_str(),transceiver_command_number_+1,txvolume,cached_rig_state_.txvolume());
     cached_rig_state_.txvolume (txvolume);
-    Q_EMIT set_transceiver (cached_rig_state_, ++transceiver_command_number_);
+    send_transceiver ();
   }
 }
 
 void Configuration::impl::transceiver_volume (double volume)
 {
   cached_rig_state_.online (true); // we want the rig online
-  set_cached_mode ();
   if (cached_rig_state_.volume() != volume)
   {
     //printf("In Configuration::transceiver_volume, volume: %f cached: %f\n",volume,cached_rig_state_.volume());
     cached_rig_state_.volume (volume);
-    Q_EMIT set_transceiver (cached_rig_state_, ++transceiver_command_number_);
+    send_transceiver ();
   }
 }
 
 void Configuration::impl::transceiver_modulator_start (TxEvidence::TxRequest const& request)
 {
   cached_rig_state_.online (true); // we want the rig online
-  set_cached_mode ();
   if (!cached_rig_state_.tx_audio())
   {
     cached_rig_state_.tx_audio (true);
     cached_rig_state_.tx_request (request);
     //    printf("%s(%0.1f) Configuration #:%d modulator_start: symbolslength=%d framespersymbol=%0.1f frequency=%0.1f tonespacing=%0.1f synchronize= %d dbsnr=%0.1f trperiod=%0.1f\n",QDateTime::currentDateTimeUtc().toString("hh:mm:ss.zzz").toStdString().c_str(),transceiver_command_number_+1,symbolslength,framespersymbol,frequency,tonespacing,synchronize,dbsnr,trperiod);
-    Q_EMIT set_transceiver (cached_rig_state_, ++transceiver_command_number_);
+    send_transceiver ();
   }
 //  else printf("%s(%0.1f) Configuration modulator_start: WAS ALLREADY RUNNING\n",QDateTime::currentDateTimeUtc().toString("hh:mm:ss.zzz").toStdString().c_str());
 }
@@ -6573,6 +8144,14 @@ void Configuration::impl::transceiver_enqueue_jtty_pcm (QByteArray const& sample
                                                          TxAudioQueueEpoch epoch,
                                                          qint64 enqueueId)
 {
+  if (!can_control_rig ("transceiver_enqueue_jtty_pcm"))
+    {
+      // Without an active transceiver nothing consumes the enqueue signal.
+      // Report the failure so the submission is rejected instead of hanging.
+      Q_EMIT self_->transceiver_jtty_enqueue_failed (
+        epoch, enqueueId, TxAudioQueueEnqueueFailure::BackendUnavailable);
+      return;
+    }
   Q_EMIT enqueue_jtty_pcm (samples, epoch, enqueueId);
 }
 
@@ -6584,13 +8163,12 @@ void Configuration::impl::transceiver_clear_jtty_pcm (TxAudioQueueEpoch epoch)
 void Configuration::impl::transceiver_modulator_stop (bool on)
 {
   cached_rig_state_.online (true); // we want the rig online
-  set_cached_mode ();
   if (cached_rig_state_.tx_audio())
   {
     cached_rig_state_.tx_audio (false);
     cached_rig_state_.quick (on);
 //    printf("%s(%0.1f) Configuration #:%d modulator_stop: quick=%d\n",QDateTime::currentDateTimeUtc().toString("hh:mm:ss.zzz").toStdString().c_str(),transceiver_command_number_+1,on);
-    Q_EMIT set_transceiver (cached_rig_state_, ++transceiver_command_number_);
+    send_transceiver ();
   }
 //  else printf("%s(%0.1f) Configuration modulator_stop: WAS NOT RUNNING\n",QDateTime::currentDateTimeUtc().toString("hh:mm:ss.zzz").toStdString().c_str());
 }
@@ -6623,12 +8201,12 @@ void Configuration::impl::handle_transceiver_update (TransceiverState const& sta
 
   // only follow rig on some information, ignore other stuff
   cached_rig_state_.online (state.online ());
-  cached_rig_state_.frequency (state.frequency ());
   cached_rig_state_.mode (state.mode ());
-  cached_rig_state_.split (state.split ());
 
   if (state.online ())
     {
+      if (!rig_ranges_fixed_) rig_tuning_ranges_ = state.tuning_ranges ();
+      rig_ranges_known_ = true;
       ui_->test_PTT_push_button->setChecked (
         tx_inhibit_active_ ? cached_rig_state_.ptt () : state.ptt ());
 
@@ -6657,15 +8235,24 @@ void Configuration::impl::handle_transceiver_update (TransceiverState const& sta
     {
       TransceiverState reported_state {state};
       // take off calibration & offset
-      reported_state.frequency (remove_calibration (reported_state.frequency ()) - current_offset_);
+      reported_state.frequency (frequency_adapter_.decode (RigFrequency::Path::Rx, reported_state.frequency ()));
 
       if (reported_state.tx_frequency ())
         {
           // take off calibration & offset
-          reported_state.tx_frequency (remove_calibration (reported_state.tx_frequency ()) - current_tx_offset_);
+          reported_state.tx_frequency (frequency_adapter_.decode (RigFrequency::Path::Tx, reported_state.tx_frequency ()));
         }
 
+      auto const generation = frequency_adapter_.generation ();
+      auto const activity_before = frequency_change_activity ();
       Q_EMIT self_->transceiver_update (reported_state);
+      if (generation == frequency_adapter_.generation ())
+        {
+          auto const activity_after = frequency_change_activity ();
+          if (activity_before.rigPtt != activity_after.rigPtt || activity_before.rigTune != activity_after.rigTune)
+            frequency_adapter_.resume_deferred ();
+          dispatch_frequencies ();
+        }
     }
 }
 
@@ -6752,11 +8339,17 @@ void Configuration::impl::handle_k4_rf_power_setting (double value, bool milliwa
 
 void Configuration::impl::close_rig (bool failed)
 {
+  set_test_ptt_state (TestPttState::Idle);
+  frequency_adapter_.new_connection ();
+  deferred_frequency_retry_scheduled_ = false;
+  if (!rig_ranges_fixed_) rig_tuning_ranges_.clear ();
+  rig_ranges_known_ = false;
   ui_->test_PTT_push_button->setEnabled (false);
 
   // revert to no rig configured
   if (rig_active_)
     {
+      rig_active_ = false;
       Q_EMIT self_->transceiver_closing (failed);
       ui_->test_CAT_push_button->setStyleSheet ("QPushButton {background-color: red;}");
       LOG_TRACE ("emitting stop_transceiver");
@@ -6767,9 +8360,12 @@ void Configuration::impl::close_rig (bool failed)
           disconnect (connection);
         }
       rig_connections_.clear ();
-      rig_active_ = false;
     }
   mark_rig_offline ();
+  // Frequency owners must record an interrupted request before mode yield cancels it.
+  if (radio_mode_policy_.state () == RadioModePolicy::State::Preparing)
+    handle_mode_status ({Transceiver::UNK, Transceiver::ModeStatusKind::Unavailable}, transceiver_command_number_);
+  observed_rx_frequency_ = 0;
   ++tx_inhibit_generation_;
   tx_inhibit_active_ = false;
   if (tx_inhibit_status_forwarded_)
@@ -7068,26 +8664,8 @@ void Configuration::impl::fill_port_combo_box(QComboBox* cb)
         }
     }
 
-    // Sort ports by the numeric value of the port name, if possible
     std::sort(ports.begin(), ports.end(), [](const QSerialPortInfo& a, const QSerialPortInfo& b) {
-        bool isANumeric = a.portName().midRef(3).toInt();
-        bool isBNumeric = b.portName().midRef(3).toInt();
-        if (isANumeric && isBNumeric)
-        {
-            return a.portName().midRef(3).toInt() < b.portName().midRef(3).toInt();
-        }
-        else if (isANumeric)
-        {
-            return true; // a comes before b
-        }
-        else if (isBNumeric)
-        {
-            return false; // b comes before a
-        }
-        else
-        {
-            return a.portName() < b.portName(); // Alphabetical order for non-numeric ports
-        }
+        return serial_port_name_less(a.portName(), b.portName());
     });
 
     // Add sorted ports to the combo box
@@ -7103,23 +8681,7 @@ void Configuration::impl::fill_port_combo_box(QComboBox* cb)
         }
     }
 
-    cb->addItem("USB");
-    cb->setItemData(cb->count() - 1, "Custom USB device", Qt::ToolTipRole);
     cb->setEditText(current_text);
-}
-
-auto Configuration::impl::apply_calibration (Frequency f) const -> Frequency
-{
-  if (frequency_calibration_disabled_) return f;
-  return std::llround (calibration_.intercept
-                       + (1. + calibration_.slope_ppm / 1.e6) * f);
-}
-
-auto Configuration::impl::remove_calibration (Frequency f) const -> Frequency
-{
-  if (frequency_calibration_disabled_) return f;
-  return std::llround ((f - calibration_.intercept)
-                       / (1. + calibration_.slope_ppm / 1.e6));
 }
 
 ENUM_QDATASTREAM_OPS_IMPL (Configuration, DataMode);

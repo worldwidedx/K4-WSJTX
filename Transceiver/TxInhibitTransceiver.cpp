@@ -39,13 +39,24 @@ TxInhibitTransceiver::TxInhibitTransceiver (logger_type * logger,
   connect (wrapped_.get (), &Transceiver::resolution, this, &Transceiver::resolution);
   connect (wrapped_.get (), &Transceiver::tciframeswritten, this, &Transceiver::tciframeswritten);
   connect (wrapped_.get (), &Transceiver::receiveAudio, this, &Transceiver::receiveAudio);
+  connect (wrapped_.get (), &Transceiver::continuousAudioAvailable,
+           this, &Transceiver::continuousAudioAvailable);
+  connect (wrapped_.get (), &Transceiver::continuousReceptionStopped,
+           this, &Transceiver::continuousReceptionStopped);
+  connect (wrapped_.get (), &Transceiver::continuousReceiveDrained,
+           this, &Transceiver::continuousReceiveDrained);
   connect (wrapped_.get (), &Transceiver::tci_mod_active, this, &Transceiver::tci_mod_active);
   connect (wrapped_.get (), &Transceiver::txSourceCommitted, this, &Transceiver::txSourceCommitted);
   connect (wrapped_.get (), &Transceiver::rawTxPlayoutSnapshot, this, &Transceiver::rawTxPlayoutSnapshot);
   connect (wrapped_.get (), &Transceiver::jtty_drained, this, &Transceiver::jtty_drained);
+  connect (wrapped_.get (), &Transceiver::jtty_progress, this, &Transceiver::jtty_progress);
   connect (wrapped_.get (), &Transceiver::jtty_enqueue_accepted, this, &Transceiver::jtty_enqueue_accepted);
   connect (wrapped_.get (), &Transceiver::jtty_enqueue_failed, this, &Transceiver::jtty_enqueue_failed);
   connect (wrapped_.get (), &Transceiver::update, this, &Transceiver::update);
+  connect (wrapped_.get (), &Transceiver::frequency_result, this, &Transceiver::frequency_result);
+  connect (wrapped_.get (), &Transceiver::frequency_observation,
+           this, &Transceiver::frequency_observation);
+  connect (wrapped_.get (), &Transceiver::mode_status, this, &Transceiver::mode_status);
   connect (wrapped_.get (), &Transceiver::finished, this, &Transceiver::finished);
   connect (wrapped_.get (), &Transceiver::failure, this, &Transceiver::failure);
 }
@@ -149,7 +160,7 @@ void TxInhibitTransceiver::expire_holds ()
   auto const was_inhibited = !holds_.isEmpty ();
   auto const previous_holder = holder_summary ();
   auto expired = false;
-  auto const now = monotonic_clock_.elapsed ();
+  auto const now = lease_now_ ();
   for (auto it = holds_.begin (); it != holds_.end ();)
     {
       if (it->expires_at <= now)
@@ -201,7 +212,7 @@ void TxInhibitTransceiver::tx_inhibit_command (QString controller, quint32 ttl_m
   else
     {
       ++hold_rx_;
-      auto const expires_at = monotonic_clock_.elapsed () + ttl_ms;
+      auto const expires_at = lease_now_ () + ttl_ms;
       auto const holder = sanitize_holder (station.isEmpty () ? controller : station);
       auto existing = holds_.find (controller);
       if (existing != holds_.end ())
@@ -249,7 +260,7 @@ void TxInhibitTransceiver::schedule_expiry ()
     {
       next_expiry = std::min (next_expiry, it->expires_at);
     }
-  auto const delay = std::max<qint64> (1, next_expiry - monotonic_clock_.elapsed ());
+  auto const delay = std::max<qint64> (1, next_expiry - lease_now_ ());
   expiry_timer_->start (static_cast<int> (std::min<qint64> (delay,
                                                             std::numeric_limits<int>::max ())));
 }

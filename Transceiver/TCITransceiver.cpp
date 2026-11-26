@@ -24,6 +24,7 @@
 #include <QDir>
 #include <QDebug>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QMutexLocker>
 #include <QTimer>
 #include <QVector>
@@ -166,7 +167,7 @@ void TCITransceiver::register_transceivers (logger_type *, TransceiverFactory::T
 
 TCITransceiver::TCITransceiver (logger_type * logger, std::unique_ptr<TransceiverBase> wrapped,QString const& rignr,
                                QString const& address, bool use_for_ptt,
-                               int poll_interval, QObject * parent, ReceiveClock receive_clock)
+                               int poll_interval, QObject * parent, UtcClock utc_clock)
   : PollingTransceiver {logger, poll_interval, parent}
   , wrapped_ {std::move (wrapped)}
   , rx_ {rignr}
@@ -240,7 +241,7 @@ TCITransceiver::TCITransceiver (logger_type * logger, std::unique_ptr<Transceive
   , m_toneFrequency0 {1500.0}
   , wav_file_ {QDir(QStandardPaths::writableLocation (QStandardPaths::DataLocation)).absoluteFilePath ("tx.wav").toStdString()}
 {
-  receive_clock_ = std::move (receive_clock);
+  utc_clock_ = std::move (utc_clock);
   m_samplesPerFFT = 6912 / 2;
   tci_Ready = false;
   trxA = 0;
@@ -319,12 +320,14 @@ void TCITransceiver::onConnected()
 void TCITransceiver::onDisconnected()
 {
   inConnected = false;
+  receive_discontinuity (JttyReceiveReason::InputError);
   CAT_TRACE ("TCITransceiver entered TCI onDisonnected and inConnected==false\n");
 }
 
 
 void TCITransceiver::onError(QAbstractSocket::SocketError err)
 {
+  receive_discontinuity (JttyReceiveReason::InputError);
   qDebug() << "WebInThread::onError";
   CAT_TRACE ("TCITransceiver entered TCI onError and ErrorNumber is " + QString::number(err) + '\n');
   auto const error_index = static_cast<int> (err);
@@ -451,7 +454,6 @@ int TCITransceiver::do_start ()
   requested_PTT_ = false;
   mode_ = "";
   requested_mode_ = "";
-  started_mode_ = "";
   requested_rx_frequency_ = "";
   rx_frequency_ = "";
   requested_other_frequency_ = "";
@@ -470,6 +472,8 @@ int TCITransceiver::do_start ()
   stream_audio_ = false;
   _power_ = false;
   CAT_TRACE ("TCITransceiver entered TCI do_start and url " + url_.toString() + " rig_power:" + QString::number(rig_power_) + " rig_power_off:" + QString::number(rig_power_off_) + " tci_audio:" + QString::number(tci_audio_) + " do_snr:" + QString::number(do_snr_) + " do_pwr:" + QString::number(do_pwr_) + '\n');
+  QElapsedTimer startup_elapsed;
+  startup_elapsed.start ();
   commander_->open (url_);
   mysleep7(2000);
   busy_split_ = true;
@@ -479,15 +483,29 @@ int TCITransceiver::do_start ()
   if (error_.isEmpty()) {
     tci_Ready = true;
     if (!_power_) {
+      qint64 power_deadline_ms = 2000;
       if (rig_power_) {
         rig_power(true);
-        mysleep7(1000);
-        if(!_power_) throw error {tr ("TCI SDR could not be switched on")};
-      } else {
+        power_deadline_ms = startup_elapsed.elapsed () + 1000;
+      }
+      // Readiness can precede power state in a later WebSocket message.
+      while (!_power_ && inConnected && error_.isEmpty ()) {
+        auto const remaining_ms = power_deadline_ms - startup_elapsed.elapsed ();
+        if (remaining_ms <= 0) break;
+        mysleep7 (static_cast<int> (remaining_ms));
+      }
+      if (!inConnected || !error_.isEmpty ()) {
         tci_Ready = false;
-        throw error {tr ("TCI SDR is not switched on")};
+        throw error {error_.isEmpty ()
+          ? tr ("TCI connection closed during startup") : error_};
+      }
+      if (!_power_) {
+        tci_Ready = false;
+        throw error {rig_power_ ? tr ("TCI SDR could not be switched on")
+                               : tr ("TCI SDR is not switched on")};
       }
     }
+    tci_Ready = true;
     if (rx_ == "1" && !rx2_) {
       rx2_enable (true);
       if (!rx2_) {
@@ -531,6 +549,13 @@ int TCITransceiver::do_start ()
 
 void TCITransceiver::do_stop ()
 {
+  bool const endingContinuous = m_receivePolicy == ReceivePolicy::ContinuousJtty;
+  if (m_receivePolicy == ReceivePolicy::ContinuousJtty) audio_ = false;
+  receive_discontinuity (JttyReceiveReason::SourceChanged);
+  m_receivePolicy = ReceivePolicy::Timed;
+  m_receiveContext = 0;
+  m_jttyPublisher.setContext (0);
+  if (endingContinuous) Q_EMIT continuousReceptionStopped (m_jttyPublisher.mailbox ());
   CAT_TRACE ("TCITransceiver TCI close\n");
   if (!commander_) return;
   if (stream_audio_ && tci_Ready && inConnected && _power_) {
@@ -547,7 +572,6 @@ void TCITransceiver::do_stop ()
     busy_split_ = false;
     requested_split_ = false;
     rig_split();
-    if (started_mode_ != mode_) sendTextMessage(mode_to_command(started_mode_));
     if (!started_rx2_ && rx2_) {
       rx2_enable (false);
     }
@@ -561,6 +585,7 @@ void TCITransceiver::do_stop ()
   if (commander_)
   {
     if (inConnected) commander_->close(QWebSocketProtocol::CloseCodeNormal,"end");
+    inConnected = false;
     delete commander_, commander_ = nullptr;
     CAT_TRACE ("deleted commander & closed websocket & deleted:");
   }
@@ -725,10 +750,11 @@ void TCITransceiver::onMessageReceived(const QString &str)
         auto const received_frequency_text = QString::number (received_frequency);
         if(args.at(1) == "0") {
           rx_frequency_ = received_frequency_text;
+          update_rx_frequency (received_frequency, RigFrequency::Basis::Readback);
           CAT_TRACE("Rx VFO Frequency from SDR is :");
           CAT_TRACE(rx_frequency_);
           if (!tci_Ready && requested_rx_frequency_.isEmpty()) requested_rx_frequency_ = rx_frequency_;
-          if (busy_rx_frequency_ && !band_change) {
+          if (busy_rx_frequency_ && rx_frequency_ == requested_rx_frequency_) {
             printf (" cmdvfo0 done1");
             tci_done7();
           } else if (!tci_timer2_->isActive() && split_) {
@@ -738,6 +764,8 @@ void TCITransceiver::onMessageReceived(const QString &str)
         }
         else {
           other_frequency_ = received_frequency_text;
+          if (split_ || busy_other_frequency_)
+            update_other_frequency (received_frequency, RigFrequency::Basis::Readback);
           CAT_TRACE("Tx VFO (other) Frequency from SDR is :");
           CAT_TRACE(other_frequency_);
           if (!tci_Ready && requested_other_frequency_.isEmpty()) requested_other_frequency_ = other_frequency_;
@@ -745,14 +773,14 @@ void TCITransceiver::onMessageReceived(const QString &str)
             printf (" cmdvfo1 done1");
             band_change = false;
             tci_timer2_->start(210);
-            tci_done7();
-          } else if (busy_other_frequency_) {
+          } else if (busy_other_frequency_ && other_frequency_ == requested_other_frequency_) {
             printf (" cmdvfo1 done2");
             tci_done2();
-          } else if (tci_timer2_->isActive()) {
+          } else if (tci_timer2_->isActive() && !busy_other_frequency_) {
             printf (" cmdvfo1 timer2 reset 210");
             tci_timer2_->start(210);
-          } else if (other_frequency_ != requested_other_frequency_ && tci_Ready && split_ && !tci_timer2_->isActive()) {
+          } else if (other_frequency_ != requested_other_frequency_ && tci_Ready && split_
+                     && !busy_other_frequency_ && !tci_timer2_->isActive()) {
             printf (" cmdvfo1 timer2 start 210");
             tci_timer2_->start(210);
           }
@@ -771,13 +799,10 @@ void TCITransceiver::onMessageReceived(const QString &str)
               mode_ = args.at(1).toLower();
             }
           } else mode_ = args.at(1);
-          if (started_mode_.isEmpty()) started_mode_ = mode_;
+          observe_mode (get_mode ());
           if (busy_mode_) {
             if (requested_mode_.isEmpty() || requested_mode_ == mode_) tci_done8();
             return;
-          }
-          else if (!requested_mode_.isEmpty() && requested_mode_ != mode_ && !band_change) {
-            sendTextMessage(mode_to_command(requested_mode_));
           }
         }
         break;
@@ -946,21 +971,41 @@ void TCITransceiver::onBinaryReceived(const QByteArray &data)
     qDebug() << "IQ" << data.size() << pStream->length;
   } else if (pStream->type == TciStream::RxAudioStream && audio_  && pStream->receiver == rx_.toUInt()) {
     if (!TciStream::has_complete_float_payload (data, pStream->length)) {
+      receive_discontinuity (JttyReceiveReason::InputError);
       return;
     }
     writeAudioData(const_cast<float *> (TciStream::float_payload (data)),pStream->length);
-  } else if (pStream->type == TciStream::TxChrono &&  pStream->receiver == rx_.toUInt()) {
+  } else if (pStream->type == TciStream::TxChrono) {
+    Q_EMIT txChronoDiagnostic (QStringLiteral ("transceiver received request"),
+                               data.size (), TciStream::HeaderSize);
+    if (pStream->receiver != rx_.toUInt()) {
+      Q_EMIT txChronoDiagnostic (QStringLiteral ("transceiver rejected receiver %1 (expected %2)")
+                                 .arg (pStream->receiver).arg (rx_.toUInt ()),
+                                 data.size (), TciStream::HeaderSize);
+      return;
+    }
     quint32 channels;
     if (!TciStream::valid_tx_chrono (*pStream, stream_channels_supported_,
                                      audioSampleRate, &channels)) {
+      Q_EMIT txChronoDiagnostic (QStringLiteral ("transceiver rejected request header "
+                                                "(rate=%1/%2 format=%3 codec=%4 length=%5 channels=%6 channelField=%7)")
+                                 .arg (pStream->sampleRate).arg (audioSampleRate).arg (pStream->format)
+                                 .arg (pStream->codec).arg (pStream->length).arg (pStream->channels)
+                                 .arg (stream_channels_supported_),
+                                 data.size (), TciStream::HeaderSize);
       return;
     }
+    Q_EMIT txChronoDiagnostic (QStringLiteral ("transceiver validated request"),
+                               data.size (), TciStream::HeaderSize);
 
     qint64 generatedScalars {0};
     {
-      std::lock_guard<std::mutex> lock {mtx_};
+      std::unique_lock<std::mutex> lock {mtx_};
       tx_fifo += 1; tx_fifo &= 7;
       if (!TciStream::prepare_tx_audio_frame (&m_tx1[tx_fifo], *pStream, channels)) {
+        lock.unlock ();
+        Q_EMIT txChronoDiagnostic (QStringLiteral ("transceiver could not frame reply"), 0,
+                                   TciStream::HeaderSize + pStream->length * sizeof (float));
         return;
       }
 
@@ -976,7 +1021,16 @@ void TCITransceiver::onBinaryReceived(const QByteArray &data)
       tx_fifo2 = tx_fifo;
     }
 
-    if (!inConnected || commander_->sendBinaryMessage(m_tx1[tx_fifo2]) != m_tx1[tx_fifo2].size()) {
+    auto const& reply = m_tx1[tx_fifo2];
+    auto const reply_size = reply.size ();
+    if (!inConnected) {
+      Q_EMIT txChronoDiagnostic (QStringLiteral ("transceiver disconnected before reply"),
+                                 0, reply_size);
+      return;
+    }
+    auto const sent = commander_->sendBinaryMessage (reply);
+    Q_EMIT txChronoDiagnostic (QStringLiteral ("transceiver reply send"), sent, reply_size);
+    if (sent != reply_size) {
       return;
     }
 
@@ -990,34 +1044,18 @@ void TCITransceiver::onBinaryReceived(const QByteArray &data)
   }
 }
 
-void TCITransceiver::txAudioData(quint32 len, float * data)
-{
-  if (len % TciStream::DefaultChannels || (len && !data)) {
-    return;
-  }
-
-  TciStream::Header chrono {};
-  chrono.receiver = 0u;
-  chrono.sampleRate = audioSampleRate;
-  chrono.length = len;
-  QByteArray tx;
-  if (!TciStream::prepare_tx_audio_frame (&tx, chrono, TciStream::DefaultChannels)) {
-    return;
-  }
-
-  if (len) {
-    std::memcpy (TciStream::float_payload (&tx), data, len * sizeof (float));
-  }
-  commander_->sendBinaryMessage(tx);
-}
-
 void TCITransceiver::enqueue_jtty_pcm (QByteArray const& samples,
                                        TxAudioQueueEpoch epoch,
                                        qint64 enqueueId) noexcept
 {
-  qint64 const count = samples.size () / int (sizeof (qint16));
-  if (count <= 0) return;
+  if (samples.isEmpty () || samples.size () % int (sizeof (qint16)))
+    {
+      Q_EMIT jtty_enqueue_failed (
+        epoch, enqueueId, TxAudioQueueEnqueueFailure::Capacity);
+      return;
+    }
 
+  qint64 const count = samples.size () / int (sizeof (qint16));
   qint16 const * pcm = reinterpret_cast<qint16 const *> (samples.constData ());
   auto const result = m_txAudioQueue.enqueue (pcm, count, epoch);
   if (!result.accepted)
@@ -1030,7 +1068,7 @@ void TCITransceiver::enqueue_jtty_pcm (QByteArray const& samples,
         {
           CAT_DEBUG ("JTTY TCI transmit queue epoch changed; rejecting stale PCM enqueue\n");
         }
-      Q_EMIT jtty_enqueue_failed (epoch, enqueueId);
+      Q_EMIT jtty_enqueue_failed (epoch, enqueueId, result.failure);
       return;
     }
   Q_EMIT jtty_enqueue_accepted (enqueueId, count, result.progress);
@@ -1039,12 +1077,24 @@ void TCITransceiver::enqueue_jtty_pcm (QByteArray const& samples,
 void TCITransceiver::clear_jtty_pcm (TxAudioQueueEpoch epoch) noexcept
 {
   m_txAudioQueue.clear (epoch);
+  // PCM enqueue and TxChrono consumption both run on this rig thread.
+  m_txAudioQueue.applyPendingReset ();
 }
 
 void TCITransceiver::poll_jtty_drain ()
 {
   // TCI audio is pulled while responding to TxChrono packets. Emitting the
   // completion signal here keeps Qt work out of that packet/audio path.
+  if (m_state == Idle || m_tuning || m_txMode != "JTTY") return;
+  auto const current = m_txAudioQueue.progress ();
+  if (current.epoch.isValid ()
+      && (current.epoch != m_jttyLastProgress.epoch
+          || current.served_samples != m_jttyLastProgress.served_samples
+          || current.total_samples != m_jttyLastProgress.total_samples))
+    {
+      m_jttyLastProgress = current;
+      Q_EMIT jtty_progress (current);
+    }
   auto const drain = m_txAudioQueue.takeDrainReady ();
   if (drain.ready)
     {
@@ -1060,18 +1110,28 @@ void TCITransceiver::clear ()
 
 quint32 TCITransceiver::writeAudioData (float * data, qint32 maxSize)
 {
-  if (dec_data_input_blocked ()) return maxSize;
+  if (dec_data_input_blocked ())
+    {
+      receive_discontinuity (JttyReceiveReason::Replay);
+      return maxSize;
+    }
 
   QVector<qint64> frame_counts;
   QVector<ReceiveAudio> audio;
-  qint64 ms0 = (receive_clock_ ? receive_clock_ ()
-                              : QDateTime::currentMSecsSinceEpoch ()) % 86400000;
-  unsigned mstr = ms0 % int(1000.0*m_period); // ms into the nominal Tx start time
+  bool continuousNotify = false;
+  bool const continuous = m_receivePolicy == ReceivePolicy::ContinuousJtty;
+  qint64 const now = utc_msecs ();
+  qint64 const packetFrames = maxSize / static_cast<qint32> (rxChannels);
+  qint64 const packetDurationMs = audioSampleRate
+    ? qRound64 (1000.0 * packetFrames / audioSampleRate) : 0;
+  qint64 const packetStartUtc = now - packetDurationMs;
+  qint64 ms0 = now % 86400000;
+  unsigned mstr = continuous ? 0 : ms0 % int(1000.0*m_period);
 
   if(data == NULL) {
     QMutexLocker lock {&dec_data_mutex ()};
     if (dec_data_input_blocked ()) return maxSize;
-    if(mstr < m_lastPeriodOffsetMs/2) { //When mstr has wrapped around to 0, restart the buffer
+    if(!continuous && mstr < m_lastPeriodOffsetMs/2) { //When mstr has wrapped around to 0, restart the buffer
       clear ();
     }
     m_lastPeriodOffsetMs=mstr;
@@ -1084,18 +1144,22 @@ quint32 TCITransceiver::writeAudioData (float * data, qint32 maxSize)
   {
     QMutexLocker lock {&dec_data_mutex ()};
     auto& producer = m_receiveAudioProducer.data ();
-    if (dec_data_input_blocked ()) return maxSize;
+    if (dec_data_input_blocked ()) {
+      receive_discontinuity (JttyReceiveReason::Replay);
+      return maxSize;
+    }
 
-    if(mstr < m_lastPeriodOffsetMs/2) { //When mstr has wrapped around to 0, restart the buffer
+    if(!continuous && mstr < m_lastPeriodOffsetMs/2) { //When mstr has wrapped around to 0, restart the buffer
       clear ();
     }
     m_lastPeriodOffsetMs=mstr;
+    if (continuous) continuousNotify = m_jttyPublisher.begin (packetStartUtc);
 
     // no torn frames
     Q_ASSERT (!(maxSize % static_cast<qint32> (rxChannels)));
 
     // these are in terms of input frames (not down sampled)
-    size_t framesAcceptable ((sizeof producer.d2 /
+    size_t framesAcceptable (continuous ? maxSize / rxChannels : (sizeof producer.d2 /
                                  sizeof producer.d2[0] - m_receiveAudioProducer.frames ()) * m_downSampleFactor);
     size_t framesAccepted (qMin (static_cast<size_t> (maxSize /
                                                       rxChannels), framesAcceptable));
@@ -1118,7 +1182,12 @@ quint32 TCITransceiver::writeAudioData (float * data, qint32 maxSize)
         if(m_bufferPos==m_samplesPerFFT*m_downSampleFactor) {
           qint32 framesToProcess (m_samplesPerFFT * m_downSampleFactor);
           qint32 framesAfterDownSample (m_samplesPerFFT);
-          if(m_downSampleFactor > 1 && m_receiveAudioProducer.frames ()>=0 &&
+          if (continuous) {
+            fil4_state_ (m_buffer.data (), &framesToProcess, m_jttyOutput.data (),
+                         &framesAfterDownSample, m_downsampleState.data ());
+            continuousNotify = m_jttyPublisher.append (m_jttyOutput.data (), framesAfterDownSample)
+              || continuousNotify;
+          } else if(m_downSampleFactor > 1 && m_receiveAudioProducer.frames ()>=0 &&
               m_receiveAudioProducer.frames () < (NTMAX*12000 - framesAfterDownSample)) {
             fil4_state_(&m_buffer[0], &framesToProcess,
                   &producer.d2[m_receiveAudioProducer.frames ()],
@@ -1129,20 +1198,27 @@ quint32 TCITransceiver::writeAudioData (float * data, qint32 maxSize)
             qDebug() << "receive audio frames = " << m_receiveAudioProducer.frames ();
             qDebug() << "framesAfterDownSample" << framesAfterDownSample;
           }
-          frame_counts << m_receiveAudioProducer.frames ();
-          audio << m_receiveAudioProducer.capture (m_receiveAudioProducer.frames (), m_period);
+          if (!continuous) {
+            frame_counts << m_receiveAudioProducer.frames ();
+            audio << m_receiveAudioProducer.capture (m_receiveAudioProducer.frames (), m_period);
+          }
           m_bufferPos = 0;
         }
 
       } else {
         store (&data[(framesAccepted - remaining) * rxChannels],
-              numFramesProcessed, &producer.d2[m_receiveAudioProducer.frames ()],
-              receiveGain);
+              numFramesProcessed, continuous ? m_jttyOutput.data () + m_bufferPos
+                : &producer.d2[m_receiveAudioProducer.frames ()], receiveGain);
         m_bufferPos += numFramesProcessed;
-        m_receiveAudioProducer.setFrames (m_receiveAudioProducer.frames () + numFramesProcessed);
+        if (!continuous) m_receiveAudioProducer.setFrames (m_receiveAudioProducer.frames () + numFramesProcessed);
         if (m_bufferPos == static_cast<unsigned> (m_samplesPerFFT)) {
-          frame_counts << m_receiveAudioProducer.frames ();
-          audio << m_receiveAudioProducer.capture (m_receiveAudioProducer.frames (), m_period);
+          if (continuous) {
+            continuousNotify = m_jttyPublisher.append (m_jttyOutput.data (), m_bufferPos)
+              || continuousNotify;
+          } else {
+            frame_counts << m_receiveAudioProducer.frames ();
+            audio << m_receiveAudioProducer.capture (m_receiveAudioProducer.frames (), m_period);
+          }
           m_bufferPos = 0;
         }
       }
@@ -1154,6 +1230,7 @@ quint32 TCITransceiver::writeAudioData (float * data, qint32 maxSize)
     Q_EMIT tciframeswritten (frames);
   }
   for (auto const& block : audio) Q_EMIT receiveAudio (block);
+  if (continuousNotify) Q_EMIT continuousAudioAvailable (m_jttyPublisher.mailbox ());
 
   return maxSize;    // we drop any data past the end of the buffer on
   // the floor until the next period starts
@@ -1217,12 +1294,19 @@ void TCITransceiver::stream_audio (bool on)
 void TCITransceiver::do_audio (bool on)
 {
   TRACE_CAT ("TCITransceiver", on << state ());
+  receive_discontinuity (on ? JttyReceiveReason::SourceChanged : m_inputStopReason);
   if (on) {
     QMutexLocker lock {&dec_data_mutex ()};
     m_bufferPos = 0;
     if (!dec_data_input_blocked ()) clear ();
   }
   audio_ = on;
+  if (!on)
+    {
+      m_inputStopReason = JttyReceiveReason::MonitorStopped;
+      if (m_receivePolicy == ReceivePolicy::ContinuousJtty)
+        Q_EMIT continuousReceptionStopped (m_jttyPublisher.mailbox ());
+    }
 }
 
 void TCITransceiver::do_period (double period)
@@ -1232,8 +1316,47 @@ void TCITransceiver::do_period (double period)
     {
       QMutexLocker lock {&dec_data_mutex ()};
       m_period = period;
-      if (!dec_data_input_blocked ()) clear ();
+      if (m_receivePolicy == ReceivePolicy::Timed && !dec_data_input_blocked ()) clear ();
     }
+}
+
+void TCITransceiver::do_receive_policy (ReceivePolicy policy)
+{
+  if (policy == m_receivePolicy) return;
+  bool const endingContinuous = m_receivePolicy == ReceivePolicy::ContinuousJtty;
+  receive_discontinuity (JttyReceiveReason::ModeChanged);
+  m_receivePolicy = policy;
+  m_downsampleState.fill (0);
+  QMutexLocker lock {&dec_data_mutex ()};
+  clear ();
+  if (endingContinuous) Q_EMIT continuousReceptionStopped (m_jttyPublisher.mailbox ());
+}
+
+void TCITransceiver::do_receive_context (quint64 context)
+{
+  if (context == m_receiveContext) return;
+  receive_discontinuity (JttyReceiveReason::SourceChanged);
+  m_receiveContext = context;
+  m_jttyPublisher.setContext (context);
+}
+
+void TCITransceiver::receive_discontinuity (JttyReceiveReason reason)
+{
+  if (m_receivePolicy != ReceivePolicy::ContinuousJtty) return;
+  bool notify = false;
+  if (m_jttyPublisher.active () && m_bufferPos)
+    {
+      qint32 inputFrames = m_bufferPos - m_bufferPos % m_downSampleFactor;
+      qint32 outputFrames = inputFrames / m_downSampleFactor;
+      if (m_downSampleFactor > 1 && inputFrames)
+        fil4_state_ (m_buffer.data (), &inputFrames, m_jttyOutput.data (),
+                     &outputFrames, m_downsampleState.data ());
+      notify = m_jttyPublisher.append (m_jttyOutput.data (), outputFrames);
+    }
+  notify = m_jttyPublisher.end (reason) || notify;
+  m_bufferPos = 0;
+  m_downsampleState.fill (0);
+  if (notify) Q_EMIT continuousAudioAvailable (m_jttyPublisher.mailbox ());
 }
 
 void TCITransceiver::do_volume (qreal volume)
@@ -1250,6 +1373,11 @@ void TCITransceiver::do_txvolume (qreal txvolume)
 void TCITransceiver::do_blocksize (qint32 blocksize)
 {
   TRACE_CAT ("TCITransceiver", blocksize << state ());
+  if (blocksize <= 0 || size_t (blocksize) > max_buffer_size
+      || blocksize == m_samplesPerFFT) return;
+  // Finish partial continuous audio before changing the block's write boundary.
+  receive_discontinuity (JttyReceiveReason::SourceChanged);
+  m_bufferPos = 0;
   m_samplesPerFFT = blocksize;
 }
 
@@ -1302,10 +1430,11 @@ void TCITransceiver::do_frequency (Frequency f, MODE m, bool no_ignore)
   TRACE_CAT ("TCITransceiver", f << state ());
   auto f_string = frequency_to_string (f);
   if (busy_rx_frequency_) {
+    defer_frequency (RigFrequency::Path::Rx);
     return;
   } else {
     requested_rx_frequency_ = f_string;
-    requested_mode_ = map_mode (m);
+    if (m != UNK) requested_mode_ = map_mode (m);
   }
   if (tci_Ready && _power_) {
     if ((rx_frequency_ != requested_rx_frequency_)) {
@@ -1314,10 +1443,13 @@ void TCITransceiver::do_frequency (Frequency f, MODE m, bool no_ignore)
         string_to_frequency (rx_frequency_), f, band_change_threshold_hz);
       const QString cmd = CmdVFO + SmDP + rx_ + SmCM + "0" + SmCM + requested_rx_frequency_ + SmTZ;
       if(f > 100000 && f< 250000000000) sendTextMessage(cmd);
-      mysleep7(2000);
-      band_change2 = TciProtocol::frequency_difference_exceeds (
-        string_to_frequency (rx_frequency_), f, band_change_threshold_hz);
-      if (!band_change2) update_rx_frequency (f);
+      QElapsedTimer deadline;
+      deadline.start ();
+      while (string_to_frequency (rx_frequency_) != f && inConnected
+             && error_.isEmpty () && deadline.elapsed () < 2000)
+        mysleep7 (static_cast<int> (2000 - deadline.elapsed ()));
+      band_change2 = string_to_frequency (rx_frequency_) != f;
+      if (!band_change2) update_rx_frequency (f, RigFrequency::Basis::Readback);
       else {
         printf("%s TCI failed set rxfreq:%s->%s\n",QDateTime::QDateTime::currentDateTimeUtc().toString("hh:mm:ss.zzz").toStdString().c_str(),rx_frequency_.toStdString().c_str(),requested_rx_frequency_.toStdString().c_str());
         error_ = tr ("TCI failed set rxfreq");
@@ -1327,25 +1459,25 @@ void TCITransceiver::do_frequency (Frequency f, MODE m, bool no_ignore)
         CAT_TRACE(requested_rx_frequency_);
         printf("rx_frequency is %s and requested_rx_frequency is %s\n",rx_frequency_.toStdString().c_str(),requested_rx_frequency_.toStdString().c_str());
         tci_Ready = false;
+        busy_rx_frequency_ = false;
         throw error {tr ("TCI failed set rxfreq")};
       }
       busy_rx_frequency_ = false;
-    } else update_rx_frequency (string_to_frequency (rx_frequency_));
+    } else update_rx_frequency (string_to_frequency (rx_frequency_), RigFrequency::Basis::Readback);
 
-    if (!requested_mode_.isEmpty() && requested_mode_ != mode_ && !busy_mode_) {
+    if (m != UNK && !requested_mode_.isEmpty() && requested_mode_ != mode_ && !busy_mode_) {
       busy_mode_ = true;
       sendTextMessage(mode_to_command(requested_mode_));
       mysleep8(1000);
       if (requested_mode_.isEmpty() || requested_mode_ == mode_) update_mode (m);
       else {
         printf("%s TCI failed set mode %s->%s",QDateTime::QDateTime::currentDateTimeUtc().toString("hh:mm:ss.zzz").toStdString().c_str(),mode_.toStdString().c_str(),requested_mode_.toStdString().c_str());
-        error_ = tr ("TCI failed set mode");
+        CAT_WARNING ("mode preparation did not reach " << requested_mode_);
       }
       busy_mode_ = false;
     }
   } else {
-    update_rx_frequency (f);
-    update_mode (m);
+    defer_frequency (RigFrequency::Path::Rx);
   }
 }
 
@@ -1357,9 +1489,9 @@ void TCITransceiver::do_tx_frequency (Frequency tx, MODE mode, bool no_ignore)
       CAT_TRACE("TCI do_txfrequency critical no_ignore set tx vfo will be missed\n");
     printf("%s TCI do_txfrequency critical no_ignore set tx vfo will be missed\n",QDateTime::QDateTime::currentDateTimeUtc().toString("hh:mm:ss.zzz").toStdString().c_str());
   }
-  if (busy_other_frequency_) return;
+  if (busy_other_frequency_ || busy_split_) { defer_frequency (RigFrequency::Path::Tx); return; }
   requested_other_frequency_ = f_string;
-  requested_mode_ = map_mode (mode);
+  if (mode != UNK) requested_mode_ = map_mode (mode);
   if (tx) {
     requested_split_ = true;
     if (tci_Ready && _power_) {
@@ -1374,25 +1506,30 @@ void TCITransceiver::do_tx_frequency (Frequency tx, MODE mode, bool no_ignore)
       }
       if (requested_split_ != split_) rig_split();
       else update_split (split_);
+      if (!split_) throw error {tr ("TCI failed to enable split")};
       if (other_frequency_ != requested_other_frequency_) {
         busy_other_frequency_ = true;
         printf("%s TCI VFO1 command sent\n",QDateTime::QDateTime::currentDateTimeUtc().toString("hh:mm:ss.zzz").toStdString().c_str());
         const QString cmd = CmdVFO + SmDP + rx_ + SmCM + "1" + SmCM + requested_other_frequency_ + SmTZ;
         if(tx > 100000 && tx < 250000000000) sendTextMessage(cmd);
-        mysleep2(1000);
-        other_band_change = TciProtocol::frequency_difference_exceeds (
-          string_to_frequency (other_frequency_), tx, band_change_threshold_hz);
-        if (!other_band_change) update_other_frequency (tx);
+        QElapsedTimer deadline;
+        deadline.start ();
+        while (string_to_frequency (other_frequency_) != tx && inConnected
+               && error_.isEmpty () && deadline.elapsed () < 1000)
+          mysleep2 (static_cast<int> (1000 - deadline.elapsed ()));
+        other_band_change = string_to_frequency (other_frequency_) != tx;
+        if (!other_band_change) update_other_frequency (tx, RigFrequency::Basis::Readback);
         else {
           printf("%s TCI failed set txfreq:%s->%s\n",QDateTime::QDateTime::currentDateTimeUtc().toString("hh:mm:ss.zzz").toStdString().c_str(),other_frequency_.toStdString().c_str(),requested_other_frequency_.toStdString().c_str());
           CAT_TRACE("TCI failed set txfreq");
+          busy_other_frequency_ = false;
+          throw error {tr ("TCI failed set txfreq")};
         }
         busy_other_frequency_ = false;
-      } else update_other_frequency (string_to_frequency (other_frequency_));
+      } else update_other_frequency (string_to_frequency (other_frequency_), RigFrequency::Basis::Readback);
 
     } else {
-      update_split (requested_split_);
-      update_other_frequency (tx);
+      defer_frequency (RigFrequency::Path::Tx);
     }
   }
   else {
@@ -1406,10 +1543,10 @@ void TCITransceiver::do_tx_frequency (Frequency tx, MODE mode, bool no_ignore)
       if (tci_timer2_->isActive()) mysleep2(0);
       if (requested_split_ != split_) rig_split();
       else update_split (split_);
+      if (split_) throw error {tr ("TCI failed to disable split")};
       update_other_frequency (tx);
     } else {
-      update_split (requested_split_);
-      update_other_frequency (tx);
+      defer_frequency (RigFrequency::Path::Tx);
     }
   }
 }
@@ -1417,6 +1554,7 @@ void TCITransceiver::do_tx_frequency (Frequency tx, MODE mode, bool no_ignore)
 void TCITransceiver::do_mode (MODE m)
 {
   TRACE_CAT ("TCITransceiver", m << state ());
+  if (m == UNK) return;
   auto m_string = map_mode (m);
   if (requested_mode_ != m_string) requested_mode_ = m_string;
   if (!requested_mode_.isEmpty() && mode_ != requested_mode_ && !busy_mode_) {
@@ -1426,7 +1564,7 @@ void TCITransceiver::do_mode (MODE m)
     if (requested_mode_ == mode_) update_mode (m);
     else {
       printf("%s TCI failed set mode %s->%s",QDateTime::QDateTime::currentDateTimeUtc().toString("hh:mm:ss.zzz").toStdString().c_str(),mode_.toStdString().c_str(),requested_mode_.toStdString().c_str());
-      error_ = tr ("TCI failed set mode");
+      CAT_WARNING ("mode preparation did not reach " << requested_mode_);
     }
     busy_mode_ = false;
   }
@@ -1436,13 +1574,8 @@ void TCITransceiver::do_poll ()
 {
   if (!error_.isEmpty()) {tci_Ready = false; throw error {error_};}
   else if (!tci_Ready) throw error {tr ("TCI could not be opened")};
-  update_rx_frequency (string_to_frequency (rx_frequency_));
   update_split(split_);
-  if (state ().split ()) {
-    if (other_frequency_ == requested_other_frequency_) update_other_frequency (string_to_frequency (other_frequency_));
-    else if (!busy_rx_frequency_) do_tx_frequency(string_to_frequency (requested_other_frequency_),get_mode(true),false);
-  }
-  update_mode (get_mode());
+  observe_mode (get_mode());
   if (do_pwr_ && PTT_) {update_power (power_ * 100); update_swr (swr_*10);}
   if (do_snr_ && !PTT_) {
     update_level (level_);
@@ -1603,15 +1736,13 @@ void TCITransceiver::mysleep8 (int ms)
 
 void TCITransceiver::do_modulator_start (TxEvidence::TxRequest const& request)
 {
-  // Time according to this computer which becomes our base time
-  qint64 ms0 = QDateTime::currentMSecsSinceEpoch() % 86400000;
   qDebug() << "ModStart" << QDateTime::QDateTime::currentDateTimeUtc().toString("hh:mm:ss.sss");
-  unsigned mstr = ms0 % int(1000.0*m_period); // ms into the nominal Tx start time
   if (m_state != Idle) {
     throw error {tr ("TCI modulator not Idle")};
   }
   m_quickClose = false;
   m_txMode = request.mode;
+  m_jttyLastProgress = {};
   m_symbolsLength = request.symbols_length;
   m_isym0 = std::numeric_limits<unsigned>::max (); // big number
   m_frequency0 = 0.;
@@ -1624,6 +1755,7 @@ void TCITransceiver::do_modulator_start (TxEvidence::TxRequest const& request)
   m_bFastMode=request.fast_mode;
   m_TRperiod=request.tr_period_s;
   m_tuning=request.tuning;
+  m_silent=request.silent;
   m_cwId=request.cw_id;
   unsigned delay_ms=1000;
 
@@ -1639,21 +1771,19 @@ void TCITransceiver::do_modulator_start (TxEvidence::TxRequest const& request)
     if (m_snr > 1.0) m_fac = 3000.0 / m_snr;
   }
 
-  // round up to an exact portion of a second that allows for startup delays
-  auto mstr2 = mstr - delay_ms;
-  if (mstr <= delay_ms) {
-    m_ic = 0;
-  } else {
-    m_ic = mstr2 * (audioSampleRate / 1000);
-  }
-
+  m_ic = 0;
   m_silentFrames = 0;
-  // calculate number of silent frames to send
-  if (m_ic == 0 && request.synchronize && !request.tuning)	{
-    m_silentFrames = audioSampleRate / (1000 / delay_ms) - (mstr * (audioSampleRate / 1000));
-  }
-  m_state = (request.synchronize && m_silentFrames) ?
-                Synchronizing : Active;
+  m_state = Active;
+  if (!m_tuning)
+    {
+      qint64 const ms0 = utc_msecs () % 86400000;
+      unsigned const mstr = ms0 % int (1000.0 * m_period);
+      if (mstr > delay_ms)
+        m_ic = qint64 (mstr - delay_ms) * (audioSampleRate / 1000);
+      if (m_ic == 0 && request.synchronize)
+        m_silentFrames = audioSampleRate / (1000 / delay_ms) - (mstr * (audioSampleRate / 1000));
+      if (m_silentFrames) m_state = Synchronizing;
+    }
   m_txStartSnapshot.session_id = request.session_id;
   m_txStartSnapshot.generation = request.generation;
   m_txStartSnapshot.mode = m_txMode;
@@ -1663,11 +1793,15 @@ void TCITransceiver::do_modulator_start (TxEvidence::TxRequest const& request)
   m_txStartSnapshot.diagnostic = tr ("TCI source commitment; playout evidence is protocol-send dead reckoning, not DAC confirmation");
   ++m_tciBackendStartSequence;
   m_tciSuccessfullyWrittenFrames = 0;
-  m_tciStartMsecs = QDateTime::currentMSecsSinceEpoch ();
+  m_tciStartMsecs = utc_msecs ();
   m_tciLastReportMsecs = m_tciStartMsecs;
   m_tciFinalSnapshotEmitted = false;
-  printf("%s TCI modulator startdelay_ms=%d ASR=%d mstr=%d mstr2=%d m_ic=%d s_Frames=%lld synchronize=%d m_tuning=%d State=%d\n",QDateTime::QDateTime::currentDateTimeUtc().toString("hh:mm:ss.zzz").toStdString().c_str(),delay_ms,audioSampleRate,mstr,mstr2,m_ic,m_silentFrames,request.synchronize,m_tuning,m_state);
-  if (m_txMode == "JTTY" && !m_jttyDrainTimer->isActive ()) m_jttyDrainTimer->start ();
+  printf ("%s TCI modulator mode=%s period=%.3f startdelay_ms=%u ASR=%u m_ic=%lld s_Frames=%lld synchronize=%d m_tuning=%d State=%d\n",
+          QDateTime::fromMSecsSinceEpoch (m_tciStartMsecs, Qt::UTC).toString ("hh:mm:ss.zzz").toStdString ().c_str (),
+          m_txMode.toStdString ().c_str (), m_period, delay_ms, audioSampleRate,
+          static_cast<long long> (m_ic), static_cast<long long> (m_silentFrames),
+          request.synchronize, m_tuning, m_state);
+  if (m_txMode == "JTTY" && !m_tuning && !m_jttyDrainTimer->isActive ()) m_jttyDrainTimer->start ();
   Q_EMIT tci_mod_active(m_state != Idle);
   Q_EMIT txSourceCommitted (m_txStartSnapshot);
   emit_tci_playout_snapshot (true, true);
@@ -1675,8 +1809,8 @@ void TCITransceiver::do_modulator_start (TxEvidence::TxRequest const& request)
 
 void TCITransceiver::do_tune (bool newState)
 {
+  if (!newState) do_modulator_stop (true);
   m_tuning = newState;
-  if (!m_tuning) do_modulator_stop (true);
 }
 
 void TCITransceiver::do_modulator_stop (bool quick)
@@ -1703,14 +1837,20 @@ qint64 TCITransceiver::bounded_source_frames (bool tuning) const
   return TxEvidence::boundedCommittedEndSample (m_silentFrames, m_ic, i1);
 }
 
+qint64 TCITransceiver::utc_msecs () const
+{
+  return utc_clock_ ? utc_clock_ () : QDateTime::currentMSecsSinceEpoch ();
+}
+
 void TCITransceiver::emit_tci_playout_snapshot (bool start_event, bool force)
 {
-  qint64 const now = QDateTime::currentMSecsSinceEpoch ();
+  qint64 const now = utc_msecs ();
   bool const final = m_state == Idle;
   if (!start_event && !force && now - m_tciLastReportMsecs < 1000) return;
   if (final && m_tciFinalSnapshotEmitted) return;
 
   TxEvidence::TxRawPlayoutSnapshot snapshot;
+  snapshot.context = {m_txStartSnapshot.session_id, m_txStartSnapshot.generation};
   snapshot.tier = TxEvidence::TxPlayoutTier::DeadReckoning;
   snapshot.backend_start_sequence = m_tciBackendStartSequence;
   snapshot.start_event = start_event;
@@ -1721,7 +1861,7 @@ void TCITransceiver::emit_tci_playout_snapshot (bool start_event, bool force)
   snapshot.sample_rate_hz = int (audioSampleRate);
   snapshot.report_interval_ms = int (now - m_tciLastReportMsecs);
   snapshot.diagnostic = tr ("TCI WebSocket send progress; no radio DAC or RF playback confirmation");
-  if (m_txMode == "JTTY")
+  if (m_txMode == "JTTY" && !m_tuning)
     {
       auto const progress = m_txAudioQueue.progress ();
       snapshot.source_served_frames = progress.served_samples;
@@ -1780,23 +1920,23 @@ quint16 TCITransceiver::readAudioData (float * data, qint32 maxSize, quint32 cha
       unsigned int isym=0;
       qint16 sample=0;
       if(!m_tuning) isym=m_ic/(4.0*m_nsps);          // Actual fsample=48000
-      bool slowCwId=((isym >= m_symbolsLength) && !m_cwId.isEmpty ());
+      bool slowCwId=(!m_tuning && (isym >= m_symbolsLength) && !m_cwId.isEmpty ());
       m_nspd=2560;                 // 22.5 WPM
 
       if(m_TRperiod > 16.0 && slowCwId) {     // Transmit CW ID?
         m_dphi = m_twoPi*m_trfrequency/audioSampleRate;
-        unsigned ic0 = m_symbolsLength * 4 * m_nsps;
-        unsigned j(0);
+        qint64 const ic0 = m_symbolsLength * 4 * m_nsps;
+        qint64 j(0);
 
         while (samples != end) {
           j = (m_ic - ic0)/m_nspd + 1; // symbol of this sample
-          if (j == 0 || j > static_cast<unsigned> (m_cwId.size ()))
+          if (j <= 0 || j > m_cwId.size ())
             {
               m_state = Idle;
               Q_EMIT tci_mod_active(m_state != Idle);
               return framesGenerated * channels;
             }
-          bool level {bool (m_cwId.at (j - 1))};
+          bool level {bool (m_cwId.at (int (j - 1)))};
           m_phi += m_dphi;
           if (m_phi > m_twoPi) m_phi -= m_twoPi;
           sample=0;
@@ -1826,10 +1966,8 @@ quint16 TCITransceiver::readAudioData (float * data, qint32 maxSize, quint32 cha
 
       double const baud (12000.0 / m_nsps);
       // fade out parameters (no fade out for tuning)
-      unsigned int i0,i1;
-      if(m_tuning) {
-        i1 = i0 =  (m_bFastMode ? 999999 : 9999) * m_nsps;
-      } else {
+      unsigned int i0=0,i1=0;
+      if(!m_tuning) {
         i0=(m_symbolsLength - 0.017) * 4.0 * m_nsps;
         i1= m_symbolsLength * 4.0 * m_nsps;
       }
@@ -1839,10 +1977,10 @@ quint16 TCITransceiver::readAudioData (float * data, qint32 maxSize, quint32 cha
       }
 
       sample=0;
-      for (unsigned i = 0; i < numFrames && m_ic <= i1; ++i) {
+      for (unsigned i = 0; i < numFrames && (m_tuning || m_ic <= i1); ++i) {
         isym=0;
         if(!m_tuning and m_TRperiod!=3.0) isym=m_ic/(4.0*m_nsps);   //Actual fsample=48000
-        if(m_bFastMode) isym=isym%m_symbolsLength;
+        if(m_bFastMode && !m_tuning) isym=isym%m_symbolsLength;
         if (isym != m_isym0 || m_trfrequency != m_frequency0) {
           if(itone[0]>=100) {
             m_toneFrequency0=itone[0];
@@ -1858,7 +1996,7 @@ quint16 TCITransceiver::readAudioData (float * data, qint32 maxSize, quint32 cha
           m_frequency0 = m_trfrequency;         //???
         }
 
-        int j=m_ic/480;
+        qint64 const j=m_ic/480;
         if(m_fSpread>0.0 and j!=m_j0) {
 #if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
           float x1=QRandomGenerator::global ()->generateDouble ();
@@ -1878,8 +2016,8 @@ quint16 TCITransceiver::readAudioData (float * data, qint32 maxSize, quint32 cha
         if (m_ic==0) m_amp = m_amp * 0.008144735;
         if (m_ic > 0 and  m_ic < 191) m_amp = m_amp / 0.975;
         //ramp for last tone
-        if (m_ic > i0) m_amp = 0.99 * m_amp;
-        if (m_ic > i1) m_amp = 0.0;
+        if (!m_tuning && m_ic > i0) m_amp = 0.99 * m_amp;
+        if (!m_tuning && m_ic > i1) m_amp = 0.0;
         sample=qRound(newVolume * m_amp*qSin(m_phi));
 
         //transmit from a precomputed FT8 wave[] array:
@@ -1892,7 +2030,7 @@ quint16 TCITransceiver::readAudioData (float * data, qint32 maxSize, quint32 cha
         ++m_ic;
       }
 
-      if (m_amp == 0.0) { // TODO G4WJS: compare double with zero might not be wise
+      if (!m_tuning && m_amp == 0.0) { // TODO G4WJS: compare double with zero might not be wise
         if (m_cwId.isEmpty ()) {
           // no CW ID to send
           m_state = Idle;
@@ -1951,6 +2089,7 @@ quint16 TCITransceiver::readJttyAudioData (float * data, qint32 maxSize, quint32
 
 qint16 TCITransceiver::postProcessSample (qint16 sample) const
 {
+  if (m_silent) return 0;       // footswitch TX: operator supplies the modulation
   if (m_addNoise) {  // Test frame, we'll add noise
     qint32 s = m_fac * (gran () + sample * m_snr / 32768.0);
     if (s > std::numeric_limits<qint16>::max ()) {

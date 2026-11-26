@@ -1,12 +1,8 @@
 #include "widgets/JttyN1mm.hpp"
-#include "wsjtx_config.h"
+#include "lib/jtty/JttyTransmit.hpp"
 
 #include <algorithm>
 #include <array>
-
-extern "C" void genjtty_atoms_c (Jtty::NativeAtomDescriptor const atoms[], int natoms,
-                                 int tones[], int* nsym, int* status);
-extern "C" void genjtty_profile_ (char*, int const*, int*, int*, fortran_charlen_t);
 
 extern "C" int jtty_cpp_n1mm_smoke (int tones[], int* nsym)
 {
@@ -22,7 +18,7 @@ extern "C" int jtty_cpp_n1mm_smoke (int tones[], int* nsym)
   return status;
 }
 
-extern "C" int jtty_cpp_cq_smoke (int tones[], int* nsym, char text[], int chained)
+extern "C" int jtty_cpp_cq_smoke (int tones[], int* nsym, char text[])
 {
   Jtty::NativeMacroContext const context {QStringLiteral ("K1ABC"), {}, 0};
   auto const compiled = Jtty::compileNativeMacro (
@@ -30,7 +26,7 @@ extern "C" int jtty_cpp_cq_smoke (int tones[], int* nsym, char text[], int chain
   *nsym = 0;
   int status = static_cast<int> (Jtty::NativeEncodeStatus::InvalidDescriptor);
   if (compiled.isNative ()) {
-    auto const frame = Jtty::transmitFrame (compiled.text, chained != 0).toLatin1 ();
+    auto const frame = Jtty::transmitFrame (compiled.text).toLatin1 ();
     std::copy (frame.cbegin (), frame.cend (), text);
     genjtty_atoms_c (compiled.atoms.constData (), compiled.atoms.size (),
                     tones, nsym, &status);
@@ -59,20 +55,53 @@ extern "C" int jtty_cpp_rtty_smoke (int tones[], int* nsym)
     }
     genjtty_atoms_c (compiled.atoms.constData (), compiled.atoms.size (), tones, nsym, &status);
     if (status != static_cast<int> (Jtty::NativeEncodeStatus::Ok) || *nsym <= 0) return status;
-    auto text = Jtty::transmitFrame (example.raw, false).toLatin1 ();
+    auto text = Jtty::transmitFrame (example.raw).toLatin1 ();
     int packedSymbols {};
+    std::array<int, 16> frameStarts {};
+    std::array<char, 16 * 34> frames {};
+    int nframes {};
+    int textStatus {};
+    int const isFinal = 1;
     auto profile = static_cast<int> (context.exchangeProfile);
-    genjtty_profile_ (text.data (), &profile, packedTones.data (), &packedSymbols, text.size ());
+    genjtty_text_c (text.data (), profile, isFinal, packedTones.data (), &packedSymbols,
+                    frames.data (), &nframes, frameStarts.data (), &textStatus);
     if (packedSymbols != *nsym || !std::equal (tones, tones + *nsym, packedTones.cbegin ()) ||
-        text != Jtty::transmitFrame (example.canonical, false).toLatin1 ()) {
+        text != Jtty::transmitFrame (example.canonical).toLatin1 ()) {
       return static_cast<int> (Jtty::NativeEncodeStatus::InvalidDescriptor);
     }
-    text = Jtty::transmitFrame (example.raw, false).toLatin1 ();
+    text = Jtty::transmitFrame (example.raw).toLatin1 ();
     profile = static_cast<int> (Jtty::NativeExchangeProfile::None);
-    genjtty_profile_ (text.data (), &profile, packedTones.data (), &packedSymbols, text.size ());
-    if (packedSymbols != 2 * *nsym || text != Jtty::transmitFrame (example.raw, false).toLatin1 ()) {
+    genjtty_text_c (text.data (), profile, isFinal, packedTones.data (), &packedSymbols,
+                    frames.data (), &nframes, frameStarts.data (), &textStatus);
+    if (packedSymbols != 2 * *nsym || text != Jtty::transmitFrame (example.raw).toLatin1 ()) {
       return static_cast<int> (Jtty::NativeEncodeStatus::InvalidDescriptor);
     }
   }
   return status;
+}
+
+extern "C" int jtty_cpp_rtty_line_refused ()
+{
+  // 80 characters; RTTY Roundup writes the serial as 005, which makes it 81.
+  auto const line = Jtty::toEncoder (QString (73, QLatin1Char {'A'}) + QStringLiteral (" 599 05"));
+  auto const rtty = Jtty::Encoder::encodeTransmitText (line, Jtty::NativeExchangeProfile::RttyRoundup, true);
+  auto const none = Jtty::Encoder::encodeTransmitText (line, Jtty::NativeExchangeProfile::None, true);
+  return rtty.status == Jtty::TransmitTextStatus::EncodingFailed && rtty.segments.empty ()
+      && none.status == Jtty::TransmitTextStatus::Encoded && none.segments.size () == 1;
+}
+
+extern "C" int jtty_cpp_rtty_line_tones (int tones[], int* nsym)
+{
+  // 79 characters; with the serial written as 005 it is exactly 80.
+  auto const line = Jtty::toEncoder (QString (72, QLatin1Char {'A'}) + QStringLiteral (" 599 05"));
+  auto const encoded = Jtty::Encoder::encodeTransmitText (line, Jtty::NativeExchangeProfile::RttyRoundup, true);
+  *nsym = 0;
+  if (encoded.status != Jtty::TransmitTextStatus::Encoded || encoded.segments.size () != 1
+      || !encoded.segments.front ().final) {
+    return 0;
+  }
+  auto const& segmentTones = encoded.segments.front ().transmit.tones;
+  std::copy (segmentTones.cbegin (), segmentTones.cend (), tones);
+  *nsym = static_cast<int> (segmentTones.size ());
+  return 1;
 }

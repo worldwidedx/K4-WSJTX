@@ -45,7 +45,7 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
       release_channel: ${{ steps.v.outputs.release_channel }}
-      rc_number: ${{ steps.v.outputs.rc_number }}
+      prerelease_number: ${{ steps.v.outputs.prerelease_number }}
       linux_image_tag: ${{ steps.linux-image.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v7
@@ -54,12 +54,15 @@ jobs:
           STATE=$(python3 .github/scripts/release-policy.py read-state)
           VERSION=$(jq -r .version <<<"$STATE")
           CHANNEL=$(jq -r .channel <<<"$STATE")
-          RC_NUMBER=$(jq -r .rc <<<"$STATE")
+          RC_NUMBER=$(jq -r .prerelease <<<"$STATE")
+          if [[ "$CHANNEL" == "RC" || "$CHANNEL" == "BETA" ]]; then
+            VERSION="${VERSION}-${CHANNEL,,}${RC_NUMBER}"
+          fi
           echo "Derived version from release-state.txt: $VERSION"
           {
             echo "version=$VERSION"
             echo "release_channel=$CHANNEL"
-            echo "rc_number=$RC_NUMBER"
+            echo "prerelease_number=$RC_NUMBER"
           } >> "$GITHUB_OUTPUT"
       - id: linux-image
         name: Resolve Linux CI image generation
@@ -81,7 +84,7 @@ jobs:
       save_ccache: true
       recache: ${{ inputs.recache }}
       release_channel: ${{ needs.prepare.outputs.release_channel }}
-      rc_number: ${{ needs.prepare.outputs.rc_number }}
+      prerelease_number: ${{ needs.prepare.outputs.prerelease_number }}
 
   linux-x64:
     needs: [prepare]
@@ -97,7 +100,7 @@ jobs:
       save_ccache: true
       recache: ${{ inputs.recache }}
       release_channel: ${{ needs.prepare.outputs.release_channel }}
-      rc_number: ${{ needs.prepare.outputs.rc_number }}
+      prerelease_number: ${{ needs.prepare.outputs.prerelease_number }}
 
   linux-arm64:
     needs: [prepare, linux-smoke-x64]
@@ -116,7 +119,7 @@ jobs:
       save_ccache: true
       recache: ${{ inputs.recache }}
       release_channel: ${{ needs.prepare.outputs.release_channel }}
-      rc_number: ${{ needs.prepare.outputs.rc_number }}
+      prerelease_number: ${{ needs.prepare.outputs.prerelease_number }}
 
   macos-arm64:
     needs: [prepare, linux-smoke-x64]
@@ -139,7 +142,7 @@ jobs:
       deployment_target: "11.0"
       recache: ${{ inputs.recache }}
       release_channel: ${{ needs.prepare.outputs.release_channel }}
-      rc_number: ${{ needs.prepare.outputs.rc_number }}
+      prerelease_number: ${{ needs.prepare.outputs.prerelease_number }}
 
   macos-x64:
     needs: [prepare, linux-smoke-x64]
@@ -158,7 +161,7 @@ jobs:
       deployment_target: "10.13"
       recache: ${{ inputs.recache }}
       release_channel: ${{ needs.prepare.outputs.release_channel }}
-      rc_number: ${{ needs.prepare.outputs.rc_number }}
+      prerelease_number: ${{ needs.prepare.outputs.prerelease_number }}
 
   windows-x64:
     needs: [prepare, linux-smoke-x64]
@@ -178,4 +181,4 @@ jobs:
       hamlib_branch: "4.7.2"
       recache: ${{ inputs.recache }}
       release_channel: ${{ needs.prepare.outputs.release_channel }}
-      rc_number: ${{ needs.prepare.outputs.rc_number }}
+      prerelease_number: ${{ needs.prepare.outputs.prerelease_number }}

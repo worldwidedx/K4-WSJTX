@@ -11,10 +11,11 @@
 #include <fftw3.h>
 
 #include <QApplication>
-#include <QSharedMemory>
+#include <QAction>
 #include <QProcessEnvironment>
 #include <QProcess>
 #include <QTemporaryFile>
+#include <QTemporaryDir>
 #include <QDateTime>
 #include <QLocale>
 #include <QTranslator>
@@ -48,6 +49,7 @@
 #include "ExceptionCatchingApplication.hpp"
 #include "Logger.hpp"
 #include "PerformanceTrace.hpp"
+#include "prerelease_expiry.h"
 #include "revision_utils.hpp"
 #include "MetaDataRegistry.hpp"
 #include "qt_helpers.hpp"
@@ -61,11 +63,16 @@
 #include "Audio/AudioInputSource.hpp"
 #include "Audio/soundout.h"
 #ifdef WSJT_ENABLE_LIVE_AUDIO_TEST
+#include <QUuid>
+#include "BestSPApplicationTestController.hpp"
+#include "WaitFeaturesApplicationTestController.hpp"
+#include "OperatingBandApplicationTestController.hpp"
 #include "Audio/BWFFile.hpp"
 #include "Audio/FixtureAudioInput.hpp"
 #include "Audio/FixtureSoundOutput.hpp"
 #include "Ft8TxLoopbackTestController.hpp"
 #include "JttyTxLoopbackTestController.hpp"
+#include "WavDecodeTestController.hpp"
 #include "LiveAudioTestController.hpp"
 #include "ReceiveHandoffTestController.hpp"
 #include <QAudioFormat>
@@ -318,9 +325,6 @@ int main(int argc, char *argv[])
   Radio::register_types ();
   register_types ();
 
-  // Multiple instances communicate with jt9 via this
-  QSharedMemory mem_jt9;
-
   if (test_mode_requested (argc, argv)) QStandardPaths::setTestModeEnabled (true);
   QApplication::setAttribute (Qt::AA_EnableHighDpiScaling);
 
@@ -335,6 +339,17 @@ int main(int argc, char *argv[])
   bool jtty_tx_loopback_test {false};
   bool ft8_tx_loopback_test {false};
   bool receive_handoff_test {false};
+  bool qso_completion_test {false};
+  bool best_sp_test {false};
+  bool wait_features_test {false};
+  bool operating_band_test {false};
+  bool jt4_wav_test {false};
+  bool jt9_wav_test {false};
+  bool jt65_wav_test {false};
+  bool q65_wav_test {false};
+  bool fst4_wav_test {false};
+  bool fst4w_wav_test {false};
+  unsigned test_audio_speed {1};
 #endif
   try
     {
@@ -414,6 +429,10 @@ int main(int argc, char *argv[])
         QStringList {} << "live-audio-data-dir",
         "Shipped decoder data used by --live-audio-test.", "directory");
       parser.addOption (live_audio_data_dir_option);
+      QCommandLineOption live_audio_scheduling_option (
+        QStringList {} << "live-audio-ft8-stages",
+        "Check ordinary FT8 scheduling with two or three stages.", "count");
+      parser.addOption (live_audio_scheduling_option);
       QCommandLineOption jtty_live_audio_test_option (
         QStringList {} << "jtty-live-audio-test",
         "Feed a WAV fixture through the live JTTY receive path.", "wav-path");
@@ -434,24 +453,114 @@ int main(int argc, char *argv[])
         QStringList {} << "receive-handoff-test",
         "Backlog two synthetic periods at the MainWindow receive boundary.");
       parser.addOption (receive_handoff_test_option);
+      QCommandLineOption qso_completion_test_option (
+        QStringList {} << "qso-completion-test",
+        "Exercise QSO completion with automatic, prompt, or disabled logging; append -keep, -keep-call, or -keep-grid to retain fields.", "profile");
+      parser.addOption (qso_completion_test_option);
+      QCommandLineOption best_sp_test_option (
+        QStringList {} << "best-sp-test",
+        "Exercise Best S+P through the application with a scripted decoder and silent audio.");
+      parser.addOption (best_sp_test_option);
+      QCommandLineOption wait_features_test_option (
+        QStringList {} << "wait-features-test",
+        "Exercise Wait features through the application with a scripted decoder and silent audio.");
+      parser.addOption (wait_features_test_option);
+      QCommandLineOption operating_band_test_option (
+        QStringList {} << "operating-band-test",
+        "Exercise operating-band transitions and frequency-editor presentation with isolated fixtures.");
+      parser.addOption (operating_band_test_option);
+      QCommandLineOption jt4_wav_test_option (
+        QStringList {} << "jt4-wav-test",
+        "Decode a JT4 WAV through the application and repeat the decode.", "wav-path");
+      parser.addOption (jt4_wav_test_option);
+      QCommandLineOption jt4_wav_expected_option (
+        QStringList {} << "jt4-wav-expected",
+        "Message that must appear during both JT4 WAV decodes.", "message");
+      parser.addOption (jt4_wav_expected_option);
+      QCommandLineOption jt9_wav_test_option (
+        QStringList {} << "jt9-wav-test",
+        "Decode a JT9 WAV through the application and repeat the decode.", "wav-path");
+      parser.addOption (jt9_wav_test_option);
+      QCommandLineOption jt9_wav_expected_option (
+        QStringList {} << "jt9-wav-expected",
+        "Message that must appear during both JT9 WAV decodes.", "message");
+      parser.addOption (jt9_wav_expected_option);
+      QCommandLineOption jt65_wav_test_option (
+        QStringList {} << "jt65-wav-test",
+        "Decode a JT65 WAV through the application and repeat the decode.", "wav-path");
+      parser.addOption (jt65_wav_test_option);
+      QCommandLineOption jt65_wav_expected_option (
+        QStringList {} << "jt65-wav-expected",
+        "Message that must appear during both JT65 WAV decodes.", "message");
+      parser.addOption (jt65_wav_expected_option);
+      QCommandLineOption q65_wav_test_option (
+        QStringList {} << "q65-wav-test",
+        "Decode a Q65 WAV through the application and repeat the decode.", "wav-path");
+      parser.addOption (q65_wav_test_option);
+      QCommandLineOption q65_wav_expected_option (
+        QStringList {} << "q65-wav-expected",
+        "Message that must appear during both Q65 WAV decodes.", "message");
+      parser.addOption (q65_wav_expected_option);
+      QCommandLineOption fst4_wav_test_option (
+        QStringList {} << "fst4-wav-test",
+        "Decode a FST4 WAV through the application and repeat the decode.", "wav-path");
+      parser.addOption (fst4_wav_test_option);
+      QCommandLineOption fst4_wav_expected_option (
+        QStringList {} << "fst4-wav-expected",
+        "Message that must appear during both FST4 WAV decodes.", "message");
+      parser.addOption (fst4_wav_expected_option);
+      QCommandLineOption fst4w_wav_test_option (
+        QStringList {} << "fst4w-wav-test",
+        "Decode a FST4W WAV through the application and repeat the decode.", "wav-path");
+      parser.addOption (fst4w_wav_test_option);
+      QCommandLineOption fst4w_wav_expected_option (
+        QStringList {} << "fst4w-wav-expected",
+        "Message that must appear during both FST4W WAV decodes.", "message");
+      parser.addOption (fst4w_wav_expected_option);
+      QCommandLineOption test_audio_speed_option (
+        QStringList {} << "test-audio-speed",
+        "JTTY fixture delivery speed (integer 1 through 4).", "factor", "1");
+      parser.addOption (test_audio_speed_option);
 #endif
 
       if (!parser.parse (a.arguments ()))
         {
+#if defined (Q_OS_WIN)
           MessageBox::critical_message (nullptr, "Command line error", parser.errorText ());
+#else
+          std::cerr << parser.errorText ().toLocal8Bit ().constData () << std::endl;
+#endif
+          process_bootstrap.cancel ();
           return -1;
         }
       else
         {
           if (parser.isSet (help_option))
             {
+#if defined (Q_OS_WIN)
+              // Windows keeps the boxes: the release build (WSJT_CREATE_WINMAIN) has no console
               MessageBox::information_message (nullptr, "Command line help", parser.helpText ());
+#else
+              std::cout << parser.helpText ().toLocal8Bit ().constData () << std::flush;
+#endif
+              process_bootstrap.cancel ();
               return 0;
             }
           else if (parser.isSet (version_option))
             {
+#if defined (Q_OS_WIN)
               MessageBox::information_message (nullptr, "Application version", a.applicationVersion ());
+#else
+              std::cout << (a.applicationName () + ' ' + a.applicationVersion ()).toLocal8Bit ().constData ()
+                        << std::endl;
+#endif
+              process_bootstrap.cancel ();
               return 0;
+            }
+          else if (parser.isSet ("help-all"))
+            {
+              // parse() accepts --help-all; only process() prints it (and exits)
+              parser.process (a);
             }
         }
 
@@ -462,11 +571,51 @@ int main(int argc, char *argv[])
       jtty_tx_loopback_test = parser.isSet (jtty_tx_loopback_test_option);
       ft8_tx_loopback_test = parser.isSet (ft8_tx_loopback_test_option);
       receive_handoff_test = parser.isSet (receive_handoff_test_option);
+      qso_completion_test = parser.isSet (qso_completion_test_option);
+      auto const qso_completion_profile = parser.value (qso_completion_test_option);
+      auto const qso_logging_profile = qso_completion_profile.section ('-', 0, 0);
+      auto const qso_field_profile = qso_completion_profile.mid (qso_logging_profile.size ());
+      bool const qso_keep_call = qso_field_profile == "-keep" || qso_field_profile == "-keep-call";
+      bool const qso_keep_grid = qso_field_profile == "-keep" || qso_field_profile == "-keep-grid";
+      if (qso_completion_test
+          && (!QStringList {"automatic", "prompt", "disabled"}.contains (qso_logging_profile)
+              || !QStringList {"", "-keep", "-keep-call", "-keep-grid"}.contains (qso_field_profile)))
+        {
+          std::cerr << "--qso-completion-test requires automatic, prompt, or disabled, optionally suffixed with -keep, -keep-call, or -keep-grid" << std::endl;
+          return EXIT_FAILURE;
+        }
+      best_sp_test = parser.isSet (best_sp_test_option);
+      wait_features_test = parser.isSet (wait_features_test_option);
+      operating_band_test = parser.isSet (operating_band_test_option);
+      jt4_wav_test = parser.isSet (jt4_wav_test_option);
+      jt9_wav_test = parser.isSet (jt9_wav_test_option);
+      jt65_wav_test = parser.isSet (jt65_wav_test_option);
+      q65_wav_test = parser.isSet (q65_wav_test_option);
+      fst4_wav_test = parser.isSet (fst4_wav_test_option);
+      fst4w_wav_test = parser.isSet (fst4w_wav_test_option);
+      bool audio_speed_valid {false};
+      test_audio_speed = parser.value (test_audio_speed_option).toUInt (&audio_speed_valid);
+      if (!audio_speed_valid || test_audio_speed < 1 || test_audio_speed > 4
+          || (parser.isSet (test_audio_speed_option)
+              && !jtty_live_audio_test && !jtty_tx_loopback_test))
+        {
+          std::cerr << "--test-audio-speed requires a JTTY audio test and an integer from 1 through 4"
+                    << std::endl;
+          return EXIT_FAILURE;
+        }
       if (live_audio_test != parser.isSet (live_audio_expected_option)
           || live_audio_test != parser.isSet (live_audio_data_dir_option))
         {
           std::cerr << "--live-audio-test, --live-audio-expected, and "
                        "--live-audio-data-dir must be used together"
+                    << std::endl;
+          return EXIT_FAILURE;
+        }
+      auto const ft8_stages = parser.value (live_audio_scheduling_option);
+      if (parser.isSet (live_audio_scheduling_option)
+          && (!live_audio_test || (ft8_stages != "2" && ft8_stages != "3")))
+        {
+          std::cerr << "--live-audio-ft8-stages requires --live-audio-test and 2 or 3"
                     << std::endl;
           return EXIT_FAILURE;
         }
@@ -476,13 +625,61 @@ int main(int argc, char *argv[])
                        "must be used together" << std::endl;
           return EXIT_FAILURE;
         }
+      if (jt4_wav_test != parser.isSet (jt4_wav_expected_option)
+          || (jt4_wav_test && parser.value (jt4_wav_expected_option).trimmed ().isEmpty ()))
+        {
+          std::cerr << "--jt4-wav-test and a nonempty --jt4-wav-expected must be used together"
+                    << std::endl;
+          return EXIT_FAILURE;
+        }
+      if (jt9_wav_test != parser.isSet (jt9_wav_expected_option)
+          || (jt9_wav_test && parser.value (jt9_wav_expected_option).trimmed ().isEmpty ()))
+        {
+          std::cerr << "--jt9-wav-test and a nonempty --jt9-wav-expected must be used together"
+                    << std::endl;
+          return EXIT_FAILURE;
+        }
+      if (jt65_wav_test != parser.isSet (jt65_wav_expected_option)
+          || (jt65_wav_test && parser.value (jt65_wav_expected_option).trimmed ().isEmpty ()))
+        {
+          std::cerr << "--jt65-wav-test and a nonempty --jt65-wav-expected must be used together"
+                    << std::endl;
+          return EXIT_FAILURE;
+        }
+      if (q65_wav_test != parser.isSet (q65_wav_expected_option)
+          || (q65_wav_test && parser.value (q65_wav_expected_option).trimmed ().isEmpty ()))
+        {
+          std::cerr << "--q65-wav-test and a nonempty --q65-wav-expected must be used together"
+                    << std::endl;
+          return EXIT_FAILURE;
+        }
+      if (fst4_wav_test != parser.isSet (fst4_wav_expected_option)
+          || (fst4_wav_test && parser.value (fst4_wav_expected_option).trimmed ().isEmpty ()))
+        {
+          std::cerr << "--fst4-wav-test and a nonempty --fst4-wav-expected must be used together"
+                    << std::endl;
+          return EXIT_FAILURE;
+        }
+      if (fst4w_wav_test != parser.isSet (fst4w_wav_expected_option)
+          || (fst4w_wav_test && parser.value (fst4w_wav_expected_option).trimmed ().isEmpty ()))
+        {
+          std::cerr << "--fst4w-wav-test and a nonempty --fst4w-wav-expected must be used together"
+                    << std::endl;
+          return EXIT_FAILURE;
+        }
       if ((startup_smoke_test ? 1 : 0) + (live_audio_test ? 1 : 0)
           + (jtty_live_audio_test ? 1 : 0)
           + (jtty_tx_loopback_test ? 1 : 0)
           + (ft8_tx_loopback_test ? 1 : 0)
-          + (receive_handoff_test ? 1 : 0) > 1)
+          + (receive_handoff_test ? 1 : 0) + (qso_completion_test ? 1 : 0)
+          + (jt4_wav_test ? 1 : 0) + (jt9_wav_test ? 1 : 0)
+          + (best_sp_test ? 1 : 0)
+          + (wait_features_test ? 1 : 0)
+          + (operating_band_test ? 1 : 0)
+          + (jt65_wav_test ? 1 : 0) + (q65_wav_test ? 1 : 0) + (fst4_wav_test ? 1 : 0)
+          + (fst4w_wav_test ? 1 : 0) > 1)
         {
-          std::cerr << "Startup, live-audio, and TX loopback tests are mutually exclusive"
+          std::cerr << "Startup, audio, WAV, and receive-handoff tests are mutually exclusive"
                     << std::endl;
           return EXIT_FAILURE;
         }
@@ -501,7 +698,8 @@ int main(int argc, char *argv[])
         }
       automated_test = startup_smoke_test || live_audio_test
         || jtty_live_audio_test || jtty_tx_loopback_test || ft8_tx_loopback_test
-        || receive_handoff_test;
+        || receive_handoff_test || qso_completion_test || best_sp_test || wait_features_test || operating_band_test
+        || jt4_wav_test || jt9_wav_test || jt65_wav_test || q65_wav_test || fst4_wav_test || fst4w_wav_test;
 #else
       automated_test = startup_smoke_test;
 #endif
@@ -530,7 +728,6 @@ int main(int argc, char *argv[])
       QStandardPaths::setTestModeEnabled (parser.isSet (test_option) || automated_test);
 
       // support for multiple instances running from a single installation
-      bool multiple {false};
       if (parser.isSet (rig_option) || parser.isSet (test_option) || automated_test)
         {
           auto temp_name = parser.value (rig_option);
@@ -554,10 +751,17 @@ int main(int argc, char *argv[])
             {
               a.setApplicationName (a.applicationName () + " - test");
             }
-
-          multiple = true;
         }
 
+#ifdef WSJT_ENABLE_LIVE_AUDIO_TEST
+      if (best_sp_test || wait_features_test || operating_band_test || qso_completion_test)
+        a.setApplicationName (a.applicationName () + (qso_completion_test ? " - QsoCompletion-"
+                              : operating_band_test ? " - OperatingBand-"
+                              : wait_features_test ? " - WaitFeatures-" : " - BestSP-")
+                              + QUuid::createUuid ().toString (QUuid::WithoutBraces));
+      auto scripted_test_environment = best_sp_test || wait_features_test || operating_band_test || qso_completion_test
+        ? std::make_unique<BestSPTestEnvironment> () : nullptr;
+#endif
       // Preserve the legacy K4 profile on first use of the default named instance.
       // Never import ordinary WSJT-X settings or replace an existing named profile.
       if (!parser.isSet (test_option) && !automated_test
@@ -584,7 +788,30 @@ int main(int argc, char *argv[])
       process_bootstrap.finish ();
       PerformanceTrace::milestone ("logging.ready");
       PerformanceTrace::Phase process_prepare {"process.prepare"};
-      MultiSettings multi_settings {parser.value (cfg_option)};
+      QString settings_file;
+#ifdef WSJT_ENABLE_LIVE_AUDIO_TEST
+      std::unique_ptr<QTemporaryDir> qso_test_directory;
+      if (qso_completion_test)
+        {
+          qso_test_directory = std::make_unique<QTemporaryDir> (
+            QDir::tempPath () + "/wsjtx-qso-completion-XXXXXX");
+          if (!qso_test_directory->isValid ())
+            throw std::runtime_error {"Cannot create a temporary QSO test directory"};
+          settings_file = qso_test_directory->filePath ("settings.ini");
+        }
+#endif
+      MultiSettings multi_settings {parser.value (cfg_option), settings_file};
+#ifdef WSJT_ENABLE_LIVE_AUDIO_TEST
+      if (best_sp_test || wait_features_test || operating_band_test)
+        {
+          auto const error = operating_band_test
+            ? OperatingBandApplicationTestController::prepareSettings (multi_settings.settings ())
+            : wait_features_test
+            ? WaitFeaturesApplicationTestController::prepareSettings (multi_settings.settings ())
+            : BestSPApplicationTestController::prepareSettings (multi_settings.settings ());
+          if (!error.isEmpty ()) throw std::runtime_error {error.toStdString ()};
+        }
+#endif
 
       // find the temporary files path
       QDir temp_dir {QStandardPaths::writableLocation (QStandardPaths::TempLocation)};
@@ -632,8 +859,17 @@ int main(int argc, char *argv[])
             }
         }
 
+      // Release the mapping before the instance lock, including on startup failure.
+      DecoderIpc::Session decoderSession;
+
       // load UI translations
-      L10nLoader l10n {&a, locale, parser.value (lang_option)};
+      auto language = parser.value (lang_option);
+      if (!parser.isSet (lang_option))
+        {
+          language = multi_settings.common_value ("UiLanguage").toString ();
+          if (!L10nLoader::available_languages ().contains (language)) language.clear ();
+        }
+      L10nLoader l10n {&a, locale, language};
 
       // Create a unique writeable temporary directory in a suitable location
       bool temp_ok {false};
@@ -718,11 +954,11 @@ int main(int argc, char *argv[])
 
       int result;
       bool startup_smoke_ready {false};
-      auto const prerelease_expiration = QDateTime {
-        {2026, 12, 31}, {23, 59, 59, 999}, Qt::UTC};
-      bool prerelease_notice_pending =
-        QCoreApplication::applicationVersion ().contains ("-devel")
-        || QCoreApplication::applicationVersion ().contains ("-rc");
+#ifdef WSJT_ENABLE_LIVE_AUDIO_TEST
+      bool qso_completion_succeeded {false};
+#endif
+      auto const prerelease_expiration = QDateTime::fromSecsSinceEpoch (WSJT_PRERELEASE_EXPIRY, Qt::UTC);
+      bool prerelease_notice_pending = WSJT_PRERELEASE_EXPIRY > 0;
       auto const original_style_sheet = a.styleSheet ();
       auto const original_font = a.font ();
       auto const apply_application_appearance = [&] {
@@ -734,7 +970,7 @@ int main(int argc, char *argv[])
           }
 
         auto const dark_style = multi_settings.settings ()->value (
-          "MainWindow/DarkStyle", false).toBool ();
+          "Common/DarkStyle", false).toBool ();
         QString dark_style_sheet;
         if (dark_style)
           {
@@ -745,7 +981,7 @@ int main(int argc, char *argv[])
               }
           }
 
-        auto const style_sheet = application_style_sheet (
+        auto const style_sheet = main_window_style_sheet (
           original_style_sheet, dark_style_sheet, dark_style, font);
         if (a.font () != font) a.setFont (font);
         if (a.styleSheet () != style_sheet) a.setStyleSheet (style_sheet);
@@ -791,64 +1027,22 @@ int main(int argc, char *argv[])
               sys_lg.push_record (boost::move (rec));
             }
 
-          // Create and initialize shared memory segment
-          // Multiple instances: use rig_name as shared memory key
-          mem_jt9.setKey(a.applicationName ());
-
-          // try and shut down any orphaned jt9 process
-          for (int i = 3; i; --i) // three tries to close old jt9
+          auto const sessionStatus = decoderSession.open (DecoderIpc::memoryName (instance_lock_path),
+                                                        instance_lock_path + QStringLiteral (".decoder"));
+          if (DecoderIpc::Status::Ok != sessionStatus)
             {
-              if (mem_jt9.attach ()) // shared memory presence implies
-                                     // orphaned jt9 sub-process
-                {
-                  if (DecoderIpc::hasShutdownControlSize (mem_jt9.size ()))
-                    {
-                      DecoderIpc::shutdownControl (mem_jt9.data ());
-                    }
-                  mem_jt9.detach (); // start again
-                }
-              else
-                {
-                  break;        // good to go
-                }
-              QThread::sleep (1); // wait for jt9 to end
-            }
-          if (!mem_jt9.attach ())
-            {
-              if (!mem_jt9.create (sizeof (shared_dec_data_t)))
-              {
-                auto const shared_memory_error = mem_jt9.error ();
-                auto const shared_memory_error_text = mem_jt9.errorString ();
-                std::cerr << "WSJT-X startup: shared memory creation failed"
-                          << " (error " << static_cast<int> (shared_memory_error) << "): "
-                          << shared_memory_error_text.toStdString () << std::endl;
-                if (!automated_test)
-                  {
-                    splash.hide ();
-                    MessageBox::critical_message (
-                      nullptr, a.translate ("main", "Shared memory error"),
-                      a.translate ("main", "Unable to create shared memory segment"));
-                  }
-                throw std::runtime_error {"Shared memory error"};
-              }
-              LOG_INFO ("shmem size: " << mem_jt9.size ());
-            }
-          else
-            {
-              std::cerr << "WSJT-X startup: orphaned jt9 shared memory segment remained after "
-                           "shutdown attempts"
+              std::cerr << "WSJT-X startup: " << decoderSession.errorString ().toStdString ()
                         << std::endl;
               if (!automated_test)
                 {
                   splash.hide ();
                   MessageBox::critical_message (
-                    nullptr, a.translate ("main", "Sub-process error"),
-                    a.translate ("main", "Failed to close orphaned jt9 process"));
+                    nullptr, a.translate ("main", "Shared memory error"),
+                    decoderSession.errorString ());
                 }
-              throw std::runtime_error {"Sub-process error"};
+              throw std::runtime_error {"Decoder session error"};
             }
-          auto * shared = reinterpret_cast<shared_dec_data_t *> (mem_jt9.data ());
-          DecoderIpc::initialize (*shared);
+          LOG_INFO ("shmem size: " << decoderSession.size ());
 
           unsigned downSampleFactor;
           {
@@ -889,7 +1083,7 @@ int main(int argc, char *argv[])
                       ? 4u : 1u;
                   }
               }
-            if (receive_handoff_test) downSampleFactor = 1u;
+            if (receive_handoff_test || qso_completion_test) downSampleFactor = 1u;
 #endif
 
           }
@@ -906,38 +1100,64 @@ int main(int argc, char *argv[])
           FixtureAudioInput * fixture_input {nullptr};
           FixtureSoundOutput * fixture_output {nullptr};
           std::unique_ptr<AudioInputSource> audio_input;
-          std::unique_ptr<SoundOutput> sound_output;
-          if (live_audio_test || jtty_live_audio_test || receive_handoff_test)
+          std::unique_ptr<AudioOutputSink> sound_output;
+          std::unique_ptr<DecoderBackend> decoder_backend;
+          DecoderBackend * scripted_test_backend {nullptr};
+          if (best_sp_test || wait_features_test || operating_band_test)
+            {
+              audio_input = makeBestSPTestAudioInput ();
+              sound_output = makeBestSPTestAudioOutput ();
+              decoder_backend = makeBestSPTestBackend ();
+              scripted_test_backend = decoder_backend.get ();
+            }
+          if (live_audio_test || jtty_live_audio_test || receive_handoff_test || qso_completion_test)
             {
               std::unique_ptr<FixtureAudioInput> fixture {
                 new FixtureAudioInput {
-                  receive_handoff_test ? QString {}
+                  (receive_handoff_test || qso_completion_test) ? QString {}
                     : parser.value (live_audio_test
                                     ? live_audio_test_option
                                     : jtty_live_audio_test_option),
-                  receive_handoff_test ? FixtureAudioInput::Profile::ReceiveHandoff
+                  (receive_handoff_test || qso_completion_test) ? FixtureAudioInput::Profile::ReceiveHandoff
                     : (live_audio_test ? FixtureAudioInput::Profile::Ft8
-                                       : FixtureAudioInput::Profile::Jtty)}};
+                                       : FixtureAudioInput::Profile::Jtty),
+                  test_audio_speed}};
               fixture_input = fixture.get ();
               audio_input = std::move (fixture);
             }
-          if (jtty_tx_loopback_test || ft8_tx_loopback_test)
+          if (jtty_tx_loopback_test || ft8_tx_loopback_test || qso_completion_test)
             {
               std::unique_ptr<FixtureSoundOutput> fixture {
                 new FixtureSoundOutput {
-                  parser.value (jtty_tx_loopback_test
+                  qso_completion_test ? temp_dir.absoluteFilePath ("qso-completion.wav")
+                    : parser.value (jtty_tx_loopback_test
                                 ? jtty_tx_loopback_test_option
                                 : ft8_tx_loopback_test_option),
                   ft8_tx_loopback_test
                     ? FixtureSoundOutput::Profile::Ft8Period
-                    : FixtureSoundOutput::Profile::JttyStrict}};
+                    : FixtureSoundOutput::Profile::JttyStrict,
+                  test_audio_speed}};
               fixture_output = fixture.get ();
               sound_output = std::move (fixture);
             }
 #else
           std::unique_ptr<AudioInputSource> audio_input;
 #endif
-          MainWindow w(temp_dir, multiple, &multi_settings, &mem_jt9, downSampleFactor, &splash, env,
+#ifdef WSJT_ENABLE_LIVE_AUDIO_TEST
+          if (qso_completion_test)
+            {
+              auto * settings = multi_settings.settings ();
+              settings->setValue ("Configuration/MyCall", "K1ABC");
+              settings->setValue ("Configuration/MyGrid", "FN42");
+              settings->setValue ("Configuration/RepeatTx", true);
+              settings->setValue ("Configuration/AutoLog", qso_logging_profile == "automatic");
+              settings->setValue ("Configuration/PromptToLog", qso_logging_profile == "prompt");
+              settings->setValue ("Configuration/ContestingOnly", false);
+              settings->setValue ("Configuration/clear_DXcall", !qso_keep_call);
+              settings->setValue ("Configuration/clear_DXgrid", !qso_keep_grid);
+            }
+#endif
+          MainWindow w(temp_dir, &multi_settings, decoderSession, downSampleFactor, &splash, env,
                        automated_test, original_style_sheet, std::move (audio_input),
 #ifdef WSJT_ENABLE_LIVE_AUDIO_TEST
                        std::move (sound_output),
@@ -948,6 +1168,9 @@ int main(int argc, char *argv[])
                        live_audio_test ? parser.value (live_audio_data_dir_option) : QString {}
 #else
                        QString {}
+#endif
+#ifdef WSJT_ENABLE_LIVE_AUDIO_TEST
+                       , std::move (decoder_backend)
 #endif
                        );
           main_window_construct.finish ();
@@ -987,7 +1210,7 @@ int main(int argc, char *argv[])
                       "available for testing purposes.  By design it will\n"
                       "be nonfunctional after " + expiration_date + ".");
                   }
-                if (QDateTime::currentDateTimeUtc () >= prerelease_expiration)
+                if (!automated_test && QDateTime::currentDateTimeUtc () >= prerelease_expiration)
                   {
                     w.close ();
                   }
@@ -996,8 +1219,33 @@ int main(int argc, char *argv[])
 #ifdef WSJT_ENABLE_LIVE_AUDIO_TEST
           std::unique_ptr<LiveAudioTestController> live_audio_controller;
           std::unique_ptr<ReceiveHandoffTestController> receive_handoff_controller;
+          std::unique_ptr<WavDecodeTestController> wav_decode_controller;
           std::unique_ptr<JttyTxLoopbackTestController> jtty_tx_controller;
           std::unique_ptr<Ft8TxLoopbackTestController> ft8_tx_controller;
+          std::unique_ptr<BestSPApplicationTestController> best_sp_controller;
+          std::unique_ptr<WaitFeaturesApplicationTestController> wait_features_controller;
+          std::unique_ptr<OperatingBandApplicationTestController> operating_band_controller;
+          if (best_sp_test)
+            {
+              a.setQuitOnLastWindowClosed (false);
+              best_sp_controller.reset (new BestSPApplicationTestController {&w, scripted_test_backend});
+              auto * controller = best_sp_controller.get ();
+              QTimer::singleShot (0, controller, [controller] {controller->begin ();});
+            }
+          if (wait_features_test)
+            {
+              a.setQuitOnLastWindowClosed (false);
+              wait_features_controller.reset (new WaitFeaturesApplicationTestController {&w, scripted_test_backend});
+              auto * controller = wait_features_controller.get ();
+              QTimer::singleShot (0, controller, [controller] {controller->begin ();});
+            }
+          if (operating_band_test)
+            {
+              a.setQuitOnLastWindowClosed (false);
+              operating_band_controller.reset (new OperatingBandApplicationTestController {&w, scripted_test_backend});
+              auto * controller = operating_band_controller.get ();
+              QTimer::singleShot (0, controller, [controller] {controller->begin ();});
+            }
           if (live_audio_test || jtty_live_audio_test)
             {
               a.setQuitOnLastWindowClosed (false);
@@ -1006,13 +1254,38 @@ int main(int argc, char *argv[])
                 parser.value (live_audio_test
                               ? live_audio_expected_option
                               : jtty_live_audio_expected_option),
-                live_audio_test ? LiveAudioTestController::Mode::Ft8
-                                : LiveAudioTestController::Mode::Jtty});
+                !live_audio_test ? LiveAudioTestController::Mode::Jtty
+                  : ft8_stages == "2" ? LiveAudioTestController::Mode::Ft8TwoStage
+                  : ft8_stages == "3" ? LiveAudioTestController::Mode::Ft8ThreeStage
+                  : LiveAudioTestController::Mode::Ft8});
               auto * controller = live_audio_controller.get ();
               QTimer::singleShot (0, live_audio_controller.get (),
                                   [controller] {
                                     controller->begin ();
                                   });
+            }
+          if (jt4_wav_test || jt9_wav_test || jt65_wav_test || q65_wav_test || fst4_wav_test || fst4w_wav_test)
+            {
+              a.setQuitOnLastWindowClosed (false);
+              wav_decode_controller.reset (new WavDecodeTestController {
+                &w, parser.value (jt4_wav_test ? jt4_wav_test_option
+                                  : jt9_wav_test ? jt9_wav_test_option
+                                  : jt65_wav_test ? jt65_wav_test_option
+                                  : q65_wav_test ? q65_wav_test_option
+                                  : fst4_wav_test ? fst4_wav_test_option : fst4w_wav_test_option),
+                parser.value (jt4_wav_test ? jt4_wav_expected_option
+                              : jt9_wav_test ? jt9_wav_expected_option
+                              : jt65_wav_test ? jt65_wav_expected_option
+                              : q65_wav_test ? q65_wav_expected_option
+                              : fst4_wav_test ? fst4_wav_expected_option : fst4w_wav_expected_option),
+                jt4_wav_test ? WavDecodeTestController::Mode::Jt4
+                  : jt9_wav_test ? WavDecodeTestController::Mode::Jt9
+                  : jt65_wav_test ? WavDecodeTestController::Mode::Jt65
+                                 : q65_wav_test ? WavDecodeTestController::Mode::Q65
+                  : fst4_wav_test ? WavDecodeTestController::Mode::Fst4
+                                 : WavDecodeTestController::Mode::Fst4w});
+              auto * controller = wav_decode_controller.get ();
+              QTimer::singleShot (0, controller, [controller] { controller->begin (); });
             }
           if (receive_handoff_test)
             {
@@ -1021,6 +1294,19 @@ int main(int argc, char *argv[])
                 &w, fixture_input});
               auto * controller = receive_handoff_controller.get ();
               QTimer::singleShot (0, controller, [controller] { controller->begin (); });
+            }
+          if (qso_completion_test)
+            {
+              a.setQuitOnLastWindowClosed (false);
+              QTimer::singleShot (0, &w, [&a, &w, &qso_completion_succeeded, qso_completion_profile] {
+                auto const error = w.checkQsoCompletionTest (qso_completion_profile);
+                qso_completion_succeeded = error.isEmpty ();
+                std::cerr << "WSJT-X QSO completion test "
+                          << (error.isEmpty () ? "passed" : "failed: ")
+                          << error.toStdString () << std::endl;
+                w.close ();
+                a.exit (qso_completion_succeeded ? EXIT_SUCCESS : EXIT_FAILURE);
+              });
             }
           if (jtty_tx_loopback_test)
             {
@@ -1049,7 +1335,14 @@ int main(int argc, char *argv[])
 #endif
           if (startup_smoke_test)
             {
-              QTimer::singleShot (1000, &w, [&a, &w, &smoke_phase, &startup_smoke_ready] {
+              QString expectedMmttyMode;
+              if (parser.isSet (n1mm_tcp_port_option))
+                {
+                  expectedMmttyMode = parser.isSet (mode_option)
+                    ? parser.value (mode_option).toUpper () : QStringLiteral ("JTTY");
+                  if (!parser.isSet (mode_option)) w.set_mode_from_command_line ("FT8");
+                }
+              QTimer::singleShot (1000, &w, [&a, &w, &smoke_phase, &startup_smoke_ready, expectedMmttyMode] {
                 smoke_phase ("event loop reached");
                 if (auto *modal = QApplication::activeModalWidget ())
                   {
@@ -1058,6 +1351,26 @@ int main(int argc, char *argv[])
                     w.close ();
                     a.exit (EXIT_FAILURE);
                     return;
+                  }
+                if (!expectedMmttyMode.isEmpty ())
+                  {
+                    auto * action = w.findChild<QAction *> ("action" + expectedMmttyMode);
+                    if (!QMetaObject::invokeMethod (&w, "switchToJttyAfterMmttyStartup", Qt::DirectConnection))
+                      {
+                        std::cerr << "WSJT-X startup smoke: MMTTY startup callback was not found" << std::endl;
+                        w.close ();
+                        a.exit (EXIT_FAILURE);
+                        return;
+                      }
+                    if (!action || !action->isChecked ())
+                      {
+                        std::cerr << "WSJT-X startup smoke: MMTTY startup did not preserve/select "
+                                  << expectedMmttyMode.toStdString () << std::endl;
+                        w.close ();
+                        a.exit (EXIT_FAILURE);
+                        return;
+                      }
+                    smoke_phase ("MMTTY startup mode verified");
                   }
                 if (w.close ())
                   {
@@ -1082,6 +1395,7 @@ int main(int argc, char *argv[])
               result = EXIT_FAILURE;
             }
 #ifdef WSJT_ENABLE_LIVE_AUDIO_TEST
+          if (qso_completion_test && !qso_completion_succeeded) result = EXIT_FAILURE;
           if ((live_audio_test || jtty_live_audio_test)
               && (!live_audio_controller || !live_audio_controller->succeeded ()))
             {
@@ -1097,12 +1411,23 @@ int main(int argc, char *argv[])
             {
               result = EXIT_FAILURE;
             }
+          if ((jt4_wav_test || jt9_wav_test || jt65_wav_test || q65_wav_test || fst4_wav_test || fst4w_wav_test)
+              && (!wav_decode_controller || !wav_decode_controller->succeeded ()))
+            {
+              result = EXIT_FAILURE;
+            }
           if (receive_handoff_test
               && (!receive_handoff_controller
                   || !receive_handoff_controller->succeeded ()))
             {
               result = EXIT_FAILURE;
             }
+          if (best_sp_test && (!best_sp_controller || !best_sp_controller->succeeded ()))
+            result = EXIT_FAILURE;
+          if (wait_features_test && (!wait_features_controller || !wait_features_controller->succeeded ()))
+            result = EXIT_FAILURE;
+          if (operating_band_test && (!operating_band_controller || !operating_band_controller->succeeded ()))
+            result = EXIT_FAILURE;
 #endif
 
         }

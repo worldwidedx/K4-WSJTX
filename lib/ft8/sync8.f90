@@ -6,11 +6,11 @@ subroutine sync8(dd,npts,nfa,nfb,syncmin,nfqso,maxcand,candidate,ncand,sbase)
 ! 2.5s / 0.16s/symbol * 4 samples/symbol = 62.5 lag steps in 2.5s
   parameter (JZ=62)                        
   complex cx(0:NH1)
-  real s(NH1,NHSYM)
+  real, allocatable :: s(:,:)
   real savg(NH1)
   real sbase(NH1)
   real x(NFFT1+2)
-  real sync2d(NH1,-JZ:JZ)
+  real, allocatable :: sync2d(:,:)
   real red(NH1)
   real red2(NH1)
   real candidate0(3,MAXPRECAND)
@@ -25,6 +25,8 @@ subroutine sync8(dd,npts,nfa,nfb,syncmin,nfqso,maxcand,candidate,ncand,sbase)
   integer icos7(0:6)
   data icos7/3,1,4,0,6,5,2/                   !Costas 7x7 tone pattern
   equivalence (x,cx)
+
+  allocate(s(NH1,NHSYM),sync2d(NH1,-JZ:JZ))
 
 ! Compute symbol spectra, stepping by NSTEP steps.  
   savg=0.

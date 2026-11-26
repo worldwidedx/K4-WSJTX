@@ -4,16 +4,13 @@
 # so CMAKE_CURRENT_SOURCE_DIR stays the project root and all paths below
 # remain relative to it, exactly as when this content was inline.
 #
-set (fort_qt_CXXSRCS
-  lib/shmem.cpp
-  )
-
 set (wsjt_qt_CXXSRCS
   ActiveStationList.cpp
   DecDataMutex.cpp
   helper_functions.cpp
   qt_helpers.cpp
   widgets/MessageBox.cpp
+  widgets/SuggestedFrequenciesDialog.cpp
   MetaDataRegistry.cpp
   Network/NetworkServerLookup.cpp
   Network/DecodedTime.cpp
@@ -27,6 +24,7 @@ set (wsjt_qt_CXXSRCS
   models/Bands.cpp
   models/Modes.cpp
   models/FrequencyList.cpp
+  models/FrequencySuggestions.cpp
   models/StationList.cpp
   widgets/FrequencyLineEdit.cpp
   widgets/FrequencyDeltaLineEdit.cpp
@@ -76,6 +74,9 @@ set (wsjt_qt_CXXSRCS
   Configuration.cpp
   logbook/logbook.cpp
   logbook/AdifQso.cpp
+  logbook/EmeCabrillo.cpp
+  widgets/DaysCalendar.cpp
+  widgets/EmeCabrilloDialog.cpp
   MultiSettings.cpp
   validators/MaidenheadLocatorValidator.cpp
   validators/CallsignValidator.cpp
@@ -114,6 +115,8 @@ set (wsjt_qt_CXXSRCS
   MessageFilterRules.cpp
   MessageFilterLogic.cpp
   DecodeOutputPlan.cpp
+  DecodeEventLine.cpp
+  DecodedGridHistory.cpp
   DecodedMessageReaction.cpp
   PrefixSuffix.cpp
   CountryNames.cpp
@@ -129,27 +132,36 @@ set (wsjt_qtmm_CXXSRCS
 
 set (jt9_FSRCS
   lib/jt9.f90
+  lib/shmem.f90
+  lib/shmem.cpp
+  lib/decoder_ipc_layout.f90
   lib/jt9a.f90
-  lib/streaming_io.f90
-  lib/stream_setmode.c   # Windows stdin binary-mode helper (no-op on POSIX)
-  lib/stream_stdin.c     # portable stdin read-fully helper (all platforms)
+  lib/jt9_stream_stub.f90
+  lib/jt9_wspr_stub.f90
   lib/jt9_version.c
   )
 
-# jt9stream sources: the Qt-free streaming decoder (B2). Same jt9.f90 main as
-# jt9 but ALWAYS the jt9a stub (hard-coded, not jt9a.f90) so it links zero Qt.
-set (jt9stream_FSRCS
+# wsjt-codec uses the same main as jt9 with shared-memory worker mode disabled.
+set (wsjt_codec_FSRCS
   lib/jt9.f90
   lib/jt9a_stub.f90
+  lib/streaming_decode.f90
+  lib/streaming_jtty_review.f90
+  lib/streaming_wspr.f90
   lib/streaming_io.f90
-  lib/stream_setmode.c   # Windows stdin binary-mode helper (no-op on POSIX)
+  lib/stream_setmode.c   # stdin helpers: Windows binary mode, terminal check
   lib/stream_stdin.c     # portable stdin read-fully helper (all platforms)
+  lib/stream_decode.c    # the decode thread, its queue and the stdout writer lock
+  lib/stream_wspr.c      # WSPR through wsprd's decode library (wsprd_decode)
+  lib/stream_ft8_backpressure.cpp # the stream's calls into the GUI's FT8 decode scheduler
+  lib/codec_wspr_file.c  # -2: WSPR files through wsprd's run over a file
   lib/jt9_version.c
   )
 
 set (wsjtx_CXXSRCS
   Audio/AudioInputSource.hpp
   Audio/AudioStreamClock.hpp
+  Audio/AudioOutputSink.hpp
   DecoderOutputFramer.cpp
   Network/PSKReporter.cpp
   Network/PSKReporterConfiguration.cpp
@@ -167,6 +179,10 @@ set (wsjtx_CXXSRCS
   widgets/signalmeter.cpp
   widgets/TxDriveSlider.cpp
   widgets/plotter.cpp
+  widgets/JttySpectrum.cpp
+  widgets/JttyKeyRouter.cpp
+  widgets/JttyMacroSets.cpp
+  widgets/JttyMacroEditor.cpp
   widgets/widegraph.cpp
   widgets/echograph.cpp
   widgets/echoplot.cpp
@@ -186,13 +202,23 @@ set (wsjtx_CXXSRCS
   HoundTransmissionPolicy.cpp
   SuperFoxTxPlanner.cpp
   DecoderIpc.cpp
-  Ft8MtdDecodeScheduler.cpp
+  DecoderBackend.hpp
+  DecoderProcessSupervisor.cpp
+  ShmemDecoderBackend.cpp
   OperatingFrequency.cpp
+  FootswitchInput.cpp
+  OperatingBand.cpp
+  ModeEntry.cpp
   Ft8MtdDecodeCoordinator.cpp
   FastDecode.cpp
   widgets/SpecOpLabel.cpp
   widgets/mainwindow.cpp
+  widgets/mainwindow_band.cpp
+  widgets/mainwindow_modes.cpp
   widgets/mainwindow_jtty.cpp
+  widgets/mainwindow_jtty_receive.cpp
+  JttyReceiveResultController.cpp
+  JttyRecording.cpp
   Modulator/JttyTxStream.cpp
   widgets/mainwindow_settings.cpp
   widgets/mainwindow_show_messages.cpp
@@ -217,33 +243,32 @@ if (WSJT_ENABLE_TESTS)
     Audio/FixtureSoundOutput.cpp
     Ft8TxLoopbackTestController.cpp
     JttyTxLoopbackTestController.cpp
+    WavDecodeTestController.cpp
     LiveAudioTestController.cpp
     ReceiveHandoffTestController.cpp
+    BestSPApplicationTestController.cpp
     )
 endif ()
 
 set (wsjt_CXXSRCS
   Logger.cpp
+  Ft8MtdDecodeScheduler.cpp
   lib/decoder_ipc_control.cpp
-  lib/crc10.cpp
-  lib/crc13.cpp
-  lib/crc14.cpp
+  lib/decoder_ipc_layout.cpp
+  lib/NativeSharedMemory.cpp
+  lib/DecoderWorkerLock.cpp
+  lib/ft8var/ft8_coarse_mutex.cpp
   ${wsjt_fox_CXXSRCS}
   )
-# deal with a GCC v6 UB error message
-set_source_files_properties (
-  lib/crc10.cpp
-  lib/crc13.cpp
-  lib/crc14.cpp
-  PROPERTIES COMPILE_FLAGS -fpermissive)
 
-if (WIN32)
-  set (wsjt_CXXSRCS
-    ${wsjt_CXXSRCS}
-    killbyname.cpp
-    )
-
-endif (WIN32)
+# The JTTY transmit encoder and the stream's slot-mode transmit audio call the
+# Fortran codec, so they are archived with it.
+set (wsjt_jtty_CXXSRCS
+  lib/jtty/JttyTransmit.cpp
+  lib/jtty/JttyTransmitHost.cpp
+  lib/jtty/JttyUnicode.cpp
+  lib/stream_slot_audio.cpp
+  )
 
 set (wsjt_FSRCS
   # put module sources first in the hope that they get rebuilt before use
@@ -254,23 +279,30 @@ set (wsjt_FSRCS
   lib/jt9_input_validation.f90
   lib/msk_spectrum.f90
   lib/jpl_ephemeris_status.f90
-  lib/shmem.f90
   lib/crc.f90
   lib/fftw3mod.f90
   lib/hashing.f90
   lib/iso_c_utilities.f90
+  lib/streaming_period.f90
   lib/streaming_emit.f90
+  lib/stdcall_suffix.f90
   lib/streaming_control.f90
   lib/jt9_params_init.f90
+  lib/jt9_wav_request.f90
+  lib/jt9_wav_policy.f90
   lib/streaming_apply.f90
   lib/jt4.f90
   lib/jt4_decode.f90
+  lib/jt4_host_support.f90
   lib/jt65_decode.f90
+  lib/jt65_host_support.f90
   lib/jt65_mod.f90
   lib/jt65_mod6.f90 #ft8md
   lib/ft8_decode.f90
   lib/ft4_decode.f90
+  lib/fst4/fst4_osd_workspace.f90
   lib/fst4_decode.f90
+  lib/fst4_host_support.f90
   lib/get_q3list.f90
   lib/jt9_decode.f90
   lib/options.f90
@@ -279,8 +311,11 @@ set (wsjt_FSRCS
   lib/77bit/packjt77_grammar.f90
   lib/77bit/packjt77.f90
   lib/qra/q65/q65_workspace.f90
+  lib/q65_codec.f90
+  lib/qra/q65/q65_callers.F90
   lib/qra/q65/q65.f90
   lib/q65_decode.f90
+  lib/q65_host_support.f90
   lib/readwav.f90
   lib/timer_C_wrapper.f90
   lib/timer_impl.f90
@@ -294,6 +329,8 @@ set (wsjt_FSRCS
   lib/superfox/popen_module.f90
   lib/superfox/qpc/qpc_mod.f90
   lib/ft8var/ft8_decode_ranges.f90
+  lib/ft8var/ft8_coarse_cache.f90
+  lib/ft8var/ft8_coarse_sync.f90
   lib/ft8var/ft8_mtd_residual.f90
   lib/ft8var/ft8_decodevar.f90
   lib/jtty/jtty_source_codec.f90
@@ -302,10 +339,21 @@ set (wsjt_FSRCS
   lib/jtty/jtty_tbcc_list_decoder.f90
   lib/jtty/tbcc.f90
   lib/jtty/jtty_tbcc_decoder.f90
+  lib/jtty/jtty_frequency_mixer.f90
   lib/jtty/jtty_payload_correlators.f90
   lib/jtty/jtty_fec_mod.f90
   lib/jtty/jttycom.f90
   lib/jtty/jtty_mdecode.f90
+  lib/jtty/jtty_receive_context.f90
+  lib/jtty/jtty_filler.f90
+  lib/spectrum_rows.f90
+  lib/streaming_jtty.f90
+  lib/streaming_encode.f90
+  lib/refspectrum.f90
+  lib/streaming_receive.f90
+  lib/streaming_freqcal.f90
+  lib/streaming_echo.f90
+  lib/streaming_side.f90
 
   # remaining non-module sources
   lib/addit.f90
@@ -341,16 +389,18 @@ set (wsjt_FSRCS
   lib/ft8/compress.f90
   lib/coord.f90
   lib/db.f90
-  lib/decode4.f90
   lib/decode65a.f90
   lib/decode65b.f90
   lib/decode9w.f90
   lib/decode_echo.f90
   lib/ft8/decode174_91.f90
   lib/decoder_callbacks.f90
+  lib/decoder_engine_types.f90
+  lib/77bit/decoder_codec_context.f90
+  lib/ft8_engine_kernel.f90
+  lib/decoder_engine.f90
   lib/decoder.f90
   lib/env_module.f90
-  lib/deep4.f90
   lib/deg2grid.f90
   lib/degrade_snr.f90
   lib/demod64a.f90
@@ -390,6 +440,10 @@ set (wsjt_FSRCS
   lib/flat65.f90
   lib/fmtmsg.f90
   lib/foldspec9f.f90
+  lib/fftw_tsan.f90
+  lib/fftw_locked.f90
+  lib/first_call_tsan.f90
+  lib/fftw_wisdom.f90
   lib/four2a.f90
   lib/fspread_lorentz.f90
   lib/ft8/foxfilt.f90
@@ -414,6 +468,7 @@ set (wsjt_FSRCS
   lib/ft4/ft4code.f90
   lib/ft4/genft4.f90
   lib/ft4/gen_ft4wave.f90
+  lib/waveform_kernels.f90
   lib/ft8/gen_ft8wave.f90
   lib/ft8/genft8refsig.f90
   lib/genwspr.f90
@@ -442,7 +497,6 @@ set (wsjt_FSRCS
   lib/libration.f90
   lib/lorentzian.f90
   lib/fst4/lorentzian_fading.f90
-  lib/lpf1.f90
   lib/map65_mmdec.f90
   lib/mixlpf.f90
   lib/makepings.f90
@@ -478,12 +532,10 @@ set (wsjt_FSRCS
   lib/pltanh.f90
   lib/polyfit.f90
   lib/prog_args.f90
-  lib/ps4.f90
   lib/qra/q65/q65_ap.f90
   lib/qra/q65/q65_loops.f90
   lib/qra/q65/q65_set_list.f90
   lib/qra/q65/q65_set_list2.f90
-  lib/refspectrum.f90
   lib/savec2.f90
   lib/save_echo_params.f90
   lib/sec0.f90
@@ -510,7 +562,6 @@ set (wsjt_FSRCS
   lib/symspec.f90
   lib/symspec2.f90
   lib/symspec65.f90
-  lib/sync4.f90
   lib/sync65.f90
   lib/ft4/getcandidates4.f90
   lib/ft4/get_ft4_bitmetrics.f90
@@ -570,6 +621,9 @@ set (wsjt_FSRCS
   lib/ft8var/fillhashvar.f90
   lib/ft8var/filtersfreevar.f90
   lib/ft8var/four2avar.f90
+  lib/ft8var/ft8_fft32.f90
+  lib/ft8var/ft8_symbol_spectrum.f90
+  lib/ft8var/ft8_bit_metrics.f90
   lib/ft8var/ft4_mod1.f90
   lib/ft8var/ft8apsetvar.f90
   lib/ft8var/ft8bvar.f90
@@ -638,7 +692,6 @@ set (ka9q_CSRCS
   lib/ftrsd/encode_rs.c
   lib/ftrsd/init_rs.c
   )
-set_source_files_properties (${ka9q_CSRCS} PROPERTIES COMPILE_FLAGS -Wno-sign-compare)
 
 set (qra_CSRCS
   lib/qra/qracodes/qra12_63_64_irr_b.c
@@ -658,6 +711,7 @@ set (wsjt_CSRCS
   lib/ft8var/ft8_tsan.c
   lib/ftrsd/ftrsdap.c
   lib/sgran.c
+  lib/stream_remove_file.c
   lib/golay24_table.c
   lib/gran.c
   lib/igray.c
@@ -700,17 +754,26 @@ set (wsprsim_CSRCS
   lib/wsprd/nhash.c
   )
 
-set (wsprd_CSRCS
-  lib/lookup3.c
-  lib/wsprd/wsprd.c
+set (wspr_decoder_CSRCS
+  lib/wsprd/wspr_decoder.c
   lib/wsprd/wsprsim_utils.c
   lib/wsprd/wsprd_utils.c
   lib/wsprd/fano.c
   lib/wsprd/jelinek.c
   lib/wsprd/tab.c
+  )
+
+# wsprd's run over a file and the codec's WSPR calls (wsprd_decode.h), over
+# the decoder above.
+set (wsprd_decode_CSRCS
+  lib/wsprd/wsprd_decode.c
+  )
+
+set (wsprd_CSRCS
+  lib/lookup3.c
+  lib/wsprd/wsprd.c
   lib/wsprd/nhash.c
   lib/init_random_seed.c
-  lib/wsprd/wsprd_stream.c
   )
 
 set (wsjtx_UISRCS
@@ -762,7 +825,6 @@ set (qcp_CXXSRCS
 
 set (all_CXXSRCS
   ${wsjt_CXXSRCS}
-  ${fort_qt_CXXSRCS}
   ${wsjt_qt_CXXSRCS}
   ${wsjt_qtmm_CXXSRCS}
   ${wsjtx_CXXSRCS}
@@ -772,7 +834,9 @@ set (all_CXXSRCS
 set (all_C_and_CXXSRCS
   ${wsjt_CSRCS}
   ${wsprsim_CSRCS}
+  ${wsprd_decode_CSRCS}
   ${wsprd_CSRCS}
+  ${wspr_decoder_CSRCS}
   ${all_CXXSRCS}
   )
 
@@ -878,3 +942,7 @@ endif ()
 
 set_property (SOURCE ${all_C_and_CXXSRCS} APPEND_STRING PROPERTY COMPILE_FLAGS " -include wsjtx_config.h")
 set_property (SOURCE ${all_C_and_CXXSRCS} APPEND PROPERTY OBJECT_DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/wsjtx_config.h)
+
+# GNU Fortran's default constructor limit is one entry below the sine table size.
+set_property (SOURCE lib/waveform_kernels.f90 APPEND PROPERTY COMPILE_OPTIONS
+  "$<$<COMPILE_LANG_AND_ID:Fortran,GNU>:-fmax-array-constructor=65536>")

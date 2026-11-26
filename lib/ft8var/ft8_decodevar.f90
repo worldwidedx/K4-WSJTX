@@ -1,22 +1,58 @@
 module ft8_decodevar
+  use packjt77, only: pack77_state
+  use decoder_engine_types, only: ft8_signal_evidence
+  use ft8var_work_types
 
   logical ltry_a8
   type :: ft8_decodervar
      procedure(ft8_decodevar_callback), pointer :: callback
+     type(pack77_state), pointer :: knowledge => null()
    contains
      procedure :: decodevar
   end type ft8_decodervar
 
   abstract interface
-     subroutine ft8_decodevar_callback (this,snr,dt,freq,decodedvar,nap,qual)
-       import ft8_decodervar
+     subroutine ft8_decodevar_callback (this,snr,dt,freq,decodedvar,nap,qual,evidence)
+       import ft8_decodervar,ft8_signal_evidence
        implicit none
        class(ft8_decodervar), intent(inout) :: this
        integer, intent(in) :: snr
        integer, intent(in) :: nap 
        real, intent(in) :: dt,freq,qual
        character(len=37), intent(in) :: decodedvar !ft8md was 26
+       type(ft8_signal_evidence), intent(in), optional :: evidence
      end subroutine ft8_decodevar_callback
+  end interface
+
+  interface
+    subroutine ft8bvar(residual,spectrum,newdat1,nQSOProgress,nfqso,nftx,napwid, &
+         lsubtract,tmpcqdec,tmpmyc,nagainfil,iaptype,f1,xdt,nbadcrc,lft8sdec, &
+         msg37,msg37_2,xsnr,stophint,nthr,lFreeText,ipass,lft8subpass,lspecial, &
+         lcqcand,ncqsignal,nmycsignal,npass,i3bit,lft8s,lmycallstd,lhiscallstd, &
+         levenint,loddint,lft8sd,i3,n3,nft8rxfsens,ncount,msgsrcvd,lrepliedother, &
+         lhashmsg,lqsothread,lft8lowth,lhighsens,tmpcqsig,tmpmycsig,tmpqsosig, &
+         lnohiscall,lnomycall,lnohisgrid,qual,iaptype2,progress_generation,knowledge,evidence)
+      import pack77_state,ft8_signal_evidence,tmpcqdec_struct,tmpmyc_struct, &
+           tmpcqsig_struct,tmpmycsig_struct,tmpqsosig_struct
+      real :: residual(180000),f1,xdt,xsnr,qual
+      complex :: spectrum(0:96000)
+      integer :: nQSOProgress,nfqso,nftx,napwid,iaptype,nbadcrc,nthr,ipass
+      integer :: ncqsignal,nmycsignal,npass,i3bit,i3,n3,nft8rxfsens,ncount
+      integer :: iaptype2,progress_generation
+      logical :: newdat1,lsubtract,nagainfil,lFreeText,lspecial
+      logical(kind=1) :: lft8sdec,stophint,lft8subpass,lcqcand,lft8s
+      logical(kind=1) :: lmycallstd,lhiscallstd,levenint,loddint,lft8sd
+      logical(kind=1) :: lrepliedother,lhashmsg,lqsothread,lft8lowth,lhighsens
+      logical(kind=1) :: lnohiscall,lnomycall,lnohisgrid
+      character(len=37) :: msg37,msg37_2,msgsrcvd(130)
+      type(tmpcqdec_struct) :: tmpcqdec(*)
+      type(tmpmyc_struct) :: tmpmyc(*)
+      type(tmpcqsig_struct) :: tmpcqsig(*)
+      type(tmpmycsig_struct) :: tmpmycsig(*)
+      type(tmpqsosig_struct) :: tmpqsosig(*)
+      type(pack77_state), target, optional, intent(inout) :: knowledge
+      type(ft8_signal_evidence), optional, intent(out) :: evidence
+    end subroutine ft8bvar
   end interface
 
 contains
@@ -27,14 +63,16 @@ contains
        progress_generation,residual,spectrum)
 
     use omp_lib
+    use ft8_codec_context, only: get_ft8_codec_state
     use ft8_mtd_residual, only : mtd_publish_worker,mtd_transform_phase
     use decode_completion_module, only : write_decode_progress
 
-    use ft8_mod1, only : ndecodes,allmessages,allsnrs,allfreq,odd,even,nmsg,    &
-         lastrxmsg,calldteven,calldtodd,incall,oddcopy,evencopy,                &
+    use ft8_mod1, only : ndecodes,allmessages,allsnrs,allfreq,odd,even,nmsg, &
+         ft8_store_decoded_message_locked,    &
+         calldteven,calldtodd, &
          avexdt,mycall,hiscall,nft8cycles,ncandallthr,nincallthr,evencq,        &
          oddcq,numcqsig,numdeccq,evenmyc,oddmyc,nummycsig,numdecmyc,lapmyc,     &
-         evenqso,oddqso,lqsomsgdcd,hisgrid4
+         evenqso,oddqso,ft8_qso_hints_suppressed,hisgrid4
 
     interface
        subroutine wsjt_tsan_acquire_ft8_find_dupes() bind(C)
@@ -65,7 +103,9 @@ contains
          lnomycall,lnohisgrid
     character msg37*37,msg37_2*37,msg26*37,call2*12 !ft8md msg26 was *26
     character*37 msgsrcvd(130)
-    integer nsnr
+    integer nsnr,nmsgcopy
+    type(pack77_state), pointer :: codec
+    type(ft8_signal_evidence) :: evidence
 
     type oddtmp_struct
        real freq
@@ -83,39 +123,14 @@ contains
     end type eventmp_struct
     type(eventmp_struct) eventmp(130)
 
-    type tmpcqdec_struct
-       real freq
-       real xdt
-    end type tmpcqdec_struct
     type(tmpcqdec_struct) tmpcqdec(numdeccq) ! 40 sigs
-
-    type tmpcqsig_struct
-       real freq
-       real xdt
-      complex cs(0:7,79)
-    end type tmpcqsig_struct
     type(tmpcqsig_struct), allocatable :: tmpcqsig(:) ! 20 sigs
-
-    type tmpmyc_struct
-       real freq
-       real xdt
-    end type tmpmyc_struct
     type(tmpmyc_struct) tmpmyc(numdecmyc) ! 25 sigs
-
-    type tmpmycsig_struct
-       real freq
-       real xdt
-       complex cs(0:7,79)
-    end type tmpmycsig_struct
     type(tmpmycsig_struct) tmpmycsig(nummycsig) ! 5 sigs
-
-    type tmpqsosig_struct
-       real freq
-       real xdt
-       complex cs(0:7,79)
-    end type tmpqsosig_struct
     type(tmpqsosig_struct) tmpqsosig(1)
 
+    codec => this%knowledge
+    if(.not.associated(codec)) codec => get_ft8_codec_state()
     allocate(tmpcqsig(numcqsig))
     oddtmp%lstate=.false.
     eventmp%lstate=.false.
@@ -153,46 +168,6 @@ contains
     if(len_trim(hisgrid4).ne.4) lnohisgrid=.true.
     if(nfqso.ge.nfa .and. nfqso.le.nfb) lqsothread=.true.
 
-    if(lqsothread .and. .not.lastrxmsg(1)%lstate .and. .not.stophint .and.     &
-         hiscall.ne.'') then
-! got incoming call
-       do i=1,30
-          if(incall(i)%msg(1:1).eq." ") exit
-          if(index(incall(i)%msg,(trim(mycall)//' '//trim(hiscall))).eq.1) then
-             lastrxmsg(1)%lastmsg=incall(i)%msg
-             lastrxmsg(1)%xdt=incall(i)%xdt
-             lastrxmsg(1)%lstate=.true.
-             exit
-          endif
-       enddo
-
-       if(.not.lastrxmsg(1)%lstate) then
-! calling someone, lastrxmsg still not valid
-          if(levenint) then
-             do i=1,130
-                if(.not.evencopy(i)%lstate) cycle
-                if(index(evencopy(i)%msg,' '//trim(hiscall)//' ').gt.1) then
-                   lastrxmsg(1)%lastmsg=evencopy(i)%msg
-                   lastrxmsg(1)%xdt=evencopy(i)%dt
-                   lastrxmsg(1)%lstate=.true.
-                   exit
-                endif
-             enddo
-
-          elseif(loddint) then
-             do i=1,130
-                if(.not.oddcopy(i)%lstate) cycle
-                if(index(oddcopy(i)%msg,' '//trim(hiscall)//' ').gt.1) then
-                   lastrxmsg(1)%lastmsg=oddcopy(i)%msg
-                   lastrxmsg(1)%xdt=oddcopy(i)%dt
-                   lastrxmsg(1)%lstate=.true.
-                   exit
-                endif
-             enddo
-          endif
-       endif
-    endif
-
 ! sliding search over +/- 2.5s relative to 0.5s TX start time
     jzb=-62 + avexdt*25.
     jzt=62 + avexdt*25.
@@ -216,8 +191,7 @@ contains
           call mtd_transform_phase(ipass)
 !$omp end single
        endif
-       call mtd_publish_worker(nthr)
-       newdat1=.true.
+       call mtd_publish_worker(nthr,newdat1)
        lsubtract=.true.
        if(ipass.eq.1 .or. ipass.eq.4 .or. ipass.eq.7) then
           if(lft8lowth) syncmin=1.225
@@ -262,7 +236,7 @@ contains
                nft8rxfsens,ncount,msgsrcvd,lrepliedother,lhashmsg,lqsothread,   &
                lft8lowth,lhighsens,tmpcqsig,tmpmycsig,tmpqsosig,                &
                lnohiscall,lnomycall,lnohisgrid,qual,iaptype2,                   &
-               progress_generation)
+               progress_generation,codec,evidence)
           nsnr=nint(xsnr)
           xdt=xdt-0.5
           if(nbadcrc.eq.0) then
@@ -304,13 +278,8 @@ contains
                 endif
                 
                 if(.not.ldupe) then
+                   if(.not.ft8_store_decoded_message_locked(msg37,nsnr,f1)) cycle
                    if(.not.lFreeText .and. k.eq.1) call extract_callvar(msg37,call2)
-!!!$omp critical(update_arrays)
-                   ndecodes=ndecodes+1
-                   allmessages(ndecodes)=msg37
-                   allsnrs(ndecodes)=nsnr
-                   allfreq(ndecodes)=f1
-
                    if(.not.lhidemsg) then
  ! simulated wav tests affected, structure contains data for at least previous and current even|odd intervals
                       if(levenint) then
@@ -323,12 +292,11 @@ contains
                          calldtodd(1)%dt=xdt
                       endif
                    endif
-!!!$omp end critical(update_arrays)
 
                    if(.not.lhidemsg) then
                       msg26=msg37(1:37) !ft8md was 1:26
                       if(associated(this%callback)) then
-                         call this%callback(nsnr,xdt,f1,msg26,iaptype2,qual)
+                         call this%callback(nsnr,xdt,f1,msg26,iaptype2,qual,evidence)
                       endif
                    endif
 
@@ -422,7 +390,7 @@ contains
           do ik=1,nmycsignal
              evenmyc(ik,nthr)%cs=tmpmycsig(ik)%cs
           enddo
-          if(.not.lqsomsgdcd .and. tmpqsosig(1)%freq.lt.5001.) then
+          if(.not.ft8_qso_hints_suppressed() .and. tmpqsosig(1)%freq.lt.5001.) then
              evenqso(1,nthr)%freq=tmpqsosig(1)%freq
              evenqso(1,nthr)%xdt=tmpqsosig(1)%xdt
              evenqso(1,nthr)%cs=tmpqsosig(1)%cs
@@ -440,7 +408,7 @@ contains
           do ik=1,nmycsignal
              oddmyc(ik,nthr)%cs=tmpmycsig(ik)%cs
           enddo
-          if(.not.lqsomsgdcd .and. tmpqsosig(1)%freq.lt.5001.) then
+          if(.not.ft8_qso_hints_suppressed() .and. tmpqsosig(1)%freq.lt.5001.) then
              oddqso(1,nthr)%freq=tmpqsosig(1)%freq
              oddqso(1,nthr)%xdt=tmpqsosig(1)%xdt
              oddqso(1,nthr)%cs=tmpqsosig(1)%cs
@@ -455,17 +423,23 @@ contains
 !$omp critical(update_structures)
        call wsjt_tsan_acquire_ft8_update_structures()
        if(levenint) then
-          even(nmsg+1:nmsg+nmsgloc)%msg=eventmp(1:nmsgloc)%msg
-          even(nmsg+1:nmsg+nmsgloc)%freq=eventmp(1:nmsgloc)%freq
-          even(nmsg+1:nmsg+nmsgloc)%dt=eventmp(1:nmsgloc)%dt
-          even(nmsg+1:nmsg+nmsgloc)%lstate=eventmp(1:nmsgloc)%lstate
-          nmsg=nmsg+nmsgloc
+          nmsgcopy=min(nmsgloc,max(0,size(even)-nmsg))
+          if(nmsgcopy.gt.0) then
+             even(nmsg+1:nmsg+nmsgcopy)%msg=eventmp(1:nmsgcopy)%msg
+             even(nmsg+1:nmsg+nmsgcopy)%freq=eventmp(1:nmsgcopy)%freq
+             even(nmsg+1:nmsg+nmsgcopy)%dt=eventmp(1:nmsgcopy)%dt
+             even(nmsg+1:nmsg+nmsgcopy)%lstate=eventmp(1:nmsgcopy)%lstate
+             nmsg=nmsg+nmsgcopy
+          endif
        else if(loddint) then
-          odd(nmsg+1:nmsg+nmsgloc)%msg=oddtmp(1:nmsgloc)%msg
-          odd(nmsg+1:nmsg+nmsgloc)%freq=oddtmp(1:nmsgloc)%freq
-          odd(nmsg+1:nmsg+nmsgloc)%dt=oddtmp(1:nmsgloc)%dt
-          odd(nmsg+1:nmsg+nmsgloc)%lstate=oddtmp(1:nmsgloc)%lstate
-          nmsg=nmsg+nmsgloc
+          nmsgcopy=min(nmsgloc,max(0,size(odd)-nmsg))
+          if(nmsgcopy.gt.0) then
+             odd(nmsg+1:nmsg+nmsgcopy)%msg=oddtmp(1:nmsgcopy)%msg
+             odd(nmsg+1:nmsg+nmsgcopy)%freq=oddtmp(1:nmsgcopy)%freq
+             odd(nmsg+1:nmsg+nmsgcopy)%dt=oddtmp(1:nmsgcopy)%dt
+             odd(nmsg+1:nmsg+nmsgcopy)%lstate=oddtmp(1:nmsgcopy)%lstate
+             nmsg=nmsg+nmsgcopy
+          endif
        endif
        call wsjt_tsan_release_ft8_update_structures()
 !$omp end critical(update_structures)

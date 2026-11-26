@@ -4,8 +4,24 @@ foreach (required_variable WSJTX WORK_DIR EXPECTED)
   endif ()
 endforeach ()
 
+if (NOT DEFINED AUDIO_SPEED)
+  set (AUDIO_SPEED 4)
+endif ()
+if (NOT AUDIO_SPEED MATCHES "^[1-4]$")
+  message (FATAL_ERROR "AUDIO_SPEED must be an integer from 1 through 4")
+endif ()
+if (NOT DEFINED TEST_ID)
+  set (TEST_ID "test_wsjtx_jtty_tx_loopback")
+endif ()
+if (NOT TEST_ID MATCHES "^[A-Za-z0-9_-]+$")
+  message (FATAL_ERROR "TEST_ID must contain only letters, digits, underscores, or hyphens")
+endif ()
+
+string (RANDOM LENGTH 12 ALPHABET 0123456789abcdef run_id)
+set (rig_name "CTEST-JTTY-${run_id}")
+
 set (ipc_dir "${WORK_DIR}-ipc")
-file (REMOVE_RECURSE "${WORK_DIR}")
+file (REMOVE_RECURSE "${WORK_DIR}" "${ipc_dir}")
 file (MAKE_DIRECTORY
   "${WORK_DIR}/capture/config"
   "${WORK_DIR}/capture/data"
@@ -21,15 +37,27 @@ set (capture_environment
   "XDG_CONFIG_HOME=${WORK_DIR}/capture/config"
   "XDG_DATA_HOME=${WORK_DIR}/capture/data"
   "XDG_CACHE_HOME=${WORK_DIR}/capture/cache"
-  "WSJT_QMAP_SHARED_MEMORY_KEY=mem_qmap-test_wsjtx_jtty_tx_loopback")
+  "WSJT_QMAP_SHARED_MEMORY_KEY=mem_qmap-${TEST_ID}")
 set (replay_environment
   "XDG_CONFIG_HOME=${WORK_DIR}/replay/config"
   "XDG_DATA_HOME=${WORK_DIR}/replay/data"
   "XDG_CACHE_HOME=${WORK_DIR}/replay/cache"
-  "WSJT_QMAP_SHARED_MEMORY_KEY=mem_qmap-test_wsjtx_jtty_tx_loopback")
+  "WSJT_QMAP_SHARED_MEMORY_KEY=mem_qmap-${TEST_ID}")
 if (NOT APPLE)
   list (APPEND capture_environment "TMPDIR=${ipc_dir}/capture")
   list (APPEND replay_environment "TMPDIR=${ipc_dir}/replay")
+endif ()
+if (WIN32)
+  list (APPEND capture_environment
+    "APPDATA=${WORK_DIR}/capture/config"
+    "LOCALAPPDATA=${WORK_DIR}/capture/data"
+    "TEMP=${ipc_dir}/capture"
+    "TMP=${ipc_dir}/capture")
+  list (APPEND replay_environment
+    "APPDATA=${WORK_DIR}/replay/config"
+    "LOCALAPPDATA=${WORK_DIR}/replay/data"
+    "TEMP=${ipc_dir}/replay"
+    "TMP=${ipc_dir}/replay")
 endif ()
 
 execute_process (
@@ -37,11 +65,15 @@ execute_process (
     ${capture_environment}
     "${WSJTX}"
     --jtty-tx-loopback-test "${capture}"
-    --rig-name CTEST-JTTY-TX-CAPTURE
+    --test-audio-speed "${AUDIO_SPEED}"
+    --rig-name "${rig_name}-CAPTURE"
   WORKING_DIRECTORY "${WORK_DIR}/capture"
+  TIMEOUT 210
   RESULT_VARIABLE capture_result
   OUTPUT_VARIABLE capture_stdout
   ERROR_VARIABLE capture_stderr)
+file (WRITE "${WORK_DIR}/capture.stdout.log" "${capture_stdout}")
+file (WRITE "${WORK_DIR}/capture.stderr.log" "${capture_stderr}")
 if (NOT capture_result STREQUAL "0")
   message (FATAL_ERROR
     "WSJT-X JTTY transmit capture failed with exit code ${capture_result}\n"
@@ -69,11 +101,15 @@ execute_process (
     "${WSJTX}"
     --jtty-live-audio-test "${capture}"
     --jtty-live-audio-expected "${EXPECTED}"
-    --rig-name CTEST-JTTY-TX-REPLAY
+    --test-audio-speed "${AUDIO_SPEED}"
+    --rig-name "${rig_name}-REPLAY"
   WORKING_DIRECTORY "${WORK_DIR}/replay"
+  TIMEOUT 400
   RESULT_VARIABLE replay_result
   OUTPUT_VARIABLE replay_stdout
   ERROR_VARIABLE replay_stderr)
+file (WRITE "${WORK_DIR}/replay.stdout.log" "${replay_stdout}")
+file (WRITE "${WORK_DIR}/replay.stderr.log" "${replay_stderr}")
 if (NOT replay_result STREQUAL "0")
   message (FATAL_ERROR
     "WSJT-X JTTY transmit replay failed with exit code ${replay_result}\n"

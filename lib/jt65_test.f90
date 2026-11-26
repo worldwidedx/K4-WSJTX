@@ -15,6 +15,7 @@ contains
         nQSOProgress,ljt65apon)
     use timer_module, only: timer
     use jt65_decode
+    use jt65_host_support, only: load_jt65_calls
     implicit none
 
     include 'constants.f90'
@@ -24,9 +25,16 @@ contains
     logical, intent(in) :: nrobust,ljt65apon
     character(len=12), intent(in) :: mycall, hiscall
     character(len=6), intent(in) :: hisgrid
-    type(jt65_decoder) :: my_decoder
+    type(jt65_decoder), save :: my_decoder
+    character(len=12), allocatable :: calls(:)
+    character(len=4), allocatable :: grids(:)
     logical nclearave                          !### Should be a dummy arg?
     nclearave=.false.
+
+    if(iand(ndepth,32)/=0) then
+       call load_jt65_calls(calls,grids)
+       call my_decoder%set_calls(calls,grids)
+    endif
 
     call timer('jt65a   ',0)
     call my_decoder%decode(my_callback,dd,npts=52*12000,newdat=.true.,     &

@@ -2,6 +2,7 @@
 
 #include "widgets/JttyN1mm.hpp"
 #include "widgets/JttyN1mmOutput.hpp"
+#include "widgets/JttyMmttyHandoff.hpp"
 
 class TestJttyN1mm final : public QObject
 {
@@ -73,6 +74,182 @@ private slots:
     output.abort ();
     QVERIFY (!output.resolve (2));
     output.finish ();
+    QVERIFY (!output.takeCompletion (false, true));
+  }
+
+  void externalAbortResolvesOutstandingRequests ()
+  {
+    Jtty::N1mmOutput output;
+    output.submit (1);
+    output.start ();
+    QVERIFY (output.accept (1));
+    QVERIFY (output.pending ());
+
+    output.externalAbort ();
+    QVERIFY (!output.resolve (1));
+    QVERIFY (output.takeCompletion (false, true));
+    QVERIFY (!output.takeCompletion (false, true));
+  }
+
+  void externalAbortCompletesRejectedTransaction ()
+  {
+    Jtty::N1mmOutput output;
+    output.submit (1);
+    output.start ();
+    QVERIFY (output.resolve (1));
+
+    output.externalAbort ();
+    QVERIFY (output.takeCompletion (false));
+  }
+
+  void timeoutCompletesOnce ()
+  {
+    Jtty::N1mmOutput output;
+    output.submit (1);
+    output.start ();
+    output.externalAbort ();
+
+    QVERIFY (output.takeCompletion (false));
+    QVERIFY (!output.takeCompletion (false));
+    output.finish ();
+    QVERIFY (!output.takeCompletion (false, true));
+  }
+
+  void explicitAbortSilentlyDiscardsOutput ()
+  {
+    Jtty::N1mmOutput output;
+    output.submit (1);
+    output.start ();
+    QVERIFY (output.accept (1));
+
+    output.abort ();
+    QVERIFY (!output.resolve (1));
+    QVERIFY (!output.takeCompletion (false, true));
+  }
+
+  void mmttyHandoffWaitsForPriorStop ()
+  {
+    Jtty::MmttyHandoff handoff {25};
+    QCOMPARE (handoff.timeoutMs (), 25);
+    handoff.queue (11);
+    handoff.waitForStop ();
+
+    QVERIFY (handoff.active ());
+    QCOMPARE (handoff.requestIds (), QVector<qint64> {11});
+    QVERIFY (handoff.stopCompleted ());
+    QVERIFY (!handoff.active ());
+    QCOMPARE (handoff.requestIds (), QVector<qint64> {11});
+  }
+
+  void mmttyHandoffPreservesOrderAndAbort ()
+  {
+    Jtty::MmttyHandoff handoff;
+    handoff.queue (21);
+    handoff.queue (22);
+    handoff.waitForStop ();
+    QCOMPARE (handoff.requestIds (), QVector<qint64> ({21, 22}));
+
+    handoff.abort ();
+    QVERIFY (handoff.empty ());
+    QVERIFY (!handoff.stopCompleted ());
+  }
+
+  void mmttyHandoffBoundsPendingRequests ()
+  {
+    Jtty::MmttyHandoff handoff;
+    handoff.waitForStop ();
+    for (qint64 id = 1; id <= 64; ++id) QVERIFY (handoff.queue (id));
+    QVERIFY (!handoff.queue (65));
+    QCOMPARE (handoff.requestIds ().last (), qint64 (64));
+
+    handoff.submitted (1);
+    QVERIFY (handoff.queue (65));
+    QVERIFY (!handoff.queue (66));
+    handoff.abort ();
+    QVERIFY (handoff.queue (66));
+  }
+
+  void mmttyHandoffTimeoutRejectsAllQueuedRequests ()
+  {
+    Jtty::MmttyHandoff handoff;
+    handoff.queue (31);
+    handoff.queue (32);
+    handoff.waitForStop ();
+
+    QCOMPARE (handoff.expire (), QVector<qint64> ({31, 32}));
+    QVERIFY (handoff.empty ());
+    QVERIFY (!handoff.active ());
+  }
+
+  void activeFt8ValidTextStopsBeforeSubmission ()
+  {
+    using Action = Jtty::MmttyHandoff::SubmitAction;
+    QCOMPARE (Jtty::MmttyHandoff::planSubmission (true, false, true),
+              Action::StopThenSubmit);
+
+    Jtty::MmttyHandoff handoff;
+    handoff.queue (41);
+    handoff.waitForStop ();
+    QVERIFY (handoff.active ());
+    QVERIFY (handoff.stopCompleted ());
+    QCOMPARE (handoff.requestIds (), QVector<qint64> {41});
+  }
+
+  void xmitOnRemainsDeferredAcrossHandoff ()
+  {
+    Jtty::N1mmOutput output;
+    Jtty::MmttyHandoff handoff;
+    output.start ();
+    handoff.waitForStop ();
+
+    QVERIFY (handoff.stopCompleted ());
+    QVERIFY (output.startRequested ());
+    output.submit (42);
+    QVERIFY (output.accept (42));
+    output.started ();
+    QVERIFY (!output.startRequested ());
+  }
+
+  void invalidTextDoesNotDisturbActiveFt8 ()
+  {
+    using Action = Jtty::MmttyHandoff::SubmitAction;
+    auto const compiled = Jtty::compileN1mmMessage (
+      QStringLiteral ("[[JTTY:UNKNOWN]] TEST"));
+    QCOMPARE (compiled.status, Jtty::N1mmCompileStatus::Error);
+    QCOMPARE (Jtty::MmttyHandoff::planSubmission (false, false, true),
+              Action::Reject);
+
+    Jtty::MmttyHandoff handoff;
+    QVERIFY (!handoff.active ());
+    QVERIFY (handoff.empty ());
+  }
+
+  void multipleTextsSubmitInOrderAfterStop ()
+  {
+    Jtty::MmttyHandoff handoff;
+    handoff.queue (51);
+    handoff.queue (52);
+    handoff.waitForStop ();
+    QVERIFY (handoff.stopCompleted ());
+    QCOMPARE (handoff.requestIds (), QVector<qint64> ({51, 52}));
+
+    handoff.submitted (51);
+    handoff.submitted (52);
+    QVERIFY (handoff.empty ());
+  }
+
+  void abortDuringHandoffSilentlyDiscardsOutput ()
+  {
+    Jtty::N1mmOutput output;
+    Jtty::MmttyHandoff handoff;
+    output.submit (61);
+    output.start ();
+    handoff.queue (61);
+    handoff.waitForStop ();
+
+    handoff.abort ();
+    output.abort ();
+    QVERIFY (handoff.empty ());
     QVERIFY (!output.takeCompletion (false, true));
   }
 

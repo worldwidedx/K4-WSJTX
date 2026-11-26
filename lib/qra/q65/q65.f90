@@ -1,31 +1,321 @@
 module q65
 
-  parameter (NSTEP=8)          !Number of time bins per symbol in s1, s1a, s1b
-  parameter (PLOG_MIN=-242.0)        !List decoding threshold
-  integer iz0,jz0
-!  integer listutc(10)
-  integer apsym0(58),aph10(10)
-  integer apmask1(78),apsymbols1(78)
-  integer apmask(13),apsymbols(13)
-  integer,dimension(22) ::  isync = (/1,9,12,13,15,22,23,26,27,33,35,   &
-                                     38,46,50,55,60,62,66,69,74,76,85/)
-  integer codewords(63,411)   !See MAX_NCW in q65_set_list2.f90
-  integer ibwa,ibwb,ncw,nsps,mode_q65,nfa,nfb,nqd
-  integer idfbest,idtbest,ibw,ndistbest,maxiters,max_drift
-  integer istep,nsmo,lag1,lag2,npasses,iseq,ncand,nrc
-  integer i0,j0
-  integer navg(0:1)
-  logical lnewdat
-  real candidates(20,3)                  !snr, xdt, and f0 of top candidates
-  real, allocatable :: s1(:,:)           !Symbol spectra w/suppressed peaks
-  real, allocatable :: s1w(:,:)       !Symbol spectra w/suppressed peaks (W3SZ)
-  real, allocatable,save :: s1a(:,:,:)   !Cumulative symbol spectra
-  real, allocatable,save :: ccf2(:)      !Max CCF(freq) at any lag (orange curve)
-  real, allocatable,save :: ccf2_avg(:)  !Like ccf2, but for avg (red curve)
-  real sync(85)                          !sync vector
-  real df,dtstep,dtdec,f0dec,ftol,plog,drift
+  use q65_callers, only: Q65_MAX_CODEWORDS
+
+  use, intrinsic :: iso_c_binding
+  use fftw3
+  use packjt77, only: pack77_state,unpack77_for_state
+  use q65_codec, only: q65_enc,q65_intrinsics_ff,q65_dec,q65_dec_fullaplist
+
+  integer, parameter :: NSTEP=8
+  real, parameter :: PLOG_MIN=-242.0
+  integer, parameter :: isync(22) = [1,9,12,13,15,22,23,26,27,33,35, &
+       38,46,50,55,60,62,66,69,74,76,85]
+  type :: q65_state
+    integer :: iz0=0
+    integer :: jz0=0
+    integer :: ibwa=0
+    integer :: ibwb=0
+    integer :: ncw=0
+    integer :: nsps=0
+    integer :: mode_q65=0
+    integer :: nfa=0
+    integer :: nfb=0
+    integer :: nqd=0
+    integer :: idfbest=0
+    integer :: idtbest=0
+    integer :: ibw=0
+    integer :: ndistbest=0
+    integer :: maxiters=0
+    integer :: max_drift=0
+    integer :: istep=0
+    integer :: nsmo=0
+    integer :: lag1=0
+    integer :: lag2=0
+    integer :: npasses=0
+    integer :: iseq=0
+    integer :: ncand=0
+    integer :: nrc=0
+    integer :: i0=0
+    integer :: j0=0
+    integer :: LL0=0
+    integer :: nhist=0,curve_average_count=0
+    real :: df=0.
+    real :: dtstep=0.
+    real :: dtdec=0.
+    real :: f0dec=0.
+    real :: ftol=0.
+    real :: plog=0.
+    real :: drift=0.
+    real :: curve_dt=0.
+    integer :: apsym0(58)
+    integer :: aph10(10)
+    integer :: apmask1(78)
+    integer :: apsymbols1(78)
+    integer :: apmask(13)
+    integer :: apsymbols(13)
+    integer :: codewords(63,Q65_MAX_CODEWORDS)
+    integer :: navg(0:1)
+    integer :: nf0(100)
+    real :: candidates(20,3)
+    real :: sync(85)
+    real, pointer :: s1(:,:)=>null()
+    real, pointer :: s1w(:,:)=>null()
+    real, pointer :: s1a(:,:,:)=>null()
+    real, pointer :: ccf2(:)=>null()
+    real, pointer :: ccf2_avg(:)=>null()
+    logical :: lnewdat=.false.,spectra_valid=.false.,analytic_valid=.false.,legacy_output=.true.
+    character(len=37) :: history(100)
+    complex, allocatable :: symbol_fft(:),analytic(:)
+    real, allocatable :: prepared(:,:),symbol_energies(:,:),correlation(:),list_correlation(:,:),best_list(:)
+    real, allocatable :: timing(:),spectrum_average(:),snr_spectrum(:)
+    integer, allocatable :: ordering(:),birdie_histogram(:)
+    type(pack77_state), pointer :: knowledge=>null()
+    integer(c_int64_t) :: symbol_plan=0,analytic_forward=0,analytic_inverse=0
+    integer :: symbol_length=0,analytic_length=0,planning=-1
+  end type
+  type(q65_state), pointer :: q65_work=>null()
+  type(q65_state), target, save :: legacy_work
+  integer, pointer :: iz0=>null()
+  integer, pointer :: jz0=>null()
+  integer, pointer :: ibwa=>null()
+  integer, pointer :: ibwb=>null()
+  integer, pointer :: ncw=>null()
+  integer, pointer :: nsps=>null()
+  integer, pointer :: mode_q65=>null()
+  integer, pointer :: nfa=>null()
+  integer, pointer :: nfb=>null()
+  integer, pointer :: nqd=>null()
+  integer, pointer :: idfbest=>null()
+  integer, pointer :: idtbest=>null()
+  integer, pointer :: ibw=>null()
+  integer, pointer :: ndistbest=>null()
+  integer, pointer :: maxiters=>null()
+  integer, pointer :: max_drift=>null()
+  integer, pointer :: istep=>null()
+  integer, pointer :: nsmo=>null()
+  integer, pointer :: lag1=>null()
+  integer, pointer :: lag2=>null()
+  integer, pointer :: npasses=>null()
+  integer, pointer :: iseq=>null()
+  integer, pointer :: ncand=>null()
+  integer, pointer :: nrc=>null()
+  integer, pointer :: i0=>null()
+  integer, pointer :: j0=>null()
+  integer, pointer :: LL0=>null()
+  integer, pointer :: nhist=>null()
+  real, pointer :: df=>null()
+  real, pointer :: dtstep=>null()
+  real, pointer :: dtdec=>null()
+  real, pointer :: f0dec=>null()
+  real, pointer :: ftol=>null()
+  real, pointer :: plog=>null()
+  real, pointer :: drift=>null()
+  real, pointer :: curve_dt=>null()
+  integer, pointer :: apsym0(:)=>null()
+  integer, pointer :: aph10(:)=>null()
+  integer, pointer :: apmask1(:)=>null()
+  integer, pointer :: apsymbols1(:)=>null()
+  integer, pointer :: apmask(:)=>null()
+  integer, pointer :: apsymbols(:)=>null()
+  integer, pointer :: codewords(:,:)=>null()
+  integer, pointer :: navg(:)=>null()
+  integer, pointer :: nf0(:)=>null()
+  real, pointer :: candidates(:,:)=>null()
+  real, pointer :: sync(:)=>null()
+  real, pointer :: s1(:,:)=>null()
+  real, pointer :: s1w(:,:)=>null()
+  real, pointer :: s1a(:,:,:)=>null()
+  real, pointer :: ccf2(:)=>null()
+  real, pointer :: ccf2_avg(:)=>null()
+  logical, pointer :: lnewdat=>null()
 
 contains
+
+
+integer function q65_fft_flags() result(flags)
+  integer npatience,nthreads
+  common/patience/npatience,nthreads
+  flags=FFTW_ESTIMATE
+  if(npatience==1) flags=FFTW_ESTIMATE_PATIENT
+  if(npatience==2) flags=FFTW_MEASURE
+  if(npatience==3) flags=FFTW_PATIENT
+  if(npatience==4) flags=FFTW_EXHAUSTIVE
+end function
+
+subroutine q65_check_planning()
+  use fftw_tsan, only: wsjt_tsan_acquire_fftw, wsjt_tsan_release_fftw
+  integer npatience,nthreads
+  common/patience/npatience,nthreads
+  if(q65_work%planning==npatience) return
+  !$omp critical(fftw)
+  call wsjt_tsan_acquire_fftw()
+  if(q65_work%symbol_plan/=0) call sfftw_destroy_plan(q65_work%symbol_plan)
+  if(q65_work%analytic_forward/=0) call sfftw_destroy_plan(q65_work%analytic_forward)
+  if(q65_work%analytic_inverse/=0) call sfftw_destroy_plan(q65_work%analytic_inverse)
+  call wsjt_tsan_release_fftw()
+  !$omp end critical(fftw)
+  q65_work%symbol_plan=0
+  q65_work%analytic_forward=0
+  q65_work%analytic_inverse=0
+  q65_work%planning=npatience
+  q65_work%spectra_valid=.false.
+  q65_work%analytic_valid=.false.
+end subroutine
+
+subroutine q65_analytic(iwave,npts)
+  use fftw_tsan, only: wsjt_tsan_acquire_fftw, wsjt_tsan_release_fftw
+  integer, intent(in) :: npts
+  integer(c_int16_t), intent(in) :: iwave(npts)
+  integer nfft2,flags
+  real fac
+  call q65_check_planning()
+  if(q65_work%analytic_length/=npts) then
+     !$omp critical(fftw)
+     call wsjt_tsan_acquire_fftw()
+     if(q65_work%analytic_forward/=0) call sfftw_destroy_plan(q65_work%analytic_forward)
+     if(q65_work%analytic_inverse/=0) call sfftw_destroy_plan(q65_work%analytic_inverse)
+     call wsjt_tsan_release_fftw()
+     !$omp end critical(fftw)
+     q65_work%analytic_forward=0
+     q65_work%analytic_inverse=0
+     if(allocated(q65_work%analytic)) deallocate(q65_work%analytic)
+     allocate(q65_work%analytic(0:npts-1))
+     q65_work%analytic_length=npts
+     q65_work%analytic_valid=.false.
+  endif
+  if(q65_work%analytic_valid) return
+  nfft2=npts/2
+  flags=q65_fft_flags()
+  if(q65_work%analytic_forward==0) then
+     !$omp critical(fftw)
+     call wsjt_tsan_acquire_fftw()
+     call sfftw_plan_dft_1d(q65_work%analytic_forward,npts,q65_work%analytic, &
+          q65_work%analytic,FFTW_FORWARD,flags)
+     call sfftw_plan_dft_1d(q65_work%analytic_inverse,nfft2,q65_work%analytic, &
+          q65_work%analytic,FFTW_BACKWARD,flags)
+     call wsjt_tsan_release_fftw()
+     !$omp end critical(fftw)
+  endif
+  fac=2.0/(32767.0*npts)
+  q65_work%analytic=fac*iwave
+  call sfftw_execute(q65_work%analytic_forward)
+  q65_work%analytic(nfft2/2+1:nfft2-1)=0.
+  q65_work%analytic(0)=0.5*q65_work%analytic(0)
+  call sfftw_execute(q65_work%analytic_inverse)
+  q65_work%analytic_valid=.true.
+end subroutine
+
+subroutine q65_unpack(c77,nrx,decoded,success)
+  use packjt77, only: unpack77
+  character(len=77), intent(in) :: c77
+  integer, intent(in) :: nrx
+  character(len=37), intent(out) :: decoded
+  logical, intent(out) :: success
+  if(associated(q65_work)) then
+     if(associated(q65_work%knowledge)) then
+        call unpack77_for_state(q65_work%knowledge,c77,nrx,decoded,success)
+        return
+     endif
+  endif
+  call unpack77(c77,nrx,decoded,success)
+end subroutine
+
+subroutine q65_select(state)
+  type(q65_state), target, intent(inout) :: state
+  q65_work=>state
+  iz0=>state%iz0
+  jz0=>state%jz0
+  ibwa=>state%ibwa
+  ibwb=>state%ibwb
+  ncw=>state%ncw
+  nsps=>state%nsps
+  mode_q65=>state%mode_q65
+  nfa=>state%nfa
+  nfb=>state%nfb
+  nqd=>state%nqd
+  idfbest=>state%idfbest
+  idtbest=>state%idtbest
+  ibw=>state%ibw
+  ndistbest=>state%ndistbest
+  maxiters=>state%maxiters
+  max_drift=>state%max_drift
+  istep=>state%istep
+  nsmo=>state%nsmo
+  lag1=>state%lag1
+  lag2=>state%lag2
+  npasses=>state%npasses
+  iseq=>state%iseq
+  ncand=>state%ncand
+  nrc=>state%nrc
+  i0=>state%i0
+  j0=>state%j0
+  LL0=>state%LL0
+  nhist=>state%nhist
+  df=>state%df
+  dtstep=>state%dtstep
+  dtdec=>state%dtdec
+  f0dec=>state%f0dec
+  ftol=>state%ftol
+  plog=>state%plog
+  drift=>state%drift
+  curve_dt=>state%curve_dt
+  apsym0=>state%apsym0
+  aph10=>state%aph10
+  apmask1=>state%apmask1
+  apsymbols1=>state%apsymbols1
+  apmask=>state%apmask
+  apsymbols=>state%apsymbols
+  codewords=>state%codewords
+  navg=>state%navg
+  nf0=>state%nf0
+  candidates=>state%candidates
+  sync=>state%sync
+  s1=>state%s1
+  s1w=>state%s1w
+  s1a=>state%s1a
+  ccf2=>state%ccf2
+  ccf2_avg=>state%ccf2_avg
+  lnewdat=>state%lnewdat
+end subroutine
+
+subroutine q65_initialize_state(state)
+  type(q65_state), intent(inout) :: state
+  state%apsym0=0
+  state%aph10=0
+  state%apmask1=0
+  state%apsymbols1=0
+  state%apmask=0
+  state%apsymbols=0
+  state%codewords=0
+  state%navg=0
+  state%nf0=0
+  state%history=''
+  state%candidates=0.
+  state%sync=-22.0/63.0
+  state%sync(isync)=1.
+end subroutine
+
+subroutine q65_release_state(state)
+  use fftw_tsan, only: wsjt_tsan_acquire_fftw, wsjt_tsan_release_fftw
+  type(q65_state), intent(inout) :: state
+  !$omp critical(fftw)
+  call wsjt_tsan_acquire_fftw()
+  if(state%symbol_plan/=0) call sfftw_destroy_plan(state%symbol_plan)
+  if(state%analytic_forward/=0) call sfftw_destroy_plan(state%analytic_forward)
+  if(state%analytic_inverse/=0) call sfftw_destroy_plan(state%analytic_inverse)
+  call wsjt_tsan_release_fftw()
+  !$omp end critical(fftw)
+  state%symbol_plan=0
+  state%analytic_forward=0
+  state%analytic_inverse=0
+  if(associated(state%s1)) deallocate(state%s1)
+  if(associated(state%s1w)) deallocate(state%s1w)
+  if(associated(state%s1a)) deallocate(state%s1a)
+  if(associated(state%ccf2)) deallocate(state%ccf2)
+  if(associated(state%ccf2_avg)) deallocate(state%ccf2_avg)
+end subroutine
+
 
 subroutine q65_dec0(iavg,iwave,ntrperiod,nfqso,ntol,lclearave,  &
      emedelay,xdt,f0,snr1,width,dat4,snr2,idec,stageno)
@@ -62,11 +352,8 @@ subroutine q65_dec0(iavg,iwave,ntrperiod,nfqso,ntol,lclearave,  &
   integer*2 iwave(0:12000*ntrperiod-1)   !Raw data
   integer dat4(13)
   character*37 decoded
-  logical first,lclearave
-  real, allocatable :: s3(:,:)           !Data-symbol energies s3(LL,63)
-  real, allocatable :: ccf1(:)           !CCF(freq) at fixed lag (red)
-  data first/.true./
-  save first,LL0
+  logical lclearave
+  real, pointer :: s3(:,:),ccf1(:)
 
   integer w3t
   integer w3f
@@ -86,32 +373,34 @@ subroutine q65_dec0(iavg,iwave,ntrperiod,nfqso,ntol,lclearave,  &
   df=12000.0/nfft                        !Freq resolution = baud
   istep=nsps/NSTEP
   iz=5000.0/df                           !Uppermost frequency bin, at 5000 Hz
-  txt=85.0*nsps/12000.0
-  jz=(txt+1.0)*12000.0/istep             !Number of symbol/NSTEP bins
-  if(nsps.ge.6912) jz=(txt+2.0)*12000.0/istep   !For TR 60 s and higher
+  ! Cover every complete symbol FFT window in the received period.
+  ! Keep jz odd: q65_symspec interpolates even columns between odd ones.
+  jz=(ntrperiod*12000-nsps)/istep + 1
   ftol=ntol
   ia=ntol/df
   ia2=max(ia,10*mode_q65,nint(100.0/df))
 !  nsmo=int(0.7*mode_q65*mode_q65)
   nsmo=int(0.5*mode_q65*mode_q65)
   if(nsmo.lt.1) nsmo=1
-  if(first) then                         !Generate the sync vector
-     sync=-22.0/63.0                     !Sync tone OFF  
-     do k=1,22
-        sync(isync(k))=1.0               !Sync tone ON
-     enddo
-  endif
 
-  allocate(s3(-64:LL-65,63))
-  allocate(ccf1(-ia2:ia2))
+  if(allocated(q65_work%symbol_energies)) then
+     if(size(q65_work%symbol_energies,1)/=LL) deallocate(q65_work%symbol_energies)
+  endif
+  if(.not.allocated(q65_work%symbol_energies)) allocate(q65_work%symbol_energies(-64:LL-65,63))
+  if(allocated(q65_work%correlation)) then
+     if(size(q65_work%correlation)/=2*ia2+1) deallocate(q65_work%correlation)
+  endif
+  if(.not.allocated(q65_work%correlation)) allocate(q65_work%correlation(-ia2:ia2))
+  s3=>q65_work%symbol_energies
+  ccf1=>q65_work%correlation
   if(LL.ne.LL0 .or. iz.ne.iz0 .or. jz.ne.jz0 .or. lclearave) then
-     if(allocated(s1)) deallocate(s1)
+     if(associated(s1)) deallocate(s1)
      allocate(s1(iz,jz))
-     if(allocated(s1a)) deallocate(s1a)
+     if(associated(s1a)) deallocate(s1a)
      allocate(s1a(iz,jz,0:1))
-     if(allocated(ccf2)) deallocate(ccf2)
+     if(associated(ccf2)) deallocate(ccf2)
      allocate(ccf2(iz))
-     if(allocated(ccf2_avg)) deallocate(ccf2_avg)
+     if(associated(ccf2_avg)) deallocate(ccf2_avg)
      allocate(ccf2_avg(iz))
      s1=0.
      s1a=0.
@@ -119,6 +408,13 @@ subroutine q65_dec0(iavg,iwave,ntrperiod,nfqso,ntol,lclearave,  &
      LL0=LL
      iz0=iz
      jz0=jz
+     q65_work%s1=>s1
+     q65_work%s1a=>s1a
+     q65_work%ccf2=>ccf2
+     q65_work%ccf2_avg=>ccf2_avg
+     ccf2=0.
+     ccf2_avg=0.
+     q65_work%spectra_valid=.false.
      lclearave=.false.
   endif
   ccf1=0.
@@ -133,10 +429,21 @@ subroutine q65_dec0(iavg,iwave,ntrperiod,nfqso,ntol,lclearave,  &
 
   s3=0.
 !  if(iavg.eq.0 .and. lnewdat) then
+  call q65_check_planning()
   if(iavg.eq.0) then
      call timer('q65_syms',0)
 ! Compute symbol spectra with NSTEP time bins per symbol
-     call q65_symspec(iwave,ntrperiod*12000,iz,jz,s1)
+     if(.not.q65_work%spectra_valid) then
+        call q65_symspec(iwave,ntrperiod*12000,iz,jz,s1)
+        if(allocated(q65_work%prepared)) then
+           if(any(shape(q65_work%prepared)/=shape(s1))) deallocate(q65_work%prepared)
+        endif
+        if(.not.allocated(q65_work%prepared)) allocate(q65_work%prepared(iz,jz))
+        q65_work%prepared=s1
+        q65_work%spectra_valid=.true.
+     else
+        s1=q65_work%prepared
+     endif
      call timer('q65_syms',1)
 !     lnewdat=.false.
   else
@@ -202,7 +509,11 @@ subroutine q65_dec0(iavg,iwave,ntrperiod,nfqso,ntol,lclearave,  &
   enddo
   width=df*(i2-i1)
   if(ncw.eq.0) ccf1=0.
-  call q65_write_red(iz,xdt,ccf2_avg,ccf2)   !### Need this call for WSJT-X
+  call q65_sync_curve(ccf2_avg,1,iz,rms1)
+  call q65_sync_curve(ccf2,1,iz,rms2)
+  curve_dt=xdt
+  q65_work%curve_average_count=navg(iseq)
+  if(q65_work%legacy_output) call q65_write_red(iz,xdt,ccf2_avg,ccf2)
 
   if(idec.lt.0 .and. (iavg.eq.0 .or. iavg.eq.2)) then
      call q65_dec_q012(s3,LL,snr2,dat4,idec,decoded)
@@ -210,13 +521,17 @@ subroutine q65_dec0(iavg,iwave,ntrperiod,nfqso,ntol,lclearave,  &
 
   if(idec.lt.0 .and. max_drift.eq.50 .and. stageno.eq.5) then
 
-     if(allocated(s1w)) deallocate(s1w) ! w3sz
-     allocate(s1w(iz,jz))               ! w3sz	 
+     if(associated(s1w)) then
+        if(any(shape(s1w)/=[iz,jz])) deallocate(s1w)
+     endif
+     if(.not.associated(s1w)) allocate(s1w(iz,jz))
+     q65_work%s1w=>s1w
 	 
      s1w=s1
      do w3t=1,jz
         do w3f=1,iz
-           mm=w3f + nint(drift*w3t/(jz*df))
+           ! Drift is measured over the 85-symbol transmission.
+           mm=w3f + nint(drift*w3t/(85*NSTEP*df))
            if(mm.ge.1 .and. mm.le.iz) then
               s1w(w3f,w3t)=s1(mm,w3t)
            endif
@@ -256,35 +571,51 @@ subroutine q65_clravg
 
 ! Clear the averaging array to start a new average.
 
-  if(allocated(s1a)) s1a(:,:,iseq)=0.
+  if(associated(s1a)) s1a(:,:,iseq)=0.
   navg(iseq)=0
   
   return
 end subroutine q65_clravg
 
 subroutine q65_symspec(iwave,nmax,iz,jz,s1)
+  use fftw_tsan, only: wsjt_tsan_acquire_fftw, wsjt_tsan_release_fftw
 
 ! Compute symbol spectra with NSTEP time-steps per symbol.
   
   integer*2 iwave(0:nmax-1)              !Raw data
   real s1(iz,jz)
-  complex c0(0:41472)                    !Largest requirement, Q65-300x
-  save c0
+  complex, pointer :: c0(:)
+  integer flags
 
   nfft=nsps
+  if(.not.allocated(q65_work%symbol_fft)) allocate(q65_work%symbol_fft(0:41472))
+  c0=>q65_work%symbol_fft
+  call q65_check_planning()
+  if(q65_work%symbol_length/=nfft.or.q65_work%symbol_plan==0) then
+     !$omp critical(fftw)
+     call wsjt_tsan_acquire_fftw()
+     if(q65_work%symbol_plan/=0) call sfftw_destroy_plan(q65_work%symbol_plan)
+     flags=q65_fft_flags()
+     call sfftw_plan_dft_r2c_1d(q65_work%symbol_plan,nfft,c0,c0,flags)
+     call wsjt_tsan_release_fftw()
+     !$omp end critical(fftw)
+     q65_work%symbol_length=nfft
+  endif
   fac=1/32767.0
   do j=1,jz,2                     !Compute symbol spectra at 2*step size
      i1=(j-1)*istep
      i2=i1+nsps-1
      k=-1
      do i=i1,i2,2          !Load iwave data into complex array c0, for r2c FFT
-        xx=iwave(i)
-        yy=iwave(i+1)
+        xx=0.
+        yy=0.
+        if(i<nmax) xx=iwave(i)
+        if(i+1<nmax) yy=iwave(i+1)
         k=k+1
         c0(k)=fac*cmplx(xx,yy)
      enddo
      c0(k+1:nfft-1)=0.
-     call four2a(c0,nfft,1,-1,0)              !r2c FFT
+     call sfftw_execute(q65_work%symbol_plan)
      do i=1,iz
         s1(i,j)=real(c0(i))**2 + aimag(c0(i))**2
      enddo
@@ -400,14 +731,18 @@ subroutine q65_ccf_85(s1,iz,jz,nfqso,ia,ia2,ipk,jpk,f0,xdt,imsg_best,   &
 ! attempt at q3 decoding.  Return ccf1 for the "red sync curve".
   
   real s1(iz,jz)
-  real, allocatable :: ccf(:,:)          !CCF(freq,lag)
-  real, allocatable :: best(:)           !best(imsg) -- for checking 2nd best
+  real, pointer :: ccf(:,:),best(:)
   real ccf1(-ia2:ia2)
   integer ijpk(2)
   integer itone(85)
 
-  allocate(ccf(-ia2:ia2,-53:214))
-  allocate(best(ncw))
+  if(allocated(q65_work%list_correlation)) then
+     if(size(q65_work%list_correlation,1)/=2*ia2+1) deallocate(q65_work%list_correlation)
+  endif
+  if(.not.allocated(q65_work%list_correlation)) allocate(q65_work%list_correlation(-ia2:ia2,-53:214))
+  if(.not.allocated(q65_work%best_list)) allocate(q65_work%best_list(Q65_MAX_CODEWORDS))
+  ccf=>q65_work%list_correlation
+  best=>q65_work%best_list(:ncw)
   ipk=0
   jpk=0
   ccf_best=0.
@@ -455,11 +790,10 @@ subroutine q65_ccf_85(s1,iz,jz,nfqso,ia,ia2,ipk,jpk,f0,xdt,imsg_best,   &
      best(imsg)=ccfmax
   enddo  ! imsg
 
-  deallocate(ccf)
   better=0.
   if(imsg_best.gt.0) then
      best(imsg_best)=0.
-     better=ccf_best/maxval(best)
+     if(maxval(best)>0.) better=ccf_best/maxval(best)
   endif
 
   return
@@ -473,13 +807,18 @@ subroutine q65_ccf_22(s1,iz,jz,nfqso,ntol,ipk,jpk,f0,xdt,ccf2)
   real s1(iz,jz)
   real ccf2(iz)                               !Orange sync curve
   real tmp(20,3)
-  real, allocatable :: xdt2(:)
-  real, allocatable :: s1avg(:)
-  integer, allocatable :: indx(:)
+  real, pointer :: xdt2(:),s1avg(:)
+  integer, pointer :: indx(:)
 
-  allocate(xdt2(iz))
-  allocate(s1avg(iz))
-  allocate(indx(iz))
+  if(allocated(q65_work%timing)) then
+     if(size(q65_work%timing)<iz) deallocate(q65_work%timing,q65_work%spectrum_average,q65_work%ordering)
+  endif
+  if(.not.allocated(q65_work%timing)) then
+     allocate(q65_work%timing(iz),q65_work%spectrum_average(iz),q65_work%ordering(iz))
+  endif
+  xdt2=>q65_work%timing(:iz)
+  s1avg=>q65_work%spectrum_average(:iz)
+  indx=>q65_work%ordering(:iz)
 
   ia=max(nfa,100)/df
   ib=min(nfb,4900)/df
@@ -487,7 +826,20 @@ subroutine q65_ccf_22(s1,iz,jz,nfqso,ntol,ipk,jpk,f0,xdt,ccf2)
      ia=max(nint(100/df),nint((nfqso-ntol)/df))
      ib=min(nint(4900/df),nint((nfqso+ntol)/df))
   endif
-  if(ia.ge.ib) ia=ib-ntol/df                  !Protect against wacky settings
+  if(ia.ge.ib) ia=ib-ntol/df
+  ia=max(1,ia)
+  ib=min(iz,ib)
+  if(ia>ib) then
+     ipk=0
+     jpk=0
+     f0=nfqso
+     xdt=0.
+     drift=0.
+     ncand=0
+     candidates=0.
+     ccf2=0.
+     return
+  endif
 
   do i=ia,ib
      s1avg(i)=sum(s1(i,1:jz))
@@ -551,6 +903,8 @@ subroutine q65_ccf_22(s1,iz,jz,nfqso,ntol,ipk,jpk,f0,xdt,ccf2)
   call pctile(ccf2(ia:ib),jzz,84,base)
   rms=base-ave
   ncand=0
+  candidates=0.
+  if(rms<=0.) return
   maxcand=20
   do j=1,20
      k=jzz-j+1
@@ -586,7 +940,7 @@ subroutine q65_dec1(s3,nsubmode,b90ts,esnodb,irc,dat4,decoded)
 ! Attmpt a full-AP list decode.
 
   use packjt77
-  real s3(1,1)       !Silence compiler warning that wants to see a 2D array
+  real s3(64*(2+2**nsubmode),63)
   real s3prob(0:63,63)                   !Symbol-value probabilities
   integer dat4(13)
   character c77*77,decoded*37
@@ -594,13 +948,19 @@ subroutine q65_dec1(s3,nsubmode,b90ts,esnodb,irc,dat4,decoded)
 
   nFadingModel=1
   decoded='                                     '
+  if(ncw<=0.or.maxval(s3)<=0.) then
+     dat4=0
+     esnodb=0.
+     irc=-1
+     return
+  endif
   call q65_intrinsics_ff(s3,nsubmode,b90ts,nFadingModel,s3prob)
   call q65_dec_fullaplist(s3,s3prob,codewords,ncw,esnodb,dat4,plog,irc)
   if(sum(dat4).le.0) irc=-2
   if(irc.ge.0 .and. plog.gt.PLOG_MIN) then
      write(c77,1000) dat4(1:12),dat4(13)/2
 1000 format(12b6.6,b5.5)
-     call unpack77(c77,0,decoded,unpk77_success) !Unpack to get msgsent
+     call q65_unpack(c77,0,decoded,unpk77_success) !Unpack to get msgsent
   else
      irc=-1
   endif
@@ -614,7 +974,7 @@ subroutine q65_dec2(s3,nsubmode,b90ts,esnodb,irc,dat4,decoded)
 ! Attempt a q0, q1, or q2 decode using spcified AP information.
 
   use packjt77
-  real s3(iz0,jz0)       !Silence compiler warning that wants to see a 2D array
+  real s3(64*(2+2**nsubmode),63)
   real s3prob(0:63,63)                   !Symbol-value probabilities
   integer dat4(13)
   character c77*77,decoded*37
@@ -622,6 +982,10 @@ subroutine q65_dec2(s3,nsubmode,b90ts,esnodb,irc,dat4,decoded)
 
   nFadingModel=1
   decoded='                                     '
+  dat4=0
+  esnodb=0.
+  irc=-1
+  if(maxval(s3)<=0.) return
   call q65_intrinsics_ff(s3,nsubmode,b90ts,nFadingModel,s3prob)
   call q65_dec(s3,s3prob,APmask,APsymbols,maxiters,esnodb,dat4,irc)
   if(sum(dat4).le.0) irc=-2
@@ -629,7 +993,7 @@ subroutine q65_dec2(s3,nsubmode,b90ts,esnodb,irc,dat4,decoded)
   if(irc.ge.0) then
      write(c77,1000) dat4(1:12),dat4(13)/2
 1000 format(12b6.6,b5.5)
-     call unpack77(c77,0,decoded,unpk77_success) !Unpack to get msgsent
+     call q65_unpack(c77,0,decoded,unpk77_success) !Unpack to get msgsent
   endif
 
   return
@@ -668,9 +1032,6 @@ subroutine q65_write_red(iz,xdt,ccf2_avg,ccf2)
 
   real ccf2_avg(iz)
   real ccf2(iz)
-
-  call q65_sync_curve(ccf2_avg,1,iz,rms1)
-  call q65_sync_curve(ccf2,1,iz,rms2)
 
   i1=max(1,nint(nfa/df))
   i2=min(iz,int(nfb/df))
@@ -720,9 +1081,13 @@ subroutine q65_bzap(s3,LL)
   parameter (NBZAP=15)
   real s3(-64:LL-65,63)
   integer ipk1(1)
-  integer, allocatable :: hist(:)
+  integer, pointer :: hist(:)
 
-  allocate(hist(-64:LL-65))
+  if(allocated(q65_work%birdie_histogram)) then
+     if(size(q65_work%birdie_histogram)<LL) deallocate(q65_work%birdie_histogram)
+  endif
+  if(.not.allocated(q65_work%birdie_histogram)) allocate(q65_work%birdie_histogram(-64:LL-65))
+  hist(-64:)=>q65_work%birdie_histogram(-64:LL-65)
   hist=0
   do j=1,63
      ipk1=maxloc(s3(:,j))
@@ -746,9 +1111,13 @@ subroutine q65_snr(dat4,dtdec,f0dec,mode_q65,snr2)
   integer dat4(13)
   integer codeword(63)
   integer itone(85)
-  real, allocatable :: spec(:)
+  real, pointer :: spec(:)
 
-  allocate(spec(iz0))
+  if(allocated(q65_work%snr_spectrum)) then
+     if(size(q65_work%snr_spectrum)<iz0) deallocate(q65_work%snr_spectrum)
+  endif
+  if(.not.allocated(q65_work%snr_spectrum)) allocate(q65_work%snr_spectrum(iz0))
+  spec=>q65_work%snr_spectrum(:iz0)
   call q65_enc(dat4,codeword)
   i=1
   k=0
@@ -799,20 +1168,19 @@ subroutine q65_hist(if0,msg0,dxcall,dxgrid)
   parameter (MAXHIST=100)
   integer,intent(in) :: if0                         !Audio freq of decode
   character(len=37),intent(in),optional :: msg0     !Decoded message
-  character(len=12),intent(out),optional :: dxcall  !Second callsign in message
-  character(len=6),intent(out),optional :: dxgrid   !Third word in msg, if grid
+  character(len=12),intent(inout),optional :: dxcall  !Second callsign in message
+  character(len=6),intent(inout),optional :: dxgrid   !Third word in msg, if grid
 
   character*6 g1
-  character*37 msg(MAXHIST)                      !Saved messages
-  integer nf0(MAXHIST)                           !Saved frequencies
+  character(len=37), pointer :: msg(:)
   logical isgrid                                 !Statement function
-  data nhist/0/
-  save nhist,nf0,msg
+
 
   isgrid(g1)=g1(1:1).ge.'A' .and. g1(1:1).le.'R' .and. g1(2:2).ge.'A' .and. &
        g1(2:2).le.'R' .and. g1(3:3).ge.'0' .and. g1(3:3).le.'9' .and.       &
        g1(4:4).ge.'0' .and. g1(4:4).le.'9' .and. g1(1:4).ne.'RR73'
 
+  msg=>q65_work%history
   if(present(dxcall)) go to 100                  !This is a lookup request
 
   if(nhist.eq.MAXHIST) then
@@ -844,66 +1212,21 @@ subroutine q65_hist(if0,msg0,dxcall,dxgrid)
 900 return
 end subroutine q65_hist
 
-subroutine q65_hist2(nfreq,msg0,callers,nhist2)
+subroutine q65_hist2(nfreq,msg0,callers,nhist2,persist)
 
-  use types
-  use prog_args
-  parameter (MAX_CALLERS=50)  !For multiple q3 decodes in NA VHF Contest mode
-  character*37 msg0,msg
-  type(q3list) callers(MAX_CALLERS)
-  character*6 c6
-  character*4 g4
-  logical newcall,isgrid
+  use types, only: q3list
+  use prog_args, only: data_dir
+  use q65_callers, only: Q65_MAX_CALLERS,q65_record_caller,q65_save_callers
+  implicit none
+  integer, intent(in) :: nfreq
+  character(len=*), intent(in) :: msg0
+  type(q3list), intent(inout) :: callers(Q65_MAX_CALLERS)
+  integer, intent(inout) :: nhist2
+  logical, intent(in) :: persist
+  integer :: status,time
 
-  isgrid(g4)=g4(1:1).ge.'A' .and. g4(1:1).le.'R' .and. g4(2:2).ge.'A' .and. &
-       g4(2:2).le.'R' .and. g4(3:3).ge.'0' .and. g4(3:3).le.'9' .and.       &
-       g4(4:4).ge.'0' .and. g4(4:4).le.'9' .and. g4(1:4).ne.'RR73'
-
-  msg=msg0
-  if(index(msg,'/').gt.0) goto 900         !Ignore messages with compound calls
-  i0=index(msg,' R ')
-  if(i0.ge.7) msg=msg(1:i0)//msg(i0+3:)
-  i1=index(msg,' ')
-  c6='      '
-  g4='    '
-  if(i1.ge.4 .and. i1.le.13) then
-     i2=index(msg(i1+1:),' ') + i1
-     c6=msg(i1+1:i2-1)                     !Extract DX call
-     g4=msg(i2+1:i2+4)                     !Extract DX grid
-  endif
-
-  newcall=.true.
-  do i=1,nhist2
-     if(callers(i)%call .eq. c6) then
-        newcall=.false.
-        callers(i)%nsec=time()
-        callers(i)%nfreq=nfreq
-        exit
-     endif
-  enddo
-
-  if(newcall .and. isgrid(g4)) then
-     if(nhist2.eq.MAX_CALLERS) then
-! Purge the oldest caller
-        callers(1:MAX_CALLERS-1)=callers(2:MAX_CALLERS)
-        nhist2=nhist2-1
-     endif
-     nhist2=nhist2+1
-     callers(nhist2)%call=c6
-     callers(nhist2)%grid=g4
-     callers(nhist2)%nsec=time()
-     callers(nhist2)%nfreq=nfreq
-  endif
-
-  if(nhist2.ge.1 .and. nhist2.le.40) then
-     open(24,file=trim(data_dir)//'/tsil.3q',status='unknown',     &
-          form='unformatted')
-     write(24) nhist2
-     write(24) callers(1:nhist2)
-     close(24)
-  endif
-
-900 return
+  call q65_record_caller(callers,nhist2,nfreq,msg0,time())
+  if(persist) call q65_save_callers(trim(data_dir)//'/tsil.3q',callers,nhist2,status)
 end subroutine q65_hist2
 
 end module q65

@@ -42,6 +42,7 @@ private:
     QVERIFY (qMetaTypeId<TxAudioQueueEpoch> () != QMetaType::UnknownType);
     QVERIFY (qMetaTypeId<TxAudioQueueProgress> () != QMetaType::UnknownType);
     QVERIFY (qMetaTypeId<TxAudioQueueDrainState> () != QMetaType::UnknownType);
+    QVERIFY (qMetaTypeId<TxAudioQueueEnqueueFailure> () != QMetaType::UnknownType);
     QVERIFY (qMetaTypeId<TxAudioQueueEnqueueResult> () != QMetaType::UnknownType);
     QVERIFY (epoch (1) == epoch (1));
     QVERIFY (epoch (1) != epoch (2));
@@ -57,6 +58,7 @@ private:
     QVector<qint16> const first {1, 2, 3};
     auto result = queue.enqueue (first, current);
     QVERIFY (result.accepted);
+    QCOMPARE (result.failure, TxAudioQueueEnqueueFailure::None);
     QCOMPARE (result.progress.epoch, current);
     QCOMPARE (result.progress.queued_samples, qint64 (3));
     QCOMPARE (result.progress.served_samples, qint64 (0));
@@ -95,6 +97,7 @@ private:
     qint16 const stale_sample {9};
     auto const rejected = queue.enqueue (&stale_sample, 1, epoch (22));
     QVERIFY (!rejected.accepted);
+    QCOMPARE (rejected.failure, TxAudioQueueEnqueueFailure::StaleEpoch);
     QCOMPARE (rejected.progress.epoch, current);
     QCOMPARE (rejected.progress.queued_samples, qint64 (2));
     QCOMPARE (rejected.progress.served_samples, qint64 (0));
@@ -102,8 +105,11 @@ private:
 
     auto const empty = queue.enqueue (nullptr, 0, current);
     QVERIFY (empty.accepted);
+    QCOMPARE (empty.failure, TxAudioQueueEnqueueFailure::None);
     QCOMPARE (empty.progress.total_samples, qint64 (2));
-    QVERIFY (!queue.enqueue (nullptr, 0, epoch (99)).accepted);
+    auto const stale_empty = queue.enqueue (nullptr, 0, epoch (99));
+    QVERIFY (!stale_empty.accepted);
+    QCOMPARE (stale_empty.failure, TxAudioQueueEnqueueFailure::StaleEpoch);
   }
 
   Q_SLOT void pending_reset_excludes_aborted_samples ()
@@ -147,6 +153,7 @@ private:
 
     auto const rejected = queue.enqueue (QVector<qint16> {12, 13}, current);
     QVERIFY (!rejected.accepted);
+    QCOMPARE (rejected.failure, TxAudioQueueEnqueueFailure::Capacity);
     QCOMPARE (rejected.progress.queued_samples, qint64 (2));
     QCOMPARE (rejected.progress.total_samples, qint64 (2));
 

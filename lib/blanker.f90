@@ -1,31 +1,31 @@
-subroutine blanker(iwave,nz,ndropmax,npct,c_bigfft)
+subroutine blanker(iwave,nz,ndropmax,npct,c_bigfft,hist)
 
-  integer*2 iwave(nz)
+  integer*2, intent(in) :: iwave(nz)
   complex c_bigfft(0:nz/2)
-  integer hist(0:32768)
+  integer, intent(inout) :: hist(0:32768)
   real fblank                     !Fraction of points to be blanked
-  save hist
 
-  fblank=0.01*npct
-  hist=0
-  do i=1,nz
-! ### NB: if iwave(i)=-32768, abs(iwave(i))=-32768 ###
-     if(iwave(i).eq.-32768) iwave(i)=-32767
-     n=abs(iwave(i))
-     hist(n)=hist(n)+1
-  enddo
-  n=0
-  do i=32768,0,-1
-     n=n+hist(i)
-     if(n.ge.nint(nz*fblank/ndropmax)) exit
-  enddo
-  nthresh=i
+  nthresh=32768
+  if(npct>0) then
+     fblank=0.01*npct
+     hist=0
+     do i=1,nz
+        n=abs(max(-32767,int(iwave(i))))
+        hist(n)=hist(n)+1
+     enddo
+     n=0
+     do i=32768,0,-1
+        n=n+hist(i)
+        if(n.ge.nint(nz*fblank/ndropmax)) exit
+     enddo
+     nthresh=i
+  endif
   ndrop=0
   ndropped=0
 
   xx=0.
   do i=1,nz
-     i0=iwave(i)
+     i0=max(-32767,int(iwave(i)))
      if(ndrop.gt.0) then
         i0=0
         ndropped=ndropped+1

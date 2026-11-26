@@ -35,6 +35,16 @@ namespace Jtty
     }
     void abort () { *this = N1mmOutput {}; }
 
+    // An externally triggered abort (operator stop, watchdog) must resolve
+    // outstanding requests and close the transaction so OUTPUTCOMPLETE can
+    // still be reported. Explicit N1MM ABORT uses abort(), which discards it.
+    void externalAbort ()
+    {
+      requests_.clear ();
+      startRequested_ = false;
+      if (completionPending_) finishRequested_ = true;
+    }
+
     bool takeCompletion (bool audioActive, bool drained = false)
     {
       // Rejections can precede more TXTEXT in the same transaction. OFF

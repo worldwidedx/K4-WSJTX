@@ -1,7 +1,9 @@
 #ifndef DECODER_IPC_PROTOCOL_H
 #define DECODER_IPC_PROTOCOL_H
 
-#define DECODER_IPC_VERSION 2
+#include <stdint.h>
+
+#define DECODER_IPC_VERSION 4
 
 enum decoder_ipc_state
 {
@@ -18,5 +20,12 @@ typedef struct decoder_ipc_control {
   int version;
   int progress;
 } decoder_ipc_control_t;
+
+typedef struct decoder_input_metadata {
+  int64_t input_id;
+  int64_t analysis_id;
+  int32_t attempt_no;
+  int32_t valid_samples;
+} decoder_input_metadata_t;
 
 #endif

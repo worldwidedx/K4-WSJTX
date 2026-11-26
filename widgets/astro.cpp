@@ -8,6 +8,8 @@
 #include <QTimeZone>
 #include <QDir>
 #include <QCloseEvent>
+#include <QScreen>
+#include <QRegion>
 #include <QDebug>
 #include <math.h>
 
@@ -22,7 +24,8 @@
 
 extern "C" {
   void astrosub(int nyear, int month, int nday, double uth, double freqMoon,
-                const char * mygrid, const char * hisgrid,
+                const char * mygrid, const char * hisgrid, bool use_home_coordinates,
+                double home_latitude, double home_longitude,
                 double * azsun, double * elsun, double * azmoon,
                 double * elmoon, double * azmoondx, double * elmoondx, int * ntsky,
                 int * ndop, int * ndop00, double * ramoon, double * decmoon, double * dgrd,
@@ -108,7 +111,52 @@ void Astro::write_settings ()
   settings_->setValue ("LockSkedFreq",ui_->cbLockSkedFreq->isChecked());
 }
 
-auto Astro::astroUpdate(QDateTime const& t, QString const& mygrid, QString const& hisgrid, Frequency freq,
+void Astro::showEvent (QShowEvent * event)
+{
+  QDialog::showEvent (event);
+  ensure_visible ();
+}
+
+void Astro::resizeEvent (QResizeEvent * event)
+{
+  QDialog::resizeEvent (event);
+  if (isVisible ()) ensure_visible ();
+}
+
+void Astro::ensure_visible ()
+{
+  auto const frame = frameGeometry ();
+  auto screen = QGuiApplication::primaryScreen ();
+  int largest_overlap = 0;
+  for (auto candidate : QGuiApplication::screens ())
+    {
+      auto const available = candidate->availableGeometry ();
+      if (available.contains (frame)) return;
+      QRegion uncovered {frame};
+      for (auto sibling : candidate->virtualSiblings ())
+        uncovered -= QRegion {sibling->availableGeometry ()};
+      if (uncovered.isEmpty ()) return;
+      auto const overlap = frame.intersected (available);
+      auto const area = overlap.width () * overlap.height ();
+      if (area > largest_overlap)
+        {
+          screen = candidate;
+          largest_overlap = area;
+        }
+    }
+  if (!screen) return;
+
+  auto const available = screen->availableGeometry ();
+  // Oversized fixed layouts stay anchored at the top so the title bar is reachable.
+  auto const x = qBound (available.left (), frame.left (),
+                        qMax (available.left (), available.right () - frame.width () + 1));
+  auto const y = qBound (available.top (), frame.top (),
+                        qMax (available.top (), available.bottom () - frame.height () + 1));
+  move (pos () + QPoint {x, y} - frame.topLeft ());
+}
+
+auto Astro::astroUpdate(QDateTime const& t, QString const& mygrid, QString const& hisgrid,
+     bool use_home_coordinates, double home_latitude, double home_longitude, Frequency freq,
      bool bEchoMode, bool bTx, bool bAuto, bool no_tx_QSY, double TR_period) -> Correction
 {
   Frequency freq_moon {freq};
@@ -133,7 +181,7 @@ auto Astro::astroUpdate(QDateTime const& t, QString const& mygrid, QString const
   // changed argument from &dgrd to &m_dgrd added for Bob KA1GT 
   astrosub(nyear, month, nday, uth, static_cast<double> (freq_moon),
            mygrid.toLatin1 ().data (),
-           hisgrid.toLatin1().data(),
+           hisgrid.toLatin1().data(), use_home_coordinates, home_latitude, home_longitude,
            &azsun, &elsun, &azmoon, &elmoon,
            &azmoondx, &elmoondx, &ntsky, &m_dop, &m_dop00, &ramoon, &decmoon,
            &m_dgrd, &poloffset, &xnr, extraazel, &techo, &width1, &width2,
@@ -308,7 +356,7 @@ auto Astro::astroUpdate(QDateTime const& t, QString const& mygrid, QString const
         double uth {nhr + nmin/60.0 + sec/3600.0};
         astrosub(nyear, month, nday, uth, static_cast<double> (freq_moon),
                   mygrid.toLatin1 ().data (),
-                  hisgrid.toLatin1().data(),
+                  hisgrid.toLatin1().data(), use_home_coordinates, home_latitude, home_longitude,
                   &azsun, &elsun, &azmoon, &elmoon,
                   &azmoondx, &elmoondx, &ntsky, &m_dop, &m_dop00, &ramoon, &decmoon,
                   &dgrd, &poloffset, &xnr, extraazel, &techo, &width1, &width2,

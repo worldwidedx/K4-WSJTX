@@ -8,6 +8,10 @@ Transceiver::Transceiver (logger_type * logger, QObject * parent)
   : QObject {parent}
   , logger_ {logger}
 {
+  qRegisterMetaType<RigFrequency::Request> ("RigFrequency::Request");
+  qRegisterMetaType<RigFrequency::Result> ("RigFrequency::Result");
+  qRegisterMetaType<RigFrequency::Evidence> ("RigFrequency::Evidence");
+  qRegisterMetaType<ModeStatus> ("Transceiver::ModeStatus");
 }
 
 #if !defined (QT_NO_DEBUG_STREAM)
@@ -23,6 +27,8 @@ QDebug operator << (QDebug d, Transceiver::TransceiverState const& s)
     << "; TUNE: " << (s.tune_ ? "on" : "off")
     << "; QUICK: " << (s.quick_ ? "on" : "off")
     << "; PERIOD: " << s.period_ << "sec."
+    << "; RECEIVE_POLICY: " << int (s.receive_policy_)
+    << "; RECEIVE_CONTEXT: " << s.receive_context_
     << "; BLOCKSIZE: " << s.blocksize_
     << "; SYMBOLSLENGTH: " << s.tx_request_.symbols_length
     << "; FRAMESPERSYMBOL: " << s.tx_request_.frames_per_symbol
@@ -38,6 +44,7 @@ QDebug operator << (QDebug d, Transceiver::TransceiverState const& s)
     << "; LEVEL: " << s.level_ << "dBm"
     << "; POWER: " << s.power_ << "mWatts"
     << "; SWR: " << s.swr_
+    << "; TUNING_RANGES: " << s.tuning_ranges_.size ()
     << "; TX_SESSION: " << s.tx_request_.session_id.value ()
     << "; TX_GENERATION: " << s.tx_request_.generation.value ()
     << ")\n";
@@ -75,6 +82,8 @@ bool operator != (Transceiver::TransceiverState const& lhs, Transceiver::Transce
   return lhs.online_ != rhs.online_
     || lhs.rx_frequency_ != rhs.rx_frequency_
     || lhs.tx_frequency_ != rhs.tx_frequency_
+    || !RigFrequency::same_operation (lhs.frequency_requests_[0], rhs.frequency_requests_[0])
+    || !RigFrequency::same_operation (lhs.frequency_requests_[1], rhs.frequency_requests_[1])
     || lhs.mode_ != rhs.mode_
     || lhs.split_ != rhs.split_
     || lhs.ptt_ != rhs.ptt_
@@ -83,6 +92,8 @@ bool operator != (Transceiver::TransceiverState const& lhs, Transceiver::Transce
     || lhs.tune_ != rhs.tune_
     || lhs.quick_ != rhs.quick_
     || lhs.period_ != rhs.period_
+    || lhs.receive_policy_ != rhs.receive_policy_
+    || lhs.receive_context_ != rhs.receive_context_
     || lhs.blocksize_ != rhs.blocksize_
     || lhs.tx_request_ != rhs.tx_request_
     || lhs.spread_ != rhs.spread_
@@ -91,7 +102,8 @@ bool operator != (Transceiver::TransceiverState const& lhs, Transceiver::Transce
     || lhs.txvolume_ != rhs.txvolume_
     || lhs.level_ != rhs.level_
     || lhs.power_ != rhs.power_
-    || lhs.swr_ != rhs.swr_;
+    || lhs.swr_ != rhs.swr_
+    || lhs.tuning_ranges_ != rhs.tuning_ranges_;
 }
 
 bool operator == (Transceiver::TransceiverState const& lhs, Transceiver::TransceiverState const& rhs)

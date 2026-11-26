@@ -57,6 +57,9 @@ public:
   Correction astroUpdate(QDateTime const& t,
                          QString const& mygrid,
                          QString const& hisgrid,
+                         bool use_home_coordinates,
+                         double home_latitude,
+                         double home_longitude,
                          Frequency frequency,
                          bool dx_is_self,
                          bool bTx,
@@ -78,6 +81,8 @@ public:
   Q_SIGNAL void skedFreq(double freqMHz) const;
 
 protected:
+  void showEvent (QShowEvent *) override;
+  void resizeEvent (QResizeEvent *) override;
   void hideEvent (QHideEvent *) override;
   void closeEvent (QCloseEvent *) override;
 
@@ -95,6 +100,7 @@ private:
   void read_settings ();
   void write_settings ();
   void check_split ();
+  void ensure_visible ();
 
   QSettings * settings_;
   Configuration const * configuration_;

@@ -5,6 +5,7 @@
 #include <QSettings>
 #include <QDateTime>
 #include <QKeyEvent>
+#include <QTranslator>
 #include <math.h>
 #include "ui_widegraph.h"
 #include "commons.h"
@@ -14,6 +15,26 @@
 #include "PerformanceTrace.hpp"
 #include "moc_widegraph.cpp"
 
+namespace
+{
+  QString const user_defined_palette_id {QStringLiteral ("User Defined")};
+
+  bool is_legacy_user_palette (QString const& name)
+  {
+    QDir const translations {":/Translations"};
+    for (auto const& catalog : translations.entryList ({"wsjtx_*.qm"}, QDir::Files))
+      {
+        QTranslator translator;
+        if (translator.load (catalog, translations.path ()))
+          {
+            auto const label = translator.translate ("WideGraph", "User Defined");
+            if (!label.isEmpty () && label == name) return true;
+          }
+      }
+    return false;
+  }
+}
+
 WideGraph::WideGraph(QSettings * settings, QWidget *parent) :
   QDialog(parent),
   ui(new Ui::WideGraph),
@@ -21,8 +42,7 @@ WideGraph::WideGraph(QSettings * settings, QWidget *parent) :
   m_palettes_path {":/Palettes"},
   m_tr0 {0.0},
   m_n {0},
-  m_bHaveTransmitted {false},
-  m_user_defined {tr ("User Defined")}
+  m_bHaveTransmitted {false}
 {
   PerformanceTrace::Phase construction {"widegraph.construct"};
   ui->setupUi(this);
@@ -44,8 +64,8 @@ WideGraph::WideGraph(QSettings * settings, QWidget *parent) :
   connect(ui->widePlot, SIGNAL(setFreq1(int,int)),this,
           SLOT(setFreq2(int,int)));
 
-  connect(ui->widePlot, SIGNAL(jttyDecodeAgainAt(float)),this,
-          SLOT(wideJttyDecodeAgainAt(float)));
+  connect (ui->widePlot, &CPlotter::jttyDecodeAgainAtSample,
+           this, &WideGraph::jttyDecodeAgainAtSample);
 
   {
     //Restore user's settings
@@ -107,19 +127,24 @@ WideGraph::WideGraph(QSettings * settings, QWidget *parent) :
     ui->cbControls->setChecked(!m_settings->value("HideControls",false).toBool());
   }
 
-  int index=0;
   for (QString const& file:
          m_palettes_path.entryList(QDir::NoDotAndDotDot |
                                    QDir::System | QDir::Hidden |
                                    QDir::AllDirs | QDir::Files,
                                    QDir::DirsFirst)) {
     QString t=file.mid(0,file.length()-4);
-    ui->paletteComboBox->addItem(t);
-    if(t==m_waterfallPalette) ui->paletteComboBox->setCurrentIndex(index);
-    index++;
+    ui->paletteComboBox->addItem(t, t);
   }
-  ui->paletteComboBox->addItem (m_user_defined);
-  if (m_user_defined == m_waterfallPalette) ui->paletteComboBox->setCurrentIndex(index);
+  ui->paletteComboBox->addItem (tr ("User Defined"), user_defined_palette_id);
+  auto index = ui->paletteComboBox->findData (m_waterfallPalette);
+  if (index < 0 && (m_waterfallPalette == tr ("User Defined")
+                    || is_legacy_user_palette (m_waterfallPalette)))
+    {
+      // Legacy settings can identify the custom palette by any bundled translation.
+      m_waterfallPalette = user_defined_palette_id;
+      index = ui->paletteComboBox->findData (m_waterfallPalette);
+    }
+  if (index >= 0) ui->paletteComboBox->setCurrentIndex (index);
   readPalette ();
 }
 
@@ -230,8 +255,60 @@ void WideGraph::on_bppSpinBox_valueChanged(int n)                            //b
   ui->widePlot->setBinsPerPixel(n);
 }
 
+void WideGraph::jttyDataSink (JttySpectrumFrame const& frame)
+{
+  if (m_jttyLastRow.reception &&
+      (m_jttyLastRow.reception != frame.row.reception ||
+       m_jttyLastRow.endSample != frame.row.beginSample)) {
+    jttyReceptionEnded ();
+  }
+  ui->widePlot->setJttySpectrum (frame.cumulative, frame.linearAverage);
+  if (ui->widePlot->TotalPower ()) ui->widePlot->drawTotalPower (frame.powerDb);
+  if (!m_jttySpectrumCount) m_jttyAverageRow = frame.row;
+  m_jttyAverageRow.endSample = frame.row.endSample;
+  m_jttyAverageRow.utcEndMs = frame.row.utcEndMs;
+  m_jttyLastRow = frame.row;
+  for (int i = 0; i < JttySpectrumFrame::BinCount; ++i) m_jttySpectrumSum[i] += frame.bins[i];
+  if (++m_jttySpectrumCount >= std::max (1, m_waterfallAvg)) drawJttyAverage ();
+}
+
+void WideGraph::drawJttyAverage ()
+{
+  if (!m_jttySpectrumCount) return;
+  int const nbpp = ui->widePlot->binsPerPixel ();
+  int bin = int (ui->widePlot->startFreq () / JttySpectrumFrame::BinWidth + 0.5);
+  m_jz = std::min (MAX_SCREENSIZE, int (5000.0f / (nbpp * JttySpectrumFrame::BinWidth)));
+  std::fill (std::begin (m_swide), std::end (m_swide), 0);
+  for (int pixel = 0; pixel < m_jz; ++pixel) {
+    double sum = 0;
+    for (int k = 0; k < nbpp; ++k, ++bin) {
+      if (bin >= 0 && bin < JttySpectrumFrame::BinCount - 1) sum += m_jttySpectrumSum[bin];
+    }
+    m_swide[pixel] = nbpp * sum / m_jttySpectrumCount;
+  }
+  ui->widePlot->setJttyRow (m_jttyAverageRow);
+  ui->widePlot->draw (m_swide, true, false);
+  m_jttySpectrumCount = 0;
+  m_jttySpectrumSum.fill (0);
+}
+
+void WideGraph::jttyReceptionEnded ()
+{
+  drawJttyAverage ();
+  if (m_jttyLastRow.reception) {
+    auto gap = m_jttyLastRow;
+    gap.beginSample = gap.endSample;
+    gap.gap = true;
+    std::fill (std::begin (m_swide), std::end (m_swide), 1.0e30f);
+    ui->widePlot->setJttyRow (gap);
+    ui->widePlot->draw (m_swide, true, false);
+  }
+  m_jttyLastRow = {};
+}
+
 void WideGraph::on_waterfallAvgSpinBox_valueChanged(int n)                  //Navg
 {
+  if (m_mode == "JTTY") drawJttyAverage ();
   m_waterfallAvg = n;
   ui->widePlot->setWaterfallAvg(n);
 }
@@ -277,11 +354,6 @@ void WideGraph::wideFreezeDecode(int n)                              //wideFreez
   emit freezeDecode2(n);
 }
 
-void WideGraph::wideJttyDecodeAgainAt(float secondsAgo)                //wideJttyDecodeAgainAt
-{
-  emit jttyDecodeAgainAt2(secondsAgo);
-}
-
 int WideGraph::Fmin()                                              //Fmin
 {
   return "60m" == m_rxBand ? 0 : m_fMinPerBand.value (m_rxBand, 2500).toUInt ();
@@ -323,6 +395,7 @@ void WideGraph::setTxFreq(int n)                                   //setTxFreq
 
 void WideGraph::setMode(QString mode)                              //setMode
 {
+  if (m_mode == "JTTY" && mode != m_mode) jttyReceptionEnded ();
   m_mode=mode;
   ui->fSplitSpinBox->setVisible(m_mode.startsWith("FST4"));
   ui->fSplitSpinBox->setEnabled(m_mode.startsWith("FST4"));
@@ -416,7 +489,7 @@ void WideGraph::readPalette ()                                   //readPalette
 {
   try
     {
-      if (m_user_defined == m_waterfallPalette)
+      if (user_defined_palette_id == m_waterfallPalette)
         {
           ui->widePlot->setColours (WFPalette {m_userPalette}.interpolate ());
         }
@@ -431,9 +504,9 @@ void WideGraph::readPalette ()                                   //readPalette
     }
 }
 
-void WideGraph::on_paletteComboBox_activated (QString const& palette)    //palette selector
+void WideGraph::on_paletteComboBox_activated (int index)    //palette selector
 {
-  m_waterfallPalette = palette;
+  m_waterfallPalette = ui->paletteComboBox->itemData (index).toString ();
   readPalette();
   replot();
 }
@@ -487,8 +560,8 @@ void WideGraph::on_adjust_palette_push_button_clicked (bool)   //Adjust Palette
     {
       if (m_userPalette.design ())
         {
-          m_waterfallPalette = m_user_defined;
-          ui->paletteComboBox->setCurrentText (m_waterfallPalette);
+          m_waterfallPalette = user_defined_palette_id;
+          ui->paletteComboBox->setCurrentIndex (ui->paletteComboBox->findData (m_waterfallPalette));
           readPalette ();
         }
     }

@@ -49,6 +49,7 @@ struct DecodeOperatingContext
 
   bool hasSameFt8PendingIdentity (DecodeOperatingContext const& other) const
   {
+    // A captured final remains usable when reception advances to the next period.
     return "FT8" == mode
       && "FT8" == other.mode
       && hasSameDecodeIdentity (other)

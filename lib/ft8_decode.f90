@@ -1,4 +1,8 @@
 module ft8_decode
+  use packjt77, only: pack77_state
+  use decoder_engine_types, only: ft8_signal_evidence
+
+  integer, parameter, private :: MAX_EARLY=200,NPTS=15*12000,NSAVED_TONES=79
 
   parameter (MAXFOX=1000)
   character*12 c2fox(MAXFOX)
@@ -11,13 +15,27 @@ module ft8_decode
 
   type :: ft8_decoder
      procedure(ft8_decode_callback), pointer :: callback
+     type(pack77_state), pointer :: knowledge => null()
+     real, allocatable :: dd(:),dd1(:)
+     integer :: nutc0=-1,ndec_early=0
+     logical :: audio_ready=.false.
+     integer, allocatable :: itone_save(:,:)
+     real, allocatable :: f1_save(:),xdt_save(:)
+     logical, allocatable :: lsubtracted(:)
+     character(len=37), allocatable :: allmessages(:)
+     integer, allocatable :: allsnrs(:)
    contains
+     procedure :: initialize => initialize_ft8_decoder
      procedure :: decode
+     procedure :: reset => reset_ft8_decoder
+     procedure :: release_input => release_ft8_input
   end type ft8_decoder
 
+  private :: initialize_ft8_decoder
+
   abstract interface
-     subroutine ft8_decode_callback (this,sync,snr,dt,freq,decoded,nap,qual)
-       import ft8_decoder
+     subroutine ft8_decode_callback (this,sync,snr,dt,freq,decoded,nap,qual,evidence)
+       import ft8_decoder,ft8_signal_evidence
        implicit none
        class(ft8_decoder), intent(inout) :: this
        real, intent(in) :: sync
@@ -27,10 +45,79 @@ module ft8_decode
        character(len=37), intent(in) :: decoded
        integer, intent(in) :: nap 
        real, intent(in) :: qual 
+       type(ft8_signal_evidence), intent(in), optional :: evidence
      end subroutine ft8_decode_callback
   end interface
 
+  interface
+     subroutine ft8apset(mycall12,hiscall12,ncontest,apsym,aph10,knowledge)
+       import pack77_state
+       character(len=12) :: mycall12,hiscall12
+       integer :: ncontest,apsym(58),aph10(10)
+       type(pack77_state), target, optional, intent(inout) :: knowledge
+     end subroutine
+     subroutine ft8b(dd0,newdat,nQSOProgress,nfqso,nftx,ndepth,nzhsym,lapon, &
+          lapcqonly,napwid,lsubtract,nagain,ncontest,imetric,iaptype,mycall12,hiscall12, &
+          f1,xdt,xbase,apsym,aph10,nharderrors,dmin,nbadcrc,ipass, &
+          msg37,xsnr,itone,knowledge,evidence)
+       import pack77_state,ft8_signal_evidence
+       real :: dd0(15*12000),f1,xdt,xbase,dmin,xsnr
+       logical :: newdat,lapon,lapcqonly,lsubtract,nagain
+       integer :: nQSOProgress,nfqso,nftx,ndepth,nzhsym,napwid,ncontest,imetric
+       integer :: iaptype,apsym(58),aph10(10),nharderrors,nbadcrc,ipass,itone(79)
+       character(len=12) :: mycall12,hiscall12
+       character(len=37) :: msg37
+       type(pack77_state), target, optional, intent(inout) :: knowledge
+       type(ft8_signal_evidence), optional, intent(out) :: evidence
+     end subroutine
+     subroutine ft8_a8d(dd,mycall,dxcall,dxgrid,f1a,xdt,fbest,xsnr,plog,msgbest, &
+          progress_generation,knowledge,evidence,worker_count)
+       import pack77_state,ft8_signal_evidence
+       real :: dd(15*12000),f1a,xdt,fbest,xsnr,plog
+       character(len=12) :: mycall,dxcall
+       character(len=6) :: dxgrid
+       character(len=37) :: msgbest
+       integer :: progress_generation
+       integer, intent(in), optional :: worker_count
+       type(pack77_state), target, optional, intent(inout) :: knowledge
+       type(ft8_signal_evidence), optional, intent(out) :: evidence
+     end subroutine
+  end interface
+
 contains
+
+  subroutine initialize_ft8_decoder(this)
+    class(ft8_decoder), intent(inout) :: this
+    if(.not.allocated(this%dd)) allocate(this%dd(NPTS),source=0.)
+    if(.not.allocated(this%dd1)) allocate(this%dd1(NPTS),source=0.)
+    if(.not.allocated(this%itone_save)) allocate(this%itone_save(NSAVED_TONES,MAX_EARLY),source=0)
+    if(.not.allocated(this%f1_save)) allocate(this%f1_save(MAX_EARLY),source=0.)
+    if(.not.allocated(this%xdt_save)) allocate(this%xdt_save(MAX_EARLY),source=0.)
+    if(.not.allocated(this%lsubtracted)) allocate(this%lsubtracted(MAX_EARLY),source=.false.)
+    if(.not.allocated(this%allmessages)) allocate(this%allmessages(MAX_EARLY),source=repeat(' ',37))
+    if(.not.allocated(this%allsnrs)) allocate(this%allsnrs(MAX_EARLY),source=0)
+  end subroutine initialize_ft8_decoder
+
+  subroutine reset_ft8_decoder(this)
+    class(ft8_decoder), intent(inout) :: this
+    call this%release_input()
+    this%nutc0=-1
+  end subroutine reset_ft8_decoder
+
+  subroutine release_ft8_input(this)
+    class(ft8_decoder), intent(inout) :: this
+    call this%initialize()
+    this%dd=0.
+    this%dd1=0.
+    this%ndec_early=0
+    this%audio_ready=.false.
+    this%itone_save=0
+    this%f1_save=0.
+    this%xdt_save=0.
+    this%lsubtracted=.false.
+    this%allmessages=''
+    this%allsnrs=0
+  end subroutine release_ft8_input
 
   subroutine decode(this,callback,iwave,nQSOProgress,nfqso,nftx,newdat,  &
        nutc,nfa,nfb,nzhsym,ndepth,emedelay,ncontest,nagain,lft8apon,     &
@@ -38,20 +125,19 @@ contains
     use iso_c_binding, only: c_bool, c_int
     use timer_module, only: timer
     use ft8_a7
+    use ft8_codec_context, only: get_ft8_codec_state
 
     include 'ft8/ft8_params.f90'
 
     class(ft8_decoder), intent(inout) :: this
     procedure(ft8_decode_callback) :: callback
-    parameter (MAXCAND=1000,MAX_EARLY=200,NPTS=15*12000)
+    parameter (MAXCAND=1000)
     real*8 tsec,tseq
     real sbase(NH1)
     real candidate(3,MAXCAND)
-    real dd(NPTS),dd1(NPTS)
     logical, intent(in) :: lft8apon,lapcqonly,nagain
     logical newdat,lsubtract,ldupe,lrefinedt,ltry_a8
     logical*1 ldiskdat
-    logical lsubtracted(MAX_EARLY)
     logical la8
     character*12 mycall12,hiscall12,call_1,call_2
     character*6 hisgrid
@@ -59,18 +145,19 @@ contains
     integer*2 iwave(NPTS)
     integer apsym2(58),aph10(10)
     character datetime*13,msg37*37
-    character*37 allmessages(MAX_EARLY)
     character*12 ctime
-    integer allsnrs(MAX_EARLY)
     integer itone(NN)
-    integer itone_save(NN,MAX_EARLY)
-    real f1_save(MAX_EARLY)
-    real xdt_save(MAX_EARLY)
-    data nutc0/-1/
-
-    save dd,dd1,nutc0,ndec_early,itone_save,f1_save,xdt_save,lsubtracted,  &
-         allmessages
+    type(ft8_signal_evidence) :: evidence
+    type(pack77_state), pointer :: codec
+    call this%initialize()
+    associate(dd=>this%dd,dd1=>this%dd1,nutc0=>this%nutc0, &
+         ndec_early=>this%ndec_early,itone_save=>this%itone_save, &
+         f1_save=>this%f1_save,xdt_save=>this%xdt_save, &
+         lsubtracted=>this%lsubtracted,allmessages=>this%allmessages, &
+         allsnrs=>this%allsnrs)
     this%callback => callback
+    codec => this%knowledge
+    if(.not.associated(codec)) codec => get_ft8_codec_state()
     write(datetime,1001) nutc        !### TEMPORARY ###
 1001 format("000000_",i6.6)
 
@@ -104,12 +191,18 @@ contains
     endif
     if(ndepth.eq.1 .and. nzhsym.eq.50) then
        dd=iwave
+       this%audio_ready=.true.
     endif
-    call ft8apset(mycall12,hiscall12,ncontest,apsym2,aph10)
+    call ft8apset(mycall12,hiscall12,ncontest,apsym2,aph10,codec)
 
     if(nzhsym.le.47) then
        dd=iwave
        dd1=dd
+       this%audio_ready=.true.
+    endif
+    if(nzhsym.eq.50 .and. .not.this%audio_ready) then
+       dd=iwave
+       this%audio_ready=.true.
     endif
 
     if(nzhsym.eq.41) then
@@ -208,7 +301,7 @@ contains
         call ft8b(dd,newdat,nQSOProgress,nfqso,nftx,ndepth,nzhsym,lft8apon,  &
              lapcqonly,napwid,lsubtract,nagain,ncontest,imetric,iaptype,mycall12,   &
              hiscall12,f1,xdt,xbase,apsym2,aph10,nharderrors,dmin,          &
-             nbadcrc,iappass,msg37,xsnr,itone)
+             nbadcrc,iappass,msg37,xsnr,itone,codec,evidence)
         call timer('ft8b    ',1)
         nsnr=nint(xsnr)
         xdt=xdt-0.5
@@ -232,7 +325,7 @@ contains
            if(.not.ldupe .and. associated(this%callback)) then
               qual=1.0-(nharderrors+dmin)/60.0 ! scale qual to [0.0,1.0]
               if(emedelay.ne.0) xdt=xdt+2.0
-              call this%callback(sync,nsnr,xdt,f1,msg37,iaptype,qual)
+              call this%callback(sync,nsnr,xdt,f1,msg37,iaptype,qual,evidence)
               call ft8_a7_save(jseq,xdt,f1,msg37)  !Enter decode in table
            endif
         endif
@@ -268,7 +361,7 @@ contains
          msg37='                                     '
          call timer('ft8_a7d ',0)
          call ft8_a7d(dd,newdat,call_1,call_2,grid4,xdt,f1,xbase,nharderrors,   &
-              dmin,msg37,xsnr)
+              dmin,msg37,xsnr,codec,evidence)
          call timer('ft8_a7d ',1)
 
          if(nharderrors.ge.0) then
@@ -277,7 +370,7 @@ contains
                iaptype=7
                qual=1.0
                if(index(msg37,trim(hiscall12)).gt.0) la8=.false.
-               call this%callback(sync,nsnr,xdt,f1,msg37,iaptype,qual)
+               call this%callback(sync,nsnr,xdt,f1,msg37,iaptype,qual,evidence)
                call ft8_a7_save(jseq,xdt,f1,msg37)  !Enter decode in table
             endif
          endif
@@ -290,7 +383,7 @@ contains
 ! Try for an a8 decode at nfqso
       f1=nfqso
       call timer('ft8_a8d ',0)
-      call ft8_a8d(dd,mycall12,hiscall12,hisgrid,f1,xdt,fbest,xsnr,plog,msg37,0)
+      call ft8_a8d(dd,mycall12,hiscall12,hisgrid,f1,xdt,fbest,xsnr,plog,msg37,0,codec,evidence)
       call timer('ft8_a8d ',1)
 
       if(msg37(1:1).ne.' ') then
@@ -300,12 +393,13 @@ contains
             iaptype=8
             qual=1.0
             if(plog.lt.-147.0) qual=0.16
-            call this%callback(sync,nsnr,xdt,fbest,msg37,iaptype,qual)
+            call this%callback(sync,nsnr,xdt,fbest,msg37,iaptype,qual,evidence)
             call ft8_a7_save(jseq,xdt,f1,msg37)  !Enter decode in the a7 table
          endif
       endif
    endif
 
+   end associate
    return
 end subroutine decode
 

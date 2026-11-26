@@ -1,7 +1,9 @@
 set (libq65_FSRCS
 # Modules come first:
+  qmap_params.f90
   qmap_decode_ipc.f90
   cacb_mod.f90
+  getcand2.f90
 
 # Non-module Fortran routines:
   astro.f90
@@ -16,7 +18,6 @@ set (libq65_FSRCS
   ftninit.f90
 #  ftnquit.f90
   geocentric.f90
-  getcand2.f90
   grid2deg.f90
   indexx.f90
   lorentzian.f90

@@ -53,7 +53,7 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
       release_channel: ${{ steps.v.outputs.release_channel }}
-      rc_number: ${{ steps.v.outputs.rc_number }}
+      prerelease_number: ${{ steps.v.outputs.prerelease_number }}
       save_linux_ccache: ${{ steps.ccache-policy.outputs.save_ccache }}
       build_linux_packages: ${{ steps.packaging-policy.outputs.build_packages }}
     steps:
@@ -65,15 +65,15 @@ jobs:
           STATE=$(python3 .github/scripts/release-policy.py read-state)
           VERSION=$(jq -r .version <<<"$STATE")
           CHANNEL=$(jq -r .channel <<<"$STATE")
-          RC_NUMBER=$(jq -r .rc <<<"$STATE")
-          if [[ "$CHANNEL" == "RC" ]]; then
-            VERSION="${VERSION}-rc${RC_NUMBER}"
+          RC_NUMBER=$(jq -r .prerelease <<<"$STATE")
+          if [[ "$CHANNEL" == "RC" || "$CHANNEL" == "BETA" ]]; then
+            VERSION="${VERSION}-${CHANNEL,,}${RC_NUMBER}"
           fi
           echo "Derived version from release-state.txt: $VERSION"
           {
             echo "version=$VERSION"
             echo "release_channel=$CHANNEL"
-            echo "rc_number=$RC_NUMBER"
+            echo "prerelease_number=$RC_NUMBER"
           } >> "$GITHUB_OUTPUT"
       # PRs can consume develop caches, so only trusted develop executions may
       # publish the Linux cache shared with later pull-request builds.
@@ -125,7 +125,7 @@ jobs:
       deployment_target: "11.0"
       recache: ${{ inputs.recache || false }}
       release_channel: ${{ needs.prepare.outputs.release_channel }}
-      rc_number: ${{ needs.prepare.outputs.rc_number }}
+      prerelease_number: ${{ needs.prepare.outputs.prerelease_number }}
 
   macos-intel:
     needs: [prepare]
@@ -144,7 +144,7 @@ jobs:
       deployment_target: "10.13"
       recache: ${{ inputs.recache || false }}
       release_channel: ${{ needs.prepare.outputs.release_channel }}
-      rc_number: ${{ needs.prepare.outputs.rc_number }}
+      prerelease_number: ${{ needs.prepare.outputs.prerelease_number }}
 
   linux:
     needs: [prepare]
@@ -155,7 +155,7 @@ jobs:
       hamlib_branch: "4.7.2"
       arch: "x86_64"
       release_channel: ${{ needs.prepare.outputs.release_channel }}
-      rc_number: ${{ needs.prepare.outputs.rc_number }}
+      prerelease_number: ${{ needs.prepare.outputs.prerelease_number }}
     secrets: inherit
 
   linux-sanitizers:
@@ -197,7 +197,7 @@ jobs:
       hamlib_branch: "4.7.2"
       arch: "aarch64"
       release_channel: ${{ needs.prepare.outputs.release_channel }}
-      rc_number: ${{ needs.prepare.outputs.rc_number }}
+      prerelease_number: ${{ needs.prepare.outputs.prerelease_number }}
     secrets: inherit
 
   windows:
@@ -214,4 +214,4 @@ jobs:
       hamlib_branch: "4.7.2"
       recache: ${{ inputs.recache || false }}
       release_channel: ${{ needs.prepare.outputs.release_channel }}
-      rc_number: ${{ needs.prepare.outputs.rc_number }}
+      prerelease_number: ${{ needs.prepare.outputs.prerelease_number }}
