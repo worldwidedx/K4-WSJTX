@@ -1,7 +1,8 @@
 subroutine astro(nyear,month,nday,uth,freq8,Mygrid,                    &
           NStation,MoonDX,AzSun,ElSun,AzMoon0,ElMoon0,                 &
           ntsky,doppler00,doppler,dbMoon,RAMoon,DecMoon,HA,Dgrd,sd,    &
-          poloffset,xnr,day,lon,lat,LST,techo,ephemeris_result)
+          poloffset,xnr,day,lon,lat,LST,techo,ephemeris_result,      &
+          use_home_coordinates,home_latitude,home_longitude)
 
   use jpl_ephemeris_status, only: EPHEMERIS_INVALID_INPUT,           &
        EPHEMERIS_UNAVAILABLE
@@ -9,7 +10,8 @@ subroutine astro(nyear,month,nday,uth,freq8,Mygrid,                    &
 ! NB: may want to smooth the Tsky map to 10 degrees or so.
 
   character*6 MyGrid,HisGrid
-  real*8 freq8
+  real*8 freq8,home_longitude,home_latitude
+  logical use_home_coordinates
   real LST
   real lat,lon
   integer ephemeris_result
@@ -42,6 +44,10 @@ subroutine astro(nyear,month,nday,uth,freq8,Mygrid,                    &
 
   call grid2deg(MyGrid,elon,lat)
   lon=-elon
+  if (use_home_coordinates) then
+     lon=home_longitude
+     lat=home_latitude
+  endif
   call sun(nyear,month,nday,uth,lon,lat,RASun,DecSun,LST,      &
        AzSun,ElSun,mjd,day)
 

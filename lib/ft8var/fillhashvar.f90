@@ -1,10 +1,20 @@
-subroutine fillhashvar(numthreads,lfill)
+subroutine fillhashvar(numthreads,lfill,knowledge)
 
   use packjt77
   use ft8_mod1, only : mycall,hiscall
   integer, intent(in) :: numthreads
   logical, intent(in) :: lfill
+  type(pack77_state), target, optional, intent(inout) :: knowledge
   character*13 cw
+
+  if(present(knowledge)) then
+    if(lfill) then
+      call fold_queued_calls_for_state(knowledge,numthreads)
+    else
+      call prepare_configured_decode_for_state(knowledge,mycall,hiscall)
+    endif
+    return
+  endif
 
   if(lfill) then
     ! End of a configured/var decode pass: merge per-thread successful decode

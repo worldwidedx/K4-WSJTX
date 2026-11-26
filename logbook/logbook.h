@@ -11,6 +11,7 @@
 #include <QScopedPointer>
 
 #include "WorkedBefore.hpp"
+#include "SpecialOperatingActivity.hpp"
 
 class Configuration;
 class QByteArray;
@@ -28,13 +29,27 @@ public:
   LogBook (Configuration const *);
   ~LogBook ();
   QString const& path () const {return worked_before_.path ();}
+  QString const& load_status () const {return worked_before_.load_status ();}
+  QString const& load_errors () const {return worked_before_.load_errors ();}
   bool add (QString const& call
             , QString const& grid
             , QString const& band
             , QString const& mode
             , QByteArray const& ADIF_record);
   AD1CCty const * countries () const {return worked_before_.countries ();}
+  // Call worked on band (any mode; any band if band is empty), counting only
+  // QSOs made on one of days (UTC) when the set is not empty.
+  bool call_worked_on_band (QString const& call, QString const& band, QSet<QDate> const& days) const
+  {
+    return worked_before_.call_worked_on_days (call, QString {}, band, days);
+  }
+  // Number of different calls worked on band (any mode), as above.
+  int calls_worked_on_band (QString const& band, QSet<QDate> const& days) const
+  {
+    return worked_before_.calls_worked_on_days (band, days);
+  }
   void rescan ();
+  bool erase_log () {return worked_before_.erase_log ();}
   void match (QString const& call, QString const& mode, QString const& grid,
               AD1CCty::Record const&, bool& callB4, bool& countryB4,
               bool &gridB4, bool &continentB4, bool& CQZoneB4, bool& ITUZoneB4,
@@ -45,11 +60,13 @@ public:
                         QString const& name, QString const& strDialFreq, QString const& myCall,
                         QString const& m_myGrid, QString const& m_txPower, QString const& operator_call,
                         QString const& xSent, QString const& xRcvd, QString const& propmode,
-                        QString const& satellite, QString const& satmode, QString const& freqRx);
+                        QString const& satellite, QString const& satmode, QString const& freqRx,
+                        SpecialOperatingActivity activity);
 
   QString const cty_version() const;
 
   Q_SIGNAL void finished_loading (int worked_before_record_count, QString const cty_version, QString const& error) const;
+  Q_SIGNAL void loading_started () const;
 
   CabrilloLog * contest_log ();
   Multiplier const * multiplier () const;

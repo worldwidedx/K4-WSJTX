@@ -19,7 +19,7 @@ jobs:
     outputs:
       version: ${{ steps.identity.outputs.version }}
       release_channel: ${{ steps.identity.outputs.channel }}
-      rc_number: ${{ steps.identity.outputs.rc_number }}
+      prerelease_number: ${{ steps.identity.outputs.prerelease_number }}
       macos_sign_mode: ${{ steps.identity.outputs.macos_sign_mode }}
       windows_signing: ${{ steps.identity.outputs.windows_signing }}
     steps:
@@ -41,7 +41,7 @@ jobs:
           {
             echo "version=$(jq -r .version <<<"$IDENTITY")"
             echo "channel=$(jq -r .channel <<<"$IDENTITY")"
-            echo "rc_number=$(jq -r .rc_number <<<"$IDENTITY")"
+            echo "prerelease_number=$(jq -r .prerelease_number <<<"$IDENTITY")"
             echo "windows_signing=$(jq -r .windows_signing <<<"$IDENTITY")"
           } >> "$GITHUB_OUTPUT"
           if [ "$MACOS_DISTRIBUTION_SIGNING_ENABLED" = true ]; then
@@ -77,7 +77,7 @@ jobs:
       runner: macos-15
       deployment_target: "11.0"
       release_channel: ${{ needs.prepare.outputs.release_channel }}
-      rc_number: ${{ needs.prepare.outputs.rc_number }}
+      prerelease_number: ${{ needs.prepare.outputs.prerelease_number }}
       signing_mode: ${{ needs.prepare.outputs.macos_sign_mode }}
 
   macos-intel:
@@ -93,7 +93,7 @@ jobs:
       runner: macos-15-intel
       deployment_target: "10.13"
       release_channel: ${{ needs.prepare.outputs.release_channel }}
-      rc_number: ${{ needs.prepare.outputs.rc_number }}
+      prerelease_number: ${{ needs.prepare.outputs.prerelease_number }}
       signing_mode: ${{ needs.prepare.outputs.macos_sign_mode }}
 
   linux:
@@ -112,7 +112,7 @@ jobs:
       image_digest: ${{ needs.linux-images.outputs.x86_64_digest }}
       build_packages: true
       release_channel: ${{ needs.prepare.outputs.release_channel }}
-      rc_number: ${{ needs.prepare.outputs.rc_number }}
+      prerelease_number: ${{ needs.prepare.outputs.prerelease_number }}
 
   linux-arm:
     needs: [prepare, linux-images]
@@ -130,7 +130,7 @@ jobs:
       image_digest: ${{ needs.linux-images.outputs.aarch64_digest }}
       build_packages: true
       release_channel: ${{ needs.prepare.outputs.release_channel }}
-      rc_number: ${{ needs.prepare.outputs.rc_number }}
+      prerelease_number: ${{ needs.prepare.outputs.prerelease_number }}
 
   linux-armhf:
     needs: [prepare, linux-images]
@@ -149,7 +149,7 @@ jobs:
       armhf_cross_image_digest: ${{ needs.linux-images.outputs.armhf_cross_digest }}
       build_packages: true
       release_channel: ${{ needs.prepare.outputs.release_channel }}
-      rc_number: ${{ needs.prepare.outputs.rc_number }}
+      prerelease_number: ${{ needs.prepare.outputs.prerelease_number }}
 
   windows:
     needs: prepare
@@ -160,7 +160,7 @@ jobs:
     with:
       version: ${{ needs.prepare.outputs.version }}
       release_channel: ${{ needs.prepare.outputs.release_channel }}
-      rc_number: ${{ needs.prepare.outputs.rc_number }}
+      prerelease_number: ${{ needs.prepare.outputs.prerelease_number }}
       windows_signing: ${{ needs.prepare.outputs.windows_signing }}
 
   assemble:

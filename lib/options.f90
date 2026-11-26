@@ -180,6 +180,8 @@ contains
              goto 10
           end if
 
+          st = 0
+          goto 10
        end if
 
        ! short option

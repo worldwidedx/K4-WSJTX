@@ -13,11 +13,32 @@
 
 #include "moc_soundin.cpp"
 
+void SoundInput::updateStreamInterruption (QAudio::State state, QAudio::Error error)
+{
+  bool interrupted = state == QAudio::IdleState || state == QAudio::SuspendedState;
+#if QT_VERSION >= QT_VERSION_CHECK (5, 10, 0)
+  interrupted = interrupted || state == QAudio::InterruptedState;
+#endif
+  bool const newError = error != QAudio::NoError && error != m_lastStreamError;
+  if (interrupted || newError)
+    {
+      if (!m_interruptionReported && m_sink) m_sink->inputInterrupted ();
+      m_interruptionReported = true;
+    }
+  else if (state == QAudio::ActiveState)
+    {
+      m_interruptionReported = false;
+    }
+  // CoreAudio can retain UnderrunError after Active resumes; only a new error or interruption ends reception.
+  m_lastStreamError = error;
+}
+
 bool SoundInput::checkStream ()
 {
   bool result (false);
   if (m_stream)
     {
+      updateStreamInterruption (m_stream->state (), m_stream->error ());
       switch (m_stream->error ())
         {
         case QAudio::OpenError:
@@ -30,17 +51,14 @@ bool SoundInput::checkStream ()
           Q_EMIT error (tr ("An error occurred during read from the audio input device."));
           break;
 
-        // case QAudio::UnderrunError:
-        //   Q_EMIT error (tr ("Audio data not being fed to the audio input device fast enough."));
-        //   break;
-
         case QAudio::FatalError:
           if (!m_destroying) clearStreamDescriptor ();
           Q_EMIT error (tr ("Non-recoverable error, audio input device not usable at this time."));
           break;
 
-        case QAudio::UnderrunError: // TODO G4WJS: stop ignoring this
-                                    // when we find the cause on macOS
+        case QAudio::UnderrunError:
+          result = true;
+          break;
         case QAudio::NoError:
           result = true;
           break;
@@ -148,6 +166,7 @@ void SoundInput::suspend ()
       m_stream->stop();  // better stop and restart audio (fixes issues on Linux and macOS)
       checkStream ();
     }
+  if (m_sink) m_sink->finishInput ();
 }
 
 void SoundInput::resume ()
@@ -171,6 +190,7 @@ void SoundInput::resume ()
 
 void SoundInput::handleStateChanged (QAudio::State newState)
 {
+  if (m_stream) updateStreamInterruption (newState, m_stream->error ());
   switch (newState)
     {
     case QAudio::IdleState:
@@ -245,7 +265,10 @@ void SoundInput::stop()
     {
       m_stream->stop ();
     }
+  if (m_sink) m_sink->finishInput ();
   m_stream.reset ();
+  m_lastStreamError = QAudio::NoError;
+  m_interruptionReported = false;
   if (!m_destroying) clearStreamDescriptor ();
 }
 

@@ -36,11 +36,11 @@ inputs:
     required: false
     default: "true"
   release_channel:
-    description: "Build release channel: DEVEL, RC, or GA"
+    description: "Build release channel: DEVEL, BETA, RC, or GA"
     required: false
     default: "DEVEL"
-  rc_number:
-    description: "Release candidate number when release_channel is RC"
+  prerelease_number:
+    description: "Prerelease number when release_channel is BETA or RC"
     required: false
     default: ""
   allow_stale_image:
@@ -57,7 +57,7 @@ runs:
         WSJTX_VERSION: ${{ inputs.version }}
         HAMLIB_BRANCH: ${{ inputs.hamlib_branch }}
         WSJT_RELEASE_CHANNEL: ${{ inputs.release_channel }}
-        WSJT_RC_NUMBER: ${{ inputs.rc_number }}
+        WSJT_PRERELEASE_NUMBER: ${{ inputs.prerelease_number }}
         ARCH: ${{ inputs.arch }}
         VALIDATE_FORTRAN_FALLBACK: ${{ inputs.validate_fortran_fallback }}
       run: .github/scripts/validate-ci-inputs.sh
@@ -160,7 +160,7 @@ runs:
       shell: bash
       env:
         WSJT_RELEASE_CHANNEL: ${{ inputs.release_channel }}
-        WSJT_RC_NUMBER: ${{ inputs.rc_number }}
+        WSJT_PRERELEASE_NUMBER: ${{ inputs.prerelease_number }}
       run: |
         cmake -S . -B wsjtx-build \
           -DCMAKE_PREFIX_PATH="${{ steps.image.outputs.hamlib_prefix }};/opt/wsjtx/pfunit" \
@@ -171,7 +171,7 @@ runs:
           -DWSJT_ENABLE_GUI_SMOKE_TESTS=ON \
           -DWSJT_FORTRAN_LIBRARY_VARIANTS=OPENMP_ONLY \
           -DWSJT_RELEASE_CHANNEL="${WSJT_RELEASE_CHANNEL}" \
-          -DWSJT_RC_NUMBER="${WSJT_RC_NUMBER}" \
+          -DWSJT_PRERELEASE_NUMBER="${WSJT_PRERELEASE_NUMBER}" \
           -DPFUNIT_DIR="${{ steps.image.outputs.pfunit_dir }}" \
           -Wno-dev
 

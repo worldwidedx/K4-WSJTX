@@ -67,7 +67,7 @@ DecodeHighlightingListView::DecodeHighlightingListView (QWidget * parent)
         }
     });
 
-  auto * defaults_action = new QAction {tr ("&Reset this item to defaults"), this};
+  auto * defaults_action = new QAction {tr ("&Reset this item to Default 1"), this};
   addAction (defaults_action);
   connect (defaults_action, &QAction::triggered, [this] (bool /*checked*/) {
       auto const& index = currentIndex ();

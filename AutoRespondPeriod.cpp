@@ -78,19 +78,19 @@ void AutoRespondPeriodState::disarm()
   m_firstClaimed = false;
 }
 
-void AutoRespondPeriodState::close()
-{
-  disarm();
-}
-
 bool AutoRespondPeriodState::accepts(QDateTime const& decodePeriodStart) const
 {
   return m_open && decodePeriodStart.isValid() && decodePeriodStart == m_receivePeriod;
 }
 
+bool AutoRespondPeriodState::canClaimFirst(QDateTime const& decodePeriodStart) const
+{
+  return accepts(decodePeriodStart) && !m_firstClaimed;
+}
+
 bool AutoRespondPeriodState::claimFirst(QDateTime const& decodePeriodStart)
 {
-  if (!accepts(decodePeriodStart) || m_firstClaimed) return false;
+  if (!canClaimFirst(decodePeriodStart)) return false;
   m_firstClaimed = true;
   return true;
 }

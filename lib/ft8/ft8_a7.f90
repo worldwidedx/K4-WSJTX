@@ -17,6 +17,15 @@ module ft8_a7
 
 contains
 
+subroutine reset_ft8_a7()
+  dt0=0.
+  f0=0.
+  msg0=''
+  itone_a7=0
+  jseq=0
+  ndec=0
+end subroutine reset_ft8_a7
+
 subroutine ft8_a7_save(jseq,dt,f,msg)
 
   use packjt77
@@ -40,9 +49,9 @@ subroutine ft8_a7_save(jseq,dt,f,msg)
   j=jseq
 
 ! Add this decode to current table for this sequence
-  ndec(j,1)=ndec(j,1)+1                  !Number of decodes in this sequence
-  i=ndec(j,1)                            !i is index of a new table entry
-  if(i.gt.MAXDEC) return                 !Prevent table overflow (indexes start at 1)
+  if(ndec(j,1).ge.MAXDEC) return
+  ndec(j,1)=ndec(j,1)+1
+  i=ndec(j,1)
 
   dt0(i,j,1)=dt                          !Save dt in table
   f0(i,j,1)=f                            !Save f in table
@@ -72,13 +81,15 @@ subroutine ft8_a7_save(jseq,dt,f,msg)
 end subroutine ft8_a7_save
 
 subroutine ft8_a7d(dd0,newdat,call_1,call_2,grid4,xdt,f1,xbase,nharderrors,dmin,  &
-     msg37,xsnr)
+     msg37,xsnr,knowledge,evidence)
 
 ! Examine the raw data in dd0() for possible "a7" decodes.
   
   use crc
   use timer_module, only: timer
   use packjt77
+  use ft8_codec_context, only: get_ft8_codec_state,genft8_for_state
+  use decoder_engine_types, only: ft8_signal_evidence,engine_payload_hypothesis
   include 'ft8_params.f90'
   parameter(NP2=2812)
   character*37 msg37,msg,msgsent,msgbest
@@ -95,8 +106,10 @@ subroutine ft8_a7d(dd0,newdat,call_1,call_2,grid4,xdt,f1,xbase,nharderrors,dmin,
   real rcw(174)
   integer*1 cw(174)
   integer*1 msgbits(77)
+  integer*1 msgbits_best(77)
   integer*1 nxor(174),hdec(174)
   integer itone(NN)
+  integer itone_best(NN)
   integer icos7(0:6),ip(1)
   logical one(0:511,0:8)
   integer graymap(0:7)
@@ -106,11 +119,18 @@ subroutine ft8_a7d(dd0,newdat,call_1,call_2,grid4,xdt,f1,xbase,nharderrors,dmin,
   complex csymb(32)
   complex cs(0:7,NN)
   logical std_1,std_2
+  type(pack77_state), target, optional, intent(inout) :: knowledge
+  type(pack77_state), pointer :: codec
+  type(ft8_signal_evidence), optional, intent(out) :: evidence
   logical first,newdat
   data icos7/3,1,4,0,6,5,2/                !Sync array
   data first/.true./
   data graymap/0,1,3,2,5,6,4,7/
   save one
+
+  codec => get_ft8_codec_state()
+  if(present(knowledge)) codec => knowledge
+  if(present(evidence)) evidence=ft8_signal_evidence()
 
   if(first) then
      one=.false.
@@ -313,7 +333,7 @@ subroutine ft8_a7d(dd0,newdat,call_1,call_2,grid4,xdt,f1,xbase,nharderrors,dmin,
 
      i3=-1
      n3=-1
-     call genft8(msg,i3,n3,msgsent,msgbits,itone) !Source-encode this message
+     call genft8_for_state(codec,msg,i3,n3,msgsent,msgbits,itone)
      call encode174_91(msgbits,cw)                !Get codeword for this message
      rcw=2*cw-1
      pow=0.0
@@ -346,6 +366,8 @@ subroutine ft8_a7d(dd0,newdat,call_1,call_2,grid4,xdt,f1,xbase,nharderrors,dmin,
      if(dm.lt.dmin) then
         dmin=dm
         msgbest=msgsent
+        msgbits_best=msgbits
+        itone_best=itone
         pbest=pow
         if(dm.eq.da) then
            nharderrors=count((2*cw-1)*llra.lt.0.0)
@@ -374,6 +396,16 @@ subroutine ft8_a7d(dd0,newdat,call_1,call_2,grid4,xdt,f1,xbase,nharderrors,dmin,
   if(msg37(1:3).eq.'CQ ' .and. std_2 .and. grid4.eq.'    ') nharderrors=-1
   if(msg37(1:6).eq.'QU1RK ') nharderrors=-1
 
+  if(present(evidence) .and. nharderrors.ge.0) then
+     evidence%payload77=msgbits_best
+     evidence%tones=int(itone_best,kind=1)
+     evidence%payload_origin=engine_payload_hypothesis
+     evidence%has_tones=1
+     evidence%has_waveform_start=1
+     evidence%waveform_start_seconds=xdt+0.5
+     evidence%method=7
+  endif
+
   return
 end subroutine ft8_a7d
 
@@ -384,8 +416,46 @@ subroutine getmsg(i,mycall,hiscall,hisgrid,msg)
   character*37 msg
   logical my_std,his_std
 
-  call stdcall(mycall,my_std)
-  call stdcall(hiscall,his_std)
+  call stdcall_suffix(mycall,my_std)
+  call stdcall_suffix(hiscall,his_std)
+
+! Candidates 207-411 keep what the former nonstandard-call path produced for
+! a /R or /P station: a CQ without a grid (207); when MyCall is standard,
+! <MyCall> HisCall with nothing, RRR, RR73 or 73 (208-211); and
+! MyCall <HisCall> with a report or R-report (212-411, the same sequence as
+! 7-206).  Blank for every other call.
+  if(i.ge.207) then
+     msg=''
+     n=len_trim(hiscall)
+     if(his_std .and. n.gt.3) then
+        if(hiscall(n-1:n).eq.'/R' .or. hiscall(n-1:n).eq.'/P') then
+           if(i.eq.207) msg='CQ '//trim(hiscall)
+           if(i.ge.208 .and. i.le.211 .and. my_std) then
+              msg='<'//trim(mycall)//'> '//trim(hiscall)
+              j0=len(trim(msg))+2
+              if(i.eq.209) msg(j0:j0+2)='RRR'
+              if(i.eq.210) msg(j0:j0+3)='RR73'
+              if(i.eq.211) msg(j0:j0+1)='73'
+           endif
+           if(i.ge.212 .and. my_std) then
+              msg=trim(mycall)//' <'//trim(hiscall)//'>'
+              j0=len(trim(msg))+2
+              j=i-205
+              isnr = -50 + (j-7)/2
+              if(abs(isnr).gt.30) then
+                 msg=''
+              else if(iand(j,1).eq.1) then
+                 write(msg(j0:j0+2),'(i3.2)') isnr
+                 if(msg(j0:j0).eq.' ') msg(j0:j0)='+'
+              else
+                 write(msg(j0:j0+3),'("R",i3.2)') isnr
+                 if(msg(j0+1:j0+1).eq.' ') msg(j0+1:j0+1)='+'
+              endif
+           endif
+        endif
+     endif
+     return
+  endif
 
   isnr=0
   msg=trim(mycall)//' '//trim(hiscall)

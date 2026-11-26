@@ -2,6 +2,7 @@
 #define TX_INHIBIT_TRANSCEIVER_HPP__
 
 #include <memory>
+#include <functional>
 
 #include <QElapsedTimer>
 #include <QHash>
@@ -26,6 +27,12 @@ public:
   void stop () noexcept override;
   void enqueue_jtty_pcm (QByteArray const&, TxAudioQueueEpoch, qint64) noexcept override;
   void clear_jtty_pcm (TxAudioQueueEpoch) noexcept override;
+  void receive_discontinuity (JttyReceiveReason reason) override
+  { wrapped_->receive_discontinuity (reason); }
+  void receive_stop_reason (JttyReceiveReason reason) override
+  { wrapped_->receive_stop_reason (reason); }
+  void requestContinuousReceiveDrain (quint64 requestId) override
+  { wrapped_->requestContinuousReceiveDrain (requestId); }
 
   Q_SLOT void tx_inhibit_command (QString controller, quint32 ttl_ms, QString station);
   Q_SLOT void tx_inhibit_invalid (quint64 count);
@@ -36,6 +43,8 @@ public:
                                quint32 expiries, quint32 invalid);
 
 private:
+  friend class TestTxInhibitTransceiver;
+
   struct Hold
   {
     qint64 expires_at;
@@ -51,6 +60,7 @@ private:
   std::unique_ptr<Transceiver> wrapped_;
   QTimer * expiry_timer_;
   QElapsedTimer monotonic_clock_;
+  std::function<qint64 ()> lease_now_ {[this] {return monotonic_clock_.elapsed ();}};
   QHash<QString, Hold> holds_;
   TransceiverState requested_;
   TransceiverState last_effective_;

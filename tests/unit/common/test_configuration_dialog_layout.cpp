@@ -1,5 +1,6 @@
 #include <QApplication>
 #include <QDialog>
+#include <QComboBox>
 #include <QDialogButtonBox>
 #include <QFrame>
 #include <QGroupBox>
@@ -15,6 +16,7 @@
 #include <QTableView>
 #include <QTest>
 #include <QWheelEvent>
+#include <QWindow>
 
 #include "models/DecodeHighlightingModel.hpp"
 #include "widgets/SettingsDialogLayout.hpp"
@@ -144,6 +146,8 @@ class TestConfigurationDialogLayout final
 
 private Q_SLOTS:
   void pagesRetainIdentityAndScrollingPolicy ();
+  void languageControlHasLabelAndRemainsReachable_data ();
+  void languageControlHasLabelAndRemainsReachable ();
   void windowSizeIsBoundedByAvailableGeometry ();
   void compactControlsKeepNaturalGeometry_data ();
   void compactControlsKeepNaturalGeometry ();
@@ -155,6 +159,45 @@ private Q_SLOTS:
   void wheelEventsScrollThePage ();
   void colorsPageOwnsVerticalScrolling ();
 };
+
+void TestConfigurationDialogLayout::languageControlHasLabelAndRemainsReachable_data ()
+{
+  QTest::addColumn<QSize> ("dialog_size");
+  QTest::newRow ("default-size") << QSize {700, 650};
+  QTest::newRow ("constrained-size") << QSize {683, 439};
+}
+
+void TestConfigurationDialogLayout::languageControlHasLabelAndRemainsReachable ()
+{
+  QFETCH (QSize, dialog_size);
+  DialogFixture fixture;
+  auto& ui = fixture.ui;
+  QCOMPARE (ui.language_label->buddy (), ui.language_combo_box);
+  QVERIFY (!ui.language_combo_box->accessibleName ().isEmpty ());
+  QVERIFY (!ui.language_combo_box->accessibleDescription ().isEmpty ());
+  ui.language_combo_box->addItem (QStringLiteral ("System default"));
+  ui.configuration_tabs->setCurrentWidget (ui.general_tab);
+  showDialog (fixture.dialog, dialog_size);
+  auto * scroll_area = SettingsDialogLayout::pageScrollArea (ui.general_tab);
+  auto const selector_width = ui.language_combo_box->sizeHint ().width ();
+  auto const content_minimum_width = scroll_area->widget ()->minimumSizeHint ().width ();
+  ui.language_combo_box->addItem (QString (60, QChar {'W'}));
+  ui.language_combo_box->setCurrentIndex (ui.language_combo_box->count () - 1);
+  settleLayouts ();
+  auto const reveal_language = [&] {
+    scroll_area->ensureWidgetVisible (ui.language_combo_box);
+    settleLayouts ();
+    return isFullyVisible (ui.language_combo_box, scroll_area);
+  };
+  QTRY_VERIFY2 (reveal_language (),
+            qPrintable (scrollDiagnostics (ui.general_tab, fixture.dialog, scroll_area)
+                        + QString {" control=%1,%2 %3x%4"}
+                          .arg (geometryIn (ui.language_combo_box, scroll_area->viewport ()).x ())
+                          .arg (geometryIn (ui.language_combo_box, scroll_area->viewport ()).y ())
+                          .arg (ui.language_combo_box->width ()).arg (ui.language_combo_box->height ())));
+  QCOMPARE (ui.language_combo_box->sizeHint ().width (), selector_width);
+  QCOMPARE (scroll_area->widget ()->minimumSizeHint ().width (), content_minimum_width);
+}
 
 void TestConfigurationDialogLayout::pagesRetainIdentityAndScrollingPolicy ()
 {
@@ -241,9 +284,12 @@ void TestConfigurationDialogLayout::compactControlsKeepNaturalGeometry ()
 {
   QFETCH (int, font_delta);
 
+  QWidget host;
   DialogFixture fixture {font_delta};
   auto& dialog = fixture.dialog;
   auto& ui = fixture.ui;
+  dialog.setParent (&host, Qt::Widget);
+  host.show ();
   showDialog (dialog, {640, 480});
 
   ui.configuration_tabs->setCurrentWidget (ui.general_tab);
@@ -253,6 +299,12 @@ void TestConfigurationDialogLayout::compactControlsKeepNaturalGeometry ()
 
   ui.configuration_tabs->setCurrentWidget (ui.advanced_tab);
   settleLayouts ();
+  for (auto * label : {ui.best_sp_explanation_label, ui.best_sp_matching_explanation_label})
+    {
+      QVERIFY (isFullyInside (label, ui.best_sp_group_box));
+      QVERIFY2 (label->height () >= label->heightForWidth (label->width ()),
+                qPrintable (label->objectName () + " clips its wrapped explanation"));
+    }
   for (auto const& group_and_controls : {
          qMakePair (ui.groupBox_10,
                     QList<QWidget *> {ui.cbx2ToneSpacing, ui.cbx4ToneSpacing}),
@@ -267,6 +319,30 @@ void TestConfigurationDialogLayout::compactControlsKeepNaturalGeometry ()
         {
           QVERIFY (isFullyInside (control, group));
         }
+    }
+
+  ui.configuration_tabs->setCurrentWidget (ui.colors_tab);
+  for (int width : {420, 640, 1100})
+    {
+      dialog.resize (width, 480);
+      settleLayouts ();
+      QCOMPARE (dialog.width (), width);
+      auto * up = ui.move_highlighting_up_push_button;
+      auto * down = ui.move_highlighting_down_push_button;
+      for (auto * button : {up, down})
+        {
+          QVERIFY (button->width () >= button->minimumSizeHint ().width ());
+          QVERIFY2 (button->width () <= button->sizeHint ().width () + 2,
+                    qPrintable (QString {"%1 dialogWidth=%2 actual=%3 hint=%4"}
+                      .arg (button->objectName ()).arg (width)
+                      .arg (sizeText (button->size ()), sizeText (button->sizeHint ()))));
+          QVERIFY (isFullyInside (button, ui.groupBox_12));
+        }
+      QVERIFY (qAbs (up->geometry ().center ().y ()
+                     - down->geometry ().center ().y ()) <= 2);
+      QVERIFY (ui.highlighting_actions_tool_button->geometry ().right ()
+               < up->geometry ().left ());
+      QVERIFY (up->geometry ().right () < down->geometry ().left ());
     }
 }
 
@@ -426,10 +502,28 @@ void TestConfigurationDialogLayout::keyboardFocusRevealsOffscreenControls ()
   DialogFixture fixture;
   auto& dialog = fixture.dialog;
   auto& ui = fixture.ui;
+  auto const focus_diagnostics = [&] (QWidget const * target) {
+    auto const name = [] (QWidget const * widget) {
+      return widget ? QString {"%1:%2"}.arg (widget->metaObject ()->className (), widget->objectName ())
+                    : QStringLiteral ("none");
+    };
+    return QString {"page=%1 activeWindow=%2 dialogActive=%3 exposed=%4 target=%5 "
+                    "visible=%6 enabled=%7 focusPolicy=%8 focusProxy=%9 focusWidget=%10"}
+      .arg (ui.configuration_tabs->currentWidget ()->objectName (), name (QApplication::activeWindow ()))
+      .arg (dialog.isActiveWindow ())
+      .arg (dialog.windowHandle () && dialog.windowHandle ()->isExposed ())
+      .arg (name (target)).arg (target->isVisible ()).arg (target->isEnabled ())
+      .arg (int (target->focusPolicy ())).arg (name (target->focusProxy ()), name (QApplication::focusWidget ()));
+  };
+  auto const prepare_focus = [&] (QWidget const * target) {
+    dialog.raise ();
+    dialog.activateWindow ();
+    return QTest::qWaitFor ([&] {
+      return dialog.isActiveWindow () && target->isVisible () && target->isEnabled ();
+    }, 10000);
+  };
   ui.configuration_tabs->setCurrentWidget (ui.advanced_tab);
   showDialog (dialog, {620, 360});
-  QApplication::setActiveWindow (&dialog);
-  settleLayouts ();
 
   auto * advanced_scroll_area = SettingsDialogLayout::pageScrollArea (ui.advanced_tab);
   auto * vertical_scroll_bar = advanced_scroll_area->verticalScrollBar ();
@@ -441,9 +535,11 @@ void TestConfigurationDialogLayout::keyboardFocusRevealsOffscreenControls ()
 
   QVERIFY (!isFullyVisible (ui.pbTestCloudlog, advanced_scroll_area));
   auto const button_box_geometry = geometryIn (ui.configuration_dialog_button_box, &dialog);
+  QVERIFY2 (prepare_focus (ui.pbTestCloudlog), qPrintable (focus_diagnostics (ui.pbTestCloudlog)));
   ui.pbTestCloudlog->setFocus (Qt::TabFocusReason);
 
-  QTRY_COMPARE (QApplication::focusWidget (), ui.pbTestCloudlog);
+  QTRY_VERIFY2_WITH_TIMEOUT (QApplication::focusWidget () == ui.pbTestCloudlog,
+                            qPrintable (focus_diagnostics (ui.pbTestCloudlog)), 10000);
   QTRY_VERIFY (vertical_scroll_bar->value () > vertical_scroll_bar->minimum ());
   QTRY_VERIFY (isFullyVisible (ui.pbTestCloudlog, advanced_scroll_area));
   QCOMPARE (geometryIn (ui.configuration_dialog_button_box, &dialog), button_box_geometry);
@@ -455,8 +551,10 @@ void TestConfigurationDialogLayout::keyboardFocusRevealsOffscreenControls ()
   auto * horizontal_scroll_bar = filters_scroll_area->horizontalScrollBar ();
   QVERIFY (horizontal_scroll_bar->maximum () > 0);
   auto * ok = ui.configuration_dialog_button_box->button (QDialogButtonBox::Ok);
+  QVERIFY2 (prepare_focus (ok), qPrintable (focus_diagnostics (ok)));
   ok->setFocus (Qt::TabFocusReason);
-  QTRY_COMPARE (QApplication::focusWidget (), ok);
+  QTRY_VERIFY2_WITH_TIMEOUT (QApplication::focusWidget () == ok,
+                            qPrintable (focus_diagnostics (ok)), 10000);
   horizontal_scroll_bar->setValue (horizontal_scroll_bar->maximum ());
   filters_scroll_area->verticalScrollBar ()->setValue (
     filters_scroll_area->verticalScrollBar ()->minimum ());
@@ -467,12 +565,34 @@ void TestConfigurationDialogLayout::keyboardFocusRevealsOffscreenControls ()
   auto * left_side_control = ui.Territory1;
   auto const initial_horizontal_position = horizontal_scroll_bar->value ();
   QVERIFY (!isFullyVisible (left_side_control, filters_scroll_area));
+  QVERIFY2 (prepare_focus (left_side_control), qPrintable (focus_diagnostics (left_side_control)));
   left_side_control->setFocus (Qt::TabFocusReason);
-  QTRY_COMPARE (QApplication::focusWidget (), left_side_control);
+  QTRY_VERIFY2_WITH_TIMEOUT (QApplication::focusWidget () == left_side_control,
+                            qPrintable (focus_diagnostics (left_side_control)), 10000);
   QTRY_VERIFY (horizontal_scroll_bar->value () < initial_horizontal_position);
   QTRY_VERIFY (isFullyVisible (left_side_control, filters_scroll_area));
   QCOMPARE (geometryIn (ui.configuration_dialog_button_box, &dialog),
             filters_button_box_geometry);
+
+  ui.configuration_tabs->setCurrentWidget (ui.colors_tab);
+  settleLayouts ();
+  auto * colors_scroll_area = SettingsDialogLayout::pageScrollArea (ui.colors_tab);
+  QVERIFY2 (prepare_focus (ui.move_highlighting_up_push_button),
+            qPrintable (focus_diagnostics (ui.move_highlighting_up_push_button)));
+  ui.move_highlighting_up_push_button->setFocus (Qt::TabFocusReason);
+  QTRY_VERIFY2_WITH_TIMEOUT (QApplication::focusWidget () == ui.move_highlighting_up_push_button,
+                            qPrintable (focus_diagnostics (ui.move_highlighting_up_push_button)), 10000);
+  QTRY_VERIFY (isFullyVisible (ui.move_highlighting_up_push_button, colors_scroll_area));
+  QCOMPARE (ui.move_highlighting_up_push_button->nextInFocusChain (),
+            ui.move_highlighting_down_push_button);
+  QCOMPARE (ui.move_highlighting_down_push_button->previousInFocusChain (),
+            ui.move_highlighting_up_push_button);
+  QVERIFY2 (prepare_focus (ui.move_highlighting_down_push_button),
+            qPrintable (focus_diagnostics (ui.move_highlighting_down_push_button)));
+  ui.move_highlighting_down_push_button->setFocus (Qt::TabFocusReason);
+  QTRY_VERIFY2_WITH_TIMEOUT (QApplication::focusWidget () == ui.move_highlighting_down_push_button,
+                            qPrintable (focus_diagnostics (ui.move_highlighting_down_push_button)), 10000);
+  QTRY_VERIFY (isFullyVisible (ui.move_highlighting_down_push_button, colors_scroll_area));
 }
 
 void TestConfigurationDialogLayout::wheelEventsScrollThePage ()

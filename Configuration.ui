@@ -121,6 +121,15 @@
            </layout>
           </item>
           <item>
+           <layout class="QHBoxLayout" name="home_coordinates_layout">
+            <item><widget class="QLabel" name="latitude_label"><property name="text"><string>Latitude:</string></property><property name="buddy"><cstring>latitude_line_edit</cstring></property></widget></item>
+            <item><widget class="QLineEdit" name="latitude_line_edit"><property name="toolTip"><string>Home-station latitude in decimal degrees. North is positive; south is negative.</string></property><property name="maximumWidth"><number>120</number></property></widget></item>
+            <item><widget class="QLabel" name="longitude_label"><property name="text"><string>Longitude:</string></property><property name="buddy"><cstring>longitude_line_edit</cstring></property></widget></item>
+            <item><widget class="QLineEdit" name="longitude_line_edit"><property name="toolTip"><string>Home-station longitude in decimal degrees. East is positive; west is negative.</string></property><property name="maximumWidth"><number>120</number></property></widget></item>
+            <item><spacer name="home_coordinates_spacer"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property></spacer></item>
+           </layout>
+          </item>
+          <item>
            <layout class="QFormLayout" name="formLayout_13">
             <item row="0" column="0">
              <widget class="QLabel" name="label_5">
@@ -181,6 +190,51 @@
           <string>Display</string>
          </property>
          <layout class="QGridLayout" name="gridLayout_4">
+          <item row="5" column="0">
+           <widget class="QLabel" name="language_label">
+            <property name="text">
+             <string>Language (requires restart):</string>
+            </property>
+            <property name="buddy">
+             <cstring>language_combo_box</cstring>
+            </property>
+           </widget>
+          </item>
+          <item row="5" column="1" colspan="2">
+           <widget class="QComboBox" name="language_combo_box">
+            <property name="sizePolicy">
+             <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+              <horstretch>0</horstretch>
+              <verstretch>0</verstretch>
+             </sizepolicy>
+            </property>
+            <property name="toolTip">
+             <string>Select the interface language. The --language command-line option overrides this setting.</string>
+            </property>
+            <property name="accessibleName">
+             <string>Interface language</string>
+            </property>
+            <property name="accessibleDescription">
+             <string>Changes take effect after restarting WSJT-X. Shared across station configurations in this instance.</string>
+            </property>
+            <property name="sizeAdjustPolicy">
+             <enum>QComboBox::AdjustToMinimumContentsLengthWithIcon</enum>
+            </property>
+            <property name="minimumContentsLength">
+             <number>18</number>
+            </property>
+           </widget>
+          </item>
+          <item row="6" column="0" colspan="3">
+           <widget class="QLabel" name="language_restart_label">
+            <property name="text">
+             <string>Changes take effect after restarting WSJT-X.</string>
+            </property>
+            <property name="wordWrap">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
           <item row="4" column="0">
            <widget class="QCheckBox" name="DXCC_check_box">
             <property name="toolTip">
@@ -740,7 +794,7 @@ quiet period when decoding is done.</string>
        <string>Radio interface configuration settings.</string>
       </attribute>
       <layout class="QGridLayout" name="gridLayout_3">
-       <item row="13" column="2">
+       <item row="14" column="2">
         <spacer name="verticalSpacer_13">
          <property name="orientation">
           <enum>Qt::Vertical</enum>
@@ -753,7 +807,7 @@ quiet period when decoding is done.</string>
          </property>
         </spacer>
        </item>
-       <item row="8" column="2">
+       <item row="9" column="2">
         <widget class="QGroupBox" name="split_operation_group_box">
          <property name="title">
           <string>Split Operation</string>
@@ -807,7 +861,7 @@ quiet period when decoding is done.</string>
          </layout>
         </widget>
        </item>
-       <item row="13" column="0">
+       <item row="14" column="0">
         <spacer name="verticalSpacer_5">
          <property name="orientation">
           <enum>Qt::Vertical</enum>
@@ -823,7 +877,7 @@ quiet period when decoding is done.</string>
          </property>
         </spacer>
        </item>
-       <item row="5" column="2">
+       <item row="7" column="2">
         <widget class="QGroupBox" name="mode_group_box">
          <property name="toolTip">
           <string>Modulation mode selected on radio.</string>
@@ -879,21 +933,21 @@ or bandwidth is selected).</string>
          </layout>
         </widget>
        </item>
-       <item row="4" column="2">
+       <item row="6" column="2">
         <widget class="Line" name="line_4">
          <property name="orientation">
           <enum>Qt::Horizontal</enum>
          </property>
         </widget>
        </item>
-       <item row="2" column="2">
+       <item row="4" column="2">
         <widget class="Line" name="line_3">
          <property name="orientation">
           <enum>Qt::Horizontal</enum>
          </property>
         </widget>
        </item>
-       <item row="1" column="0" rowspan="11">
+       <item row="1" column="0" rowspan="12">
         <widget class="QGroupBox" name="CAT_control_group_box">
          <property name="sizePolicy">
           <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
@@ -993,42 +1047,42 @@ or bandwidth is selected).</string>
                  </property>
                  <item>
                   <property name="text">
-                   <string>1200</string>
+                   <string notr="true">1200</string>
                   </property>
                  </item>
                  <item>
                   <property name="text">
-                   <string>2400</string>
+                   <string notr="true">2400</string>
                   </property>
                  </item>
                  <item>
                   <property name="text">
-                   <string>4800</string>
+                   <string notr="true">4800</string>
                   </property>
                  </item>
                  <item>
                   <property name="text">
-                   <string>9600</string>
+                   <string notr="true">9600</string>
                   </property>
                  </item>
                  <item>
                   <property name="text">
-                   <string>19200</string>
+                   <string notr="true">19200</string>
                   </property>
                  </item>
                  <item>
                   <property name="text">
-                   <string>38400</string>
+                   <string notr="true">38400</string>
                   </property>
                  </item>
                  <item>
                   <property name="text">
-                   <string>57600</string>
+                   <string notr="true">57600</string>
                   </property>
                  </item>
                  <item>
                   <property name="text">
-                   <string>115200</string>
+                   <string notr="true">115200</string>
                   </property>
                  </item>
                 </widget>
@@ -1299,52 +1353,54 @@ a few, particularly some Kenwood rigs, require it).</string>
          </layout>
         </widget>
        </item>
-       <item row="1" column="1" rowspan="13">
+       <item row="1" column="1" rowspan="14">
         <widget class="Line" name="line">
          <property name="orientation">
           <enum>Qt::Vertical</enum>
          </property>
         </widget>
        </item>
-       <item row="10" column="2">
-        <layout class="QHBoxLayout" name="horizontalLayout_11">
+       <item row="11" column="2">
+        <layout class="QVBoxLayout" name="ptt_test_layout">
          <item>
-          <widget class="QPushButton" name="test_CAT_push_button">
-           <property name="toolTip">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Attempt to connect to the radio with these settings.&lt;/p&gt;&lt;p&gt;The button will turn green if the connection is successful or red if there is a problem.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
-           </property>
-           <property name="text">
-            <string>Test CAT</string>
-           </property>
-          </widget>
-         </item>
-         <item>
-          <spacer name="horizontalSpacer_3">
-           <property name="orientation">
-            <enum>Qt::Horizontal</enum>
-           </property>
-           <property name="sizeType">
-            <enum>QSizePolicy::Preferred</enum>
-           </property>
-           <property name="sizeHint" stdset="0">
-            <size>
-             <width>40</width>
-             <height>20</height>
-            </size>
-           </property>
-          </spacer>
-         </item>
-         <item>
-          <widget class="QPushButton" name="test_PTT_push_button">
-           <property name="toolTip">
-            <string>Attempt to activate the transmitter.
+          <layout class="QHBoxLayout" name="horizontalLayout_11">
+           <item>
+            <widget class="QPushButton" name="test_CAT_push_button">
+             <property name="toolTip">
+              <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Attempt to connect to the radio with these settings.&lt;/p&gt;&lt;p&gt;The button will turn green if the connection is successful or red if there is a problem.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+             </property>
+             <property name="text">
+              <string>Test CAT</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <spacer name="horizontalSpacer_3">
+             <property name="orientation">
+              <enum>Qt::Horizontal</enum>
+             </property>
+             <property name="sizeType">
+              <enum>QSizePolicy::Preferred</enum>
+             </property>
+             <property name="sizeHint" stdset="0">
+              <size>
+               <width>40</width>
+               <height>20</height>
+              </size>
+             </property>
+            </spacer>
+           </item>
+           <item>
+            <widget class="QPushButton" name="test_PTT_push_button">
+             <property name="toolTip">
+              <string>Attempt to activate the transmitter.
 Click again to deactivate. Normally no power should be
 output since there is no audio being generated at this time.
 Check that any Tx indication on your radio and/or your
 radio interface behave as expected.</string>
-           </property>
-           <property name="styleSheet">
-            <string notr="true">QPushButton:checked {
+             </property>
+             <property name="styleSheet">
+              <string notr="true">QPushButton:checked {
 	background-color: red;
 	border-style	: outset;
 	border-width: 1px;
@@ -1353,22 +1409,115 @@ radio interface behave as expected.</string>
 	min-width: 5em;
 	padding: 3px;
 }</string>
+             </property>
+             <property name="text">
+              <string>Test PTT</string>
+             </property>
+             <property name="checkable">
+              <bool>true</bool>
+             </property>
+            </widget>
+           </item>
+          </layout>
+         </item>
+         <item>
+          <widget class="QLabel" name="test_PTT_status_label">
+           <property name="visible">
+            <bool>false</bool>
+           </property>
+           <property name="sizePolicy">
+            <sizepolicy hsizetype="Ignored" vsizetype="Preferred">
+             <horstretch>0</horstretch>
+             <verstretch>0</verstretch>
+            </sizepolicy>
            </property>
            <property name="text">
-            <string>Test PTT</string>
+            <string/>
            </property>
-           <property name="checkable">
+           <property name="wordWrap">
             <bool>true</bool>
            </property>
           </widget>
          </item>
         </layout>
        </item>
-       <item row="6" column="2">
+       <item row="8" column="2">
         <widget class="Line" name="line_6">
          <property name="orientation">
           <enum>Qt::Horizontal</enum>
          </property>
+        </widget>
+       </item>
+       <item row="2" column="2">
+        <widget class="Line" name="line_footswitch">
+         <property name="orientation">
+          <enum>Qt::Horizontal</enum>
+         </property>
+        </widget>
+       </item>
+       <item row="3" column="2">
+        <widget class="QGroupBox" name="footswitch_group_box">
+         <property name="toolTip">
+          <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Use a normally open footswitch wired to a serial port status line to switch between receive and transmit, as if clicking Tune but without sending a tone. Press to transmit, release to receive. Footswitch transmissions stop after 3 minutes.&lt;/p&gt;&lt;p&gt;Intended for manual CW EME with Doppler tracking: set Mode to None, put the rig in CW and turn its break-in off.&lt;/p&gt;&lt;p&gt;WSJT-X asserts DTR on this port, so the footswitch can connect DTR to the input pin, with a pull-down of about 10k to ground. Use a port that is not also used for CAT or PTT.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+         </property>
+         <property name="title">
+          <string>Footswitch T/R</string>
+         </property>
+         <layout class="QGridLayout" name="footswitch_grid_layout">
+          <item row="0" column="0" colspan="2">
+           <widget class="QCheckBox" name="footswitch_enable_check_box">
+            <property name="text">
+             <string>Use footswitch</string>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="0">
+           <widget class="QLabel" name="footswitch_port_label">
+            <property name="text">
+             <string>Port:</string>
+            </property>
+            <property name="buddy">
+             <cstring>footswitch_port_combo_box</cstring>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="1">
+           <widget class="QComboBox" name="footswitch_port_combo_box">
+            <property name="sizePolicy">
+             <sizepolicy hsizetype="MinimumExpanding" vsizetype="Fixed">
+              <horstretch>1</horstretch>
+              <verstretch>0</verstretch>
+             </sizepolicy>
+            </property>
+            <property name="toolTip">
+             <string>Serial port the footswitch is connected to.</string>
+            </property>
+            <property name="editable">
+             <bool>true</bool>
+            </property>
+            <property name="insertPolicy">
+             <enum>QComboBox::NoInsert</enum>
+            </property>
+           </widget>
+          </item>
+          <item row="2" column="0">
+           <widget class="QLabel" name="footswitch_pin_label">
+            <property name="text">
+             <string>Input:</string>
+            </property>
+            <property name="buddy">
+             <cstring>footswitch_pin_combo_box</cstring>
+            </property>
+           </widget>
+          </item>
+          <item row="2" column="1">
+           <widget class="QComboBox" name="footswitch_pin_combo_box">
+            <property name="toolTip">
+             <string>Serial port status line the footswitch drives.</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
         </widget>
        </item>
        <item row="1" column="2">
@@ -1485,7 +1634,7 @@ other hardware interface for PTT.</string>
          </layout>
         </widget>
        </item>
-       <item row="12" column="0">
+       <item row="13" column="0">
         <widget class="QGroupBox" name="hamlib_groupBox">
          <property name="title">
           <string>Update Hamlib</string>
@@ -1622,7 +1771,7 @@ other hardware interface for PTT.</string>
          </item>
         </layout>
        </item>
-       <item row="11" column="2">
+       <item row="12" column="2">
         <spacer name="verticalSpacer_7">
          <property name="orientation">
           <enum>Qt::Vertical</enum>
@@ -1635,7 +1784,7 @@ other hardware interface for PTT.</string>
          </property>
         </spacer>
        </item>
-       <item row="12" column="2">
+       <item row="13" column="2">
         <widget class="QGroupBox" name="rig_data_group_box">
          <property name="sizePolicy">
           <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
@@ -1695,7 +1844,7 @@ other hardware interface for PTT.</string>
          </layout>
         </widget>
        </item>
-       <item row="9" column="2">
+       <item row="10" column="2">
         <spacer name="verticalSpacer_2">
          <property name="orientation">
           <enum>Qt::Vertical</enum>
@@ -1708,7 +1857,7 @@ other hardware interface for PTT.</string>
          </property>
         </spacer>
        </item>
-       <item row="3" column="2">
+       <item row="5" column="2">
         <widget class="QGroupBox" name="TX_audio_source_group_box">
          <property name="toolTip">
           <string>Some radios can select the audio input using a CAT command,
@@ -2442,7 +2591,7 @@ comments field.</string>
        <item>
         <widget class="QGroupBox" name="network_group_box">
          <property name="title">
-          <string>Network Services</string>
+          <string>PSK Reporter spotting</string>
          </property>
          <layout class="QGridLayout" name="gridLayout_29" columnstretch="0,0">
           <item row="0" column="0">
@@ -2471,10 +2620,20 @@ comments field.</string>
        <item>
         <widget class="QGroupBox" name="groupBox_4">
          <property name="title">
-          <string>UDP Server</string>
+          <string>Application connections (WSJT-X UDP)</string>
          </property>
          <layout class="QGridLayout" name="gridLayout_16">
-          <item row="0" column="0">
+          <item row="0" column="0" colspan="2">
+           <widget class="QLabel" name="udp_server_description_label">
+            <property name="text">
+             <string>Exchange decodes, status, and logged contacts with companion applications.</string>
+            </property>
+            <property name="wordWrap">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="0">
            <layout class="QFormLayout" name="formLayout_6">
             <property name="fieldGrowthPolicy">
              <enum>QFormLayout::AllNonFixedFieldsGrow</enum>
@@ -2482,7 +2641,7 @@ comments field.</string>
             <item row="0" column="0">
              <widget class="QLabel" name="udp_server_label">
               <property name="text">
-               <string>UDP Server:</string>
+               <string>Application address:</string>
               </property>
               <property name="buddy">
                <cstring>udp_server_line_edit</cstring>
@@ -2492,34 +2651,67 @@ comments field.</string>
             <item row="0" column="1">
              <widget class="QLineEdit" name="udp_server_line_edit">
               <property name="toolTip">
-               <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Optional hostname of network service to receive decodes.&lt;/p&gt;&lt;p&gt;Formats:&lt;/p&gt;&lt;ul style=&quot;margin-top: 0px; margin-bottom: 0px; margin-left: 0px; margin-right: 0px; -qt-list-indent: 1;&quot;&gt;&lt;li style=&quot; margin-top:12px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;&quot;&gt;hostname&lt;/li&gt;&lt;li style=&quot; margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;&quot;&gt;IPv4 address&lt;/li&gt;&lt;li style=&quot; margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;&quot;&gt;IPv6 address&lt;/li&gt;&lt;li style=&quot; margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;&quot;&gt;IPv4 multicast group address&lt;/li&gt;&lt;li style=&quot; margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;&quot;&gt;IPv6 multicast group address&lt;/li&gt;&lt;/ul&gt;&lt;p&gt;Clearing this field will disable the broadcasting of UDP status updates.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
-              </property>
-              <property name="inputMethodHints">
-               <set>Qt::ImhDigitsOnly</set>
+               <string>Hostname or IPv4/IPv6 address of an application that receives WSJT-X UDP messages. Multicast group addresses are supported. Use the address from your companion application's setup instructions. Leave blank to disable this connection. PSK Reporter is configured separately above.</string>
               </property>
              </widget>
             </item>
-            <item row="1" column="0">
+            <item row="1" column="0" colspan="2">
+             <layout class="QHBoxLayout" name="udp_server_error_layout">
+              <item>
+               <widget class="QLabel" name="udp_server_error_label">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Maximum" vsizetype="Preferred">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="visible">
+                 <bool>false</bool>
+                </property>
+                <property name="text">
+                 <string>This address is for PSK Reporter. Enable PSK Reporter spotting above. Enter your receiving application's address here, or leave this field blank.</string>
+                </property>
+                <property name="wordWrap">
+                 <bool>true</bool>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <spacer name="udp_server_error_spacer">
+                <property name="orientation">
+                 <enum>Qt::Horizontal</enum>
+                </property>
+                <property name="sizeHint" stdset="0">
+                 <size>
+                  <width>0</width>
+                  <height>0</height>
+                 </size>
+                </property>
+               </spacer>
+              </item>
+             </layout>
+            </item>
+            <item row="2" column="0">
              <widget class="QLabel" name="label_6">
               <property name="text">
-               <string>UDP Server port number:</string>
+               <string>Port:</string>
               </property>
               <property name="buddy">
                <cstring>udp_server_port_spin_box</cstring>
               </property>
              </widget>
             </item>
-            <item row="1" column="1">
+            <item row="2" column="1">
              <widget class="QSpinBox" name="udp_server_port_spin_box">
               <property name="toolTip">
-               <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Enter the service port number of the UDP server that WSJT-X should send updates to. If this is zero no updates will be sent.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+               <string>Port on which the companion application receives WSJT-X UDP messages. A port of zero disables this connection.</string>
               </property>
               <property name="maximum">
                <number>65534</number>
               </property>
              </widget>
             </item>
-            <item row="2" column="0">
+            <item row="3" column="0">
              <widget class="QLabel" name="udp_interfaces_label">
               <property name="text">
                <string>Outgoing interfaces:</string>
@@ -2529,14 +2721,14 @@ comments field.</string>
               </property>
              </widget>
             </item>
-            <item row="2" column="1">
+            <item row="3" column="1">
              <widget class="CheckableItemComboBox" name="udp_interfaces_combo_box">
               <property name="toolTip">
                <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;When sending updates to a multicast group address it is necessary to specify which network interface(s) to send them to. If the loop-back interface is multicast capable then at least that one will be selected.&lt;/p&gt;&lt;p&gt;For most users the loop-back interface is all that is needed, that will allow multiple other applications on the same machine to interoperate with WSJT-X. If applications running on other hosts are to receive status updates then a suitable network interface should be used.&lt;/p&gt;&lt;p&gt;On some Linux systems it may be necessary to enable multicast on the loop-back network interface.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
               </property>
              </widget>
             </item>
-            <item row="3" column="0">
+            <item row="4" column="0">
              <widget class="QLabel" name="udp_TTL_label">
               <property name="text">
                <string>Multicast TTL:</string>
@@ -2546,7 +2738,7 @@ comments field.</string>
               </property>
              </widget>
             </item>
-            <item row="3" column="1">
+            <item row="4" column="1">
              <widget class="QSpinBox" name="udp_TTL_spin_box">
               <property name="toolTip">
                <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Sets the number or router hops that multicast datagrams are allowed to make. Almost everyone should set this to 1 to keep outgoing multicast traffic withn the local subnet.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
@@ -2561,12 +2753,12 @@ comments field.</string>
             </item>
            </layout>
           </item>
-          <item row="0" column="1">
+          <item row="1" column="1">
            <layout class="QVBoxLayout" name="verticalLayout_11">
             <item>
              <widget class="QCheckBox" name="accept_udp_requests_check_box">
               <property name="toolTip">
-               <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;With this enabled WSJT-X will accept certain requests back from a UDP server that receives decode messages.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+               <string>Allow companion applications receiving WSJT-X UDP messages to send supported requests back to WSJT-X.</string>
               </property>
               <property name="text">
                <string>Accept UDP requests</string>
@@ -2601,55 +2793,101 @@ comments field.</string>
        <item>
         <widget class="QGroupBox" name="n1mm_group_box">
          <property name="title">
-          <string>Secondary UDP Server (deprecated)</string>
+          <string>ADIF output (UDP)</string>
          </property>
          <layout class="QFormLayout" name="formLayout_15">
           <item row="0" column="0" colspan="2">
-           <widget class="QCheckBox" name="enable_n1mm_broadcast_check_box">
-            <property name="toolTip">
-             <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;When checked, WSJT-X will broadcast a logged contact in ADIF format to the configured hostname and port. &lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
-            </property>
+           <widget class="QLabel" name="n1mm_server_description_label">
             <property name="text">
-             <string>Enable logged contact ADIF broadcast</string>
+             <string>Send logged contacts to an application configured to receive plain ADIF records.</string>
+            </property>
+            <property name="wordWrap">
+             <bool>true</bool>
             </property>
            </widget>
           </item>
-          <item row="1" column="0">
+          <item row="1" column="0" colspan="2">
+           <widget class="QCheckBox" name="enable_n1mm_broadcast_check_box">
+            <property name="toolTip">
+             <string>Send a plain ADIF record to the configured application whenever a contact is logged. This feed does not send decodes or status updates.</string>
+            </property>
+            <property name="text">
+             <string>Enable ADIF output</string>
+            </property>
+           </widget>
+          </item>
+          <item row="2" column="0">
            <widget class="QLabel" name="n1mm_server_name_label">
             <property name="text">
-             <string>Server name or IP address:</string>
+             <string>Application address:</string>
             </property>
             <property name="buddy">
              <cstring>n1mm_server_name_line_edit</cstring>
             </property>
            </widget>
           </item>
-          <item row="1" column="1">
+          <item row="2" column="1">
            <widget class="QLineEdit" name="n1mm_server_name_line_edit">
             <property name="toolTip">
-             <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Optional host name of N1MM Logger+ program to receive ADIF UDP broadcasts. This is usually 'localhost' or ip address 127.0.0.1&lt;/p&gt;&lt;p&gt;Formats:&lt;/p&gt;&lt;ul style=&quot;margin-top: 0px; margin-bottom: 0px; margin-left: 0px; margin-right: 0px; -qt-list-indent: 1;&quot;&gt;&lt;li style=&quot; margin-top:12px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;&quot;&gt;hostname&lt;/li&gt;&lt;li style=&quot; margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;&quot;&gt;IPv4 address&lt;/li&gt;&lt;li style=&quot; margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;&quot;&gt;IPv6 address&lt;/li&gt;&lt;li style=&quot; margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;&quot;&gt;IPv4 multicast group address&lt;/li&gt;&lt;li style=&quot; margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;&quot;&gt;IPv6 multicast group address&lt;/li&gt;&lt;/ul&gt;&lt;p&gt;Clearing this field will disable broadcasting of ADIF information via UDP.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+             <string>IPv4 or IPv6 address of a logging application that receives plain ADIF records over UDP. For an application on this computer, use 127.0.0.1. Leave blank to disable forwarding. PSK Reporter is configured separately above.</string>
             </property>
            </widget>
           </item>
-          <item row="2" column="0">
+          <item row="4" column="0">
            <widget class="QLabel" name="n1mm_server_port_label">
             <property name="text">
-             <string>Server port number:</string>
+             <string>Port:</string>
             </property>
             <property name="buddy">
              <cstring>n1mm_server_port_spin_box</cstring>
             </property>
            </widget>
           </item>
-          <item row="2" column="1">
+          <item row="4" column="1">
            <widget class="QSpinBox" name="n1mm_server_port_spin_box">
             <property name="toolTip">
-             <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Enter the port number that WSJT-X should use for UDP broadcasts of ADIF log information. For N1MM Logger+, this value should be 2333. If this is zero,  no updates will be broadcast.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+             <string>Port on which the logging application receives plain ADIF records over UDP. A port of zero disables forwarding.</string>
             </property>
             <property name="maximum">
              <number>65534</number>
             </property>
            </widget>
+          </item>
+          <item row="3" column="0" colspan="2">
+           <layout class="QHBoxLayout" name="n1mm_server_error_layout">
+            <item>
+             <widget class="QLabel" name="n1mm_server_error_label">
+              <property name="sizePolicy">
+               <sizepolicy hsizetype="Maximum" vsizetype="Preferred">
+                <horstretch>0</horstretch>
+                <verstretch>0</verstretch>
+               </sizepolicy>
+              </property>
+              <property name="visible">
+               <bool>false</bool>
+              </property>
+              <property name="text">
+               <string>This address is for PSK Reporter. Enable PSK Reporter spotting above. Enter your receiving application's address here, or leave this field blank.</string>
+              </property>
+              <property name="wordWrap">
+               <bool>true</bool>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <spacer name="n1mm_server_error_spacer">
+              <property name="orientation">
+               <enum>Qt::Horizontal</enum>
+              </property>
+              <property name="sizeHint" stdset="0">
+               <size>
+                <width>0</width>
+                <height>0</height>
+               </size>
+              </property>
+             </spacer>
+            </item>
+           </layout>
           </item>
          </layout>
         </widget>
@@ -3003,14 +3241,11 @@ Right click for insert and delete options.</string>
          </property>
          <layout class="QGridLayout" name="gridLayout_5">
           <item row="1" column="0" colspan="2">
-           <layout class="QGridLayout" name="horizontalLayout_20">
-            <property name="verticalSpacing">
-             <number>4</number>
-            </property>
-            <item row="0" column="0">
+           <layout class="QHBoxLayout" name="horizontalLayout_20">
+            <item>
              <widget class="QToolButton" name="highlighting_actions_tool_button">
               <property name="toolTip">
-               <string>Change or reset colors for the selected highlighting rule.</string>
+               <string>Change colors, or restore the selected highlighting rule to its Default 1 colors and enabled state.</string>
               </property>
               <property name="text">
                <string>Actions...</string>
@@ -3020,7 +3255,7 @@ Right click for insert and delete options.</string>
               </property>
              </widget>
             </item>
-            <item row="0" column="1">
+            <item>
              <widget class="QPushButton" name="move_highlighting_up_push_button">
               <property name="toolTip">
                <string>Move the selected highlighting rule earlier in priority order.</string>
@@ -3030,7 +3265,7 @@ Right click for insert and delete options.</string>
               </property>
              </widget>
             </item>
-            <item row="1" column="0">
+            <item>
              <widget class="QPushButton" name="move_highlighting_down_push_button">
               <property name="toolTip">
                <string>Move the selected highlighting rule later in priority order.</string>
@@ -3040,32 +3275,61 @@ Right click for insert and delete options.</string>
               </property>
              </widget>
             </item>
-            <item row="1" column="1">
-             <widget class="QPushButton" name="reset_highlighting_to_defaults_push_button">
+            <item>
+             <spacer name="highlighting_rule_actions_spacer">
+              <property name="orientation">
+               <enum>Qt::Horizontal</enum>
+              </property>
+              <property name="sizeHint" stdset="0">
+               <size>
+                <width>40</width>
+                <height>20</height>
+               </size>
+              </property>
+             </spacer>
+            </item>
+           </layout>
+          </item>
+          <item row="2" column="0" colspan="2">
+           <layout class="QHBoxLayout" name="highlighting_global_actions_layout">
+            <item>
+             <widget class="QToolButton" name="color_presets_tool_button">
               <property name="toolTip">
-               <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Push to reset all highlight items above to default values and priorities.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+               <string>Apply a predefined color scheme without changing enabled rules or priority.</string>
               </property>
               <property name="text">
-               <string>Reset Highlighting to Default 1</string>
+               <string>Color presets...</string>
+              </property>
+              <property name="popupMode">
+               <enum>QToolButton::InstantPopup</enum>
               </property>
              </widget>
             </item>
-            <item row="2" column="0">
-             <widget class="QPushButton" name="reset_highlighting_to_defaults2_push_button">
+            <item>
+             <widget class="QToolButton" name="reset_highlighting_tool_button">
+              <property name="toolTip">
+               <string>Restore colors, enabled rules, and priority order to a complete default configuration.</string>
+              </property>
               <property name="text">
-               <string>Reset Highlighting to Default 2</string>
+               <string>Reset highlighting...</string>
+              </property>
+              <property name="popupMode">
+               <enum>QToolButton::InstantPopup</enum>
               </property>
              </widget>
             </item>
-            <item row="2" column="1">
-             <widget class="QPushButton" name="rescan_log_push_button">
-              <property name="toolTip">
-               <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Click to scan the wsjtx_log.adi ADIF file again for worked before information&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <item>
+             <spacer name="highlighting_global_actions_spacer">
+              <property name="orientation">
+               <enum>Qt::Horizontal</enum>
               </property>
-              <property name="text">
-               <string>Rescan ADIF Log</string>
+              <property name="sizeHint" stdset="0">
+               <size>
+                <width>40</width>
+                <height>20</height>
+               </size>
               </property>
-             </widget>
+             </spacer>
             </item>
            </layout>
           </item>
@@ -3087,7 +3351,7 @@ Right click for insert and delete options.</string>
              <bool>true</bool>
             </property>
             <property name="toolTip">
-             <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Enable or disable using the check boxes and right-click an item to change or unset the foreground color, background color, or reset the item to default values. Drag and drop the items to change their priority, higher in the list is higher in priority.&lt;/p&gt;&lt;p&gt;Note that each foreground or background color may be either set or unset, unset means that it is not allocated for that item's type and lower priority items may apply.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+             <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Use the check boxes to enable or disable rules. Right-click a rule to change or unset its foreground or background color, or restore its Default 1 colors and enabled state. Drag rules to change their priority; higher rules have higher priority.&lt;/p&gt;&lt;p&gt;Each foreground or background color can be set or unset. An unset color is not assigned by that rule, allowing a lower-priority rule to supply it.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
             </property>
             <property name="editTriggers">
              <set>QAbstractItemView::NoEditTriggers</set>
@@ -3110,6 +3374,59 @@ Right click for insert and delete options.</string>
            </widget>
           </item>
           <item row="3" column="0" colspan="2">
+           <layout class="QHBoxLayout" name="worked_before_actions_layout">
+            <item>
+             <widget class="QPushButton" name="history_sources_push_button">
+              <property name="toolTip">
+               <string>Select additional ADIF files and folders to read for worked-before history. Source changes take effect when Settings is accepted with OK.</string>
+              </property>
+              <property name="text">
+               <string>History sources...</string>
+              </property>
+              <property name="autoDefault">
+               <bool>false</bool>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QPushButton" name="rescan_log_push_button">
+              <property name="toolTip">
+               <string>Reload the writable ADIF log and saved supplemental history sources. Pending source changes take effect after Settings OK.</string>
+              </property>
+              <property name="text">
+               <string>Rescan ADIF Log</string>
+              </property>
+              <property name="autoDefault">
+               <bool>false</bool>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <spacer name="worked_before_actions_spacer">
+              <property name="orientation">
+               <enum>Qt::Horizontal</enum>
+              </property>
+              <property name="sizeHint" stdset="0">
+               <size>
+                <width>40</width>
+                <height>20</height>
+               </size>
+              </property>
+             </spacer>
+            </item>
+           </layout>
+          </item>
+          <item row="4" column="0" colspan="2">
+           <widget class="QLineEdit" name="worked_before_status_line_edit">
+            <property name="text">
+             <string>Worked-before history has not been scanned.</string>
+            </property>
+            <property name="readOnly">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+          <item row="5" column="0" colspan="2">
            <layout class="QGridLayout" name="gridLayout_23">
             <item row="1" column="0">
              <widget class="QCheckBox" name="only_fields_check_box">
@@ -3390,6 +3707,49 @@ Right click for insert and delete options.</string>
        <string>Advanced</string>
       </attribute>
       <layout class="QGridLayout" name="gridLayout_9">
+       <item row="1" column="0" colspan="2">
+        <widget class="QGroupBox" name="best_sp_group_box">
+         <property name="title">
+          <string>Best S+P</string>
+         </property>
+         <layout class="QGridLayout" name="best_sp_layout">
+          <item row="0" column="0">
+           <widget class="QCheckBox" name="best_sp_new_dxcc_check_box">
+            <property name="text">
+             <string>New DXCC entity</string>
+            </property>
+           </widget>
+          </item>
+          <item row="0" column="1">
+           <widget class="QCheckBox" name="best_sp_new_call_on_band_check_box">
+            <property name="text">
+             <string>Callsign not worked on this band</string>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="0" colspan="2">
+           <widget class="QLabel" name="best_sp_explanation_label">
+            <property name="text">
+             <string>New DXCC entities have priority. Highlight colors, enabled rules, and rule order do not affect selection.</string>
+            </property>
+            <property name="wordWrap">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+          <item row="2" column="0" colspan="2">
+           <widget class="QLabel" name="best_sp_matching_explanation_label">
+            <property name="text">
+             <string>Worked-before matching follows 'Highlight by Mode' and 'Include extra WAE entities' on Colors.</string>
+            </property>
+            <property name="wordWrap">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
        <item row="3" column="0">
         <widget class="QGroupBox" name="gbCloudlog">
          <property name="sizePolicy">
@@ -3414,7 +3774,7 @@ Right click for insert and delete options.</string>
           <item row="0" column="0">
            <widget class="QCheckBox" name="cbCloudlog">
             <property name="toolTip">
-             <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Upload logged QSOs to Cloudlog or Wavelog.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+             <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Upload logged QSOs to Cloudlog or Wavelog. Disable this if WaveLogGate already uploads these contacts.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
             </property>
             <property name="accessibleName">
              <string>Upload QSOs to Cloudlog or Wavelog</string>
@@ -3501,6 +3861,9 @@ Right click for insert and delete options.</string>
               <property name="toolTip">
                <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Your API key.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
               </property>
+              <property name="echoMode">
+               <enum>QLineEdit::Password</enum>
+              </property>
              </widget>
             </item>
             <item row="0" column="1" colspan="3">
@@ -3520,12 +3883,48 @@ Right click for insert and delete options.</string>
               </property>
              </widget>
             </item>
+            <item row="3" column="0" colspan="4">
+             <widget class="QCheckBox" name="cbCloudlogRadio">
+              <property name="toolTip">
+               <string>Send live frequency and mode changes to Cloudlog or Wavelog. Wavelog API v2 tokens also need the radio:write scope. Enable only one live-status publisher per radio. Disable this if WaveLogGate already reports this radio.</string>
+              </property>
+              <property name="accessibleName">
+               <string>Report live radio status to Cloudlog or Wavelog</string>
+              </property>
+              <property name="text">
+               <string>Report live radio status</string>
+              </property>
+             </widget>
+            </item>
+            <item row="4" column="0">
+             <widget class="QLabel" name="cloudlog_radio_name_label">
+              <property name="text">
+               <string>Radio name: </string>
+              </property>
+              <property name="buddy">
+               <cstring>leCloudlogRadioName</cstring>
+              </property>
+             </widget>
+            </item>
+            <item row="4" column="1" colspan="3">
+             <widget class="QLineEdit" name="leCloudlogRadioName">
+              <property name="toolTip">
+               <string>Name identifying this WSJT-X radio in Cloudlog or Wavelog. Use a different name for each running instance.</string>
+              </property>
+              <property name="maxLength">
+               <number>250</number>
+              </property>
+              <property name="placeholderText">
+               <string>WSJT-X</string>
+              </property>
+             </widget>
+            </item>
            </layout>
           </item>
          </layout>
         </widget>
        </item>
-       <item row="0" column="1" rowspan="2">
+       <item row="0" column="1">
         <widget class="QGroupBox" name="groupBox_5">
          <property name="title">
           <string>Miscellaneous</string>
@@ -3857,6 +4256,9 @@ Right click for insert and delete options.</string>
              <widget class="QLineEdit" name="eqslpasswd_edit">
               <property name="toolTip">
                <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Your logon password.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+              </property>
+              <property name="echoMode">
+               <enum>QLineEdit::Password</enum>
               </property>
              </widget>
             </item>
@@ -5350,6 +5752,8 @@ Right click for insert and delete options.</string>
   <tabstop>cbx4ToneSpacing</tabstop>
   <tabstop>rbLowSidelobes</tabstop>
   <tabstop>rbMaxSensitivity</tabstop>
+  <tabstop>best_sp_new_dxcc_check_box</tabstop>
+  <tabstop>best_sp_new_call_on_band_check_box</tabstop>
   <tabstop>cbSpecialOpActivity</tabstop>
   <tabstop>rbFox</tabstop>
   <tabstop>cbSuperFox</tabstop>
@@ -5376,6 +5780,8 @@ Right click for insert and delete options.</string>
   <tabstop>leCloudlogApiKey</tabstop>
   <tabstop>cbCloudlogStationProfile</tabstop>
   <tabstop>pbTestCloudlog</tabstop>
+  <tabstop>cbCloudlogRadio</tabstop>
+  <tabstop>leCloudlogRadioName</tabstop>
   <tabstop>cbEQSL</tabstop>
   <tabstop>eqsluser_edit</tabstop>
   <tabstop>eqslpasswd_edit</tabstop>

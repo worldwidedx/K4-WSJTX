@@ -1,7 +1,9 @@
 #include "JttyTxStream.hpp"
 
-#include "Audio/soundout.h"
+#include "Audio/AudioOutputSink.hpp"
 #include "Logger.hpp"
+#include <QSemaphore>
+#include <limits>
 
 #include "moc_JttyTxStream.cpp"
 
@@ -14,6 +16,12 @@ namespace
   constexpr qint64 DEFAULT_DRAIN_GUARD = 9600;   // 200 ms at 48 kHz
   constexpr qint64 DRAIN_GUARD_MARGIN  = 4800;   // 100 ms safety margin
 }
+
+struct JttyTxStream::PendingEnqueues
+{
+  QSemaphore samples {int (TxAudioQueue::defaultCapacity ())};
+  QSemaphore requests {64};
+};
 
 TxEvidence::TxStartSnapshot makeJttyTxStartSnapshot (TxEvidence::TxRequest const& request,
                                                       qint64 committedEndSample)
@@ -31,6 +39,7 @@ TxEvidence::TxStartSnapshot makeJttyTxStartSnapshot (TxEvidence::TxRequest const
 
 JttyTxStream::JttyTxStream (TxAudioQueue& queue, QObject * parent)
   : AudioDevice {parent}
+  , m_pendingEnqueues {std::make_shared<PendingEnqueues> ()}
   , m_queue {queue}
   , m_drainGuard {DEFAULT_DRAIN_GUARD}
   , m_drainTimer {new QTimer {this}}
@@ -40,7 +49,7 @@ JttyTxStream::JttyTxStream (TxAudioQueue& queue, QObject * parent)
   connect (m_drainTimer, &QTimer::timeout, this, &JttyTxStream::pollDrain);
 }
 
-void JttyTxStream::start (TxEvidence::TxRequest request, SoundOutput * stream)
+void JttyTxStream::start (TxEvidence::TxRequest request, AudioOutputSink * stream)
 {
   if (m_active) return;
   auto progress = m_queue.progress ();
@@ -61,19 +70,26 @@ void JttyTxStream::start (TxEvidence::TxRequest request, SoundOutput * stream)
       return;
     }
   initialize (QIODevice::ReadOnly, request.channel);
+  m_lastProgress = {};
   m_active = true;
   m_stream = stream;
+  // Restart may pull immediately, before the new backend tail is available.
+  m_drainGuard.store (std::numeric_limits<qint64>::max (),
+                      std::memory_order_release);
   if (m_stream)
     {
-      m_stream->restart (this);
-      // Size the drain guard to the actual device buffer (now valid) plus a
-      // margin; same audio thread as SoundOutput, so this is not a cross-thread
-      // QAudioOutput access.
-      qint64 const bufFrames = bytesPerFrame ()
-        ? qint64 (m_stream->bufferSize ()) / qint64 (bytesPerFrame ())
+      m_stream->restart (this, {request.session_id, request.generation});
+      // Include the sink's unplayed tail estimate and a safety margin.
+      qint64 const tailFrames = bytesPerFrame ()
+        ? qint64 (m_stream->unplayedBufferBytes ()) / qint64 (bytesPerFrame ())
         : 0;
-      m_drainGuard.store (qMax (bufFrames, DEFAULT_DRAIN_GUARD) + DRAIN_GUARD_MARGIN,
-                           std::memory_order_release);
+      m_drainGuard.store (
+        qMax (tailFrames, DEFAULT_DRAIN_GUARD) + DRAIN_GUARD_MARGIN,
+        std::memory_order_release);
+    }
+  else
+    {
+      m_drainGuard.store (DEFAULT_DRAIN_GUARD, std::memory_order_release);
     }
   if (!m_drainTimer->isActive ()) m_drainTimer->start ();
   Q_EMIT txSourceCommitted (makeJttyTxStartSnapshot (
@@ -89,8 +105,68 @@ void JttyTxStream::stop ()
   m_active = false;
   m_drainTimer->stop ();
   AudioDevice::close ();
-  // Do not drop queued PCM here. A GUI stop for the previous session can cross
-  // with the next enqueue; clear() is the explicit abort path.
+  // Reclaim cancelled PCM on the consumer thread before acknowledging stop.
+  // A pending reset preserves samples enqueued after its clear boundary.
+  m_queue.applyPendingReset ();
+  Q_EMIT stopped ();
+}
+
+void JttyTxStream::clearQueue (TxAudioQueueEpoch epoch)
+{
+  stop ();
+  m_queue.clear (epoch);
+  m_queue.applyPendingReset ();
+}
+
+void JttyTxStream::queuePcm (QByteArray const& samples,
+                             TxAudioQueueEpoch epoch, qint64 enqueueId)
+{
+  int const count = samples.size () / int (sizeof (qint16));
+  auto const pending = m_pendingEnqueues;
+  if (samples.isEmpty () || samples.size () % int (sizeof (qint16))
+      || !pending->requests.tryAcquire ()) {
+    Q_EMIT enqueueFailed (epoch, enqueueId, TxAudioQueueEnqueueFailure::Capacity);
+    return;
+  }
+  if (!pending->samples.tryAcquire (count)) {
+    pending->requests.release ();
+    Q_EMIT enqueueFailed (epoch, enqueueId, TxAudioQueueEnqueueFailure::Capacity);
+    return;
+  }
+
+  // The reservation follows the event, including across aborts and destruction.
+  auto pcm = std::shared_ptr<QByteArray> {
+    new QByteArray {samples}, [pending, count] (QByteArray * payload) {
+      delete payload;
+      pending->samples.release (count);
+      pending->requests.release ();
+    }};
+  QMetaObject::invokeMethod (this, [this, pcm, epoch, enqueueId] {
+    enqueuePcm (*pcm, epoch, enqueueId);
+  }, Qt::QueuedConnection);
+}
+
+void JttyTxStream::enqueuePcm (QByteArray const& samples,
+                               TxAudioQueueEpoch epoch,
+                               qint64 enqueueId)
+{
+  if (samples.isEmpty () || samples.size () % int (sizeof (qint16)))
+    {
+      Q_EMIT enqueueFailed (
+        epoch, enqueueId, TxAudioQueueEnqueueFailure::Capacity);
+      return;
+    }
+
+  qint64 const count = samples.size () / int (sizeof (qint16));
+  qint16 const * pcm = reinterpret_cast<qint16 const *> (samples.constData ());
+  auto const result = m_queue.enqueue (pcm, count, epoch);
+  if (!result.accepted)
+    {
+      Q_EMIT enqueueFailed (epoch, enqueueId, result.failure);
+      return;
+    }
+
+  Q_EMIT enqueueAccepted (enqueueId, count, result.progress);
 }
 
 qint64 JttyTxStream::readData (char * data, qint64 maxSize)
@@ -112,6 +188,16 @@ qint64 JttyTxStream::readData (char * data, qint64 maxSize)
 
 void JttyTxStream::pollDrain ()
 {
+  if (!m_active) return;
+  auto const current = m_queue.progress ();
+  if (current.epoch.isValid ()
+      && (current.epoch != m_lastProgress.epoch
+          || current.served_samples != m_lastProgress.served_samples
+          || current.total_samples != m_lastProgress.total_samples))
+    {
+      m_lastProgress = current;
+      Q_EMIT progress (current);
+    }
   auto const drain = m_queue.takeDrainReady ();
   if (drain.ready)
     {

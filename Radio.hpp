@@ -7,6 +7,7 @@
 
 #include "udp_export.h"
 
+class QRegularExpression;
 class QVariant;
 class QString;
 
@@ -53,8 +54,11 @@ namespace Radio
   //
   // Callsigns
   //
+  bool UDP_EXPORT is_standard_callsign (QString const&);
+  UDP_EXPORT QRegularExpression const& decoded_grid_pattern ();
   bool UDP_EXPORT is_callsign (QString const&);
   bool UDP_EXPORT is_compound_callsign (QString const&);
+  bool UDP_EXPORT is_operating_suffix (QString const&);
   bool is_77bit_nonstandard_callsign (QString const&);
   QString UDP_EXPORT base_callsign (QString);
   QString UDP_EXPORT effective_prefix (QString);

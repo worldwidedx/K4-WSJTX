@@ -2,8 +2,6 @@
 #define COMMONS_H
 
 #define NFFT 32768
-#define BASELINE_RATE 96000
-#define BASELINE_NFFT 32768
 
 
 #include <QString>
@@ -24,7 +22,8 @@ extern struct {                     //This is "common/datcom/..." in Fortran
   int mousedf;                      //User-selected DF
   int mousefqso;                    //User-selected QSO freq (kHz)
   int nagain;                       //1 ==> decode only at fQSO +/- Tol
-  int ndepth;                       //How much hinted decoding to do?
+  int ndepth;                       //JT65 search level (0-2)
+  int ndepthq65;                    //Q65 search level (1-3)
   int ndiskdat;                     //1 ==> data read from *.tf2 or *.iq file
   int neme;                         //Hinted decoding tries only for EME calls
   int newdat;                       //1 ==> new data, must do long FFT
@@ -57,9 +56,6 @@ extern struct {                     //This is "common/datcom/..." in Fortran
   extern float* dd;
   extern float* ss;
   extern float* savg;
-  extern float* dd_old;
-  extern float* ss_old;
-  extern float* savg_old;
   extern int manualDecodeFlag ;
   double get_fcenter();
   void get_mycall(char*);
@@ -76,6 +72,7 @@ extern struct {                     //This is "common/datcom/..." in Fortran
   int get_mousefqso();
   int get_nagain();
   int get_ndepth();
+  int get_ndepthq65();
   int get_ndiskdat();
   int get_neme();
   int get_newdat();
@@ -100,9 +97,7 @@ extern struct {                     //This is "common/datcom/..." in Fortran
   void set_dd_ptr(void* ptr, int dim1, int dim2);
   void set_ss_ptr(void* ptr, int dim1, int dim2, int dim3);
   void set_savg_ptr(void* ptr, int dim1, int dim2);
-  void set_dd_old_ptr(void* ptr, int dim1, int dim2);
-  void set_ss_old_ptr(void* ptr, int dim1, int dim2, int dim3);
-  void set_savg_old_ptr(void* ptr, int dim1, int dim2);
+  void set_snap_ptr(int idx, void* dd_ptr, void* ss_ptr, void* savg_ptr, int ndd, int nfft);
   void set_fcenter(double);
   void set_map65RxLog(int);
   void set_nutc(int);
@@ -113,6 +108,7 @@ extern struct {                     //This is "common/datcom/..." in Fortran
   void set_mousefqso(int);
   void set_nagain(int);
   void set_ndepth(int);
+  void set_ndepthq65(int);
   void set_ndiskdat(int);
   void set_neme(int);
   void set_newdat(int);
@@ -152,12 +148,12 @@ extern struct {                     //This is "common/datcom/..." in Fortran
                             int   buf_size,
                             intptr_t event_handle);
   void set_manual_decode_flag(int);
-  void snapshot_buffers();
+  void snapshot_buffers(int idx, int ksamp, int nhsym_snap);
+  int get_decoder_lag_count();
+  int get_decoder_lag_kind();
 }
 
-extern QStringList allDecodes;
 extern QStringList allDecodes2;
-extern QString guiDate;
 
 extern bool m_w3szUrl;
 extern QString m_otherUrl;
@@ -171,6 +167,7 @@ inline int getMousedf()         { return get_mousedf(); }
 inline int getMousefqso()       { return get_mousefqso(); }
 inline int getNagain()          { return get_nagain(); }
 inline int getNdepth()          { return get_ndepth(); }
+inline int getNdepthq65()       { return get_ndepthq65(); }
 inline int getNdiskdat()        { return get_ndiskdat(); }
 inline int getNeme()            { return get_neme(); }
 inline int getNewdat()          { return get_newdat(); }
@@ -256,6 +253,7 @@ inline void setMousedf(int val)          { set_mousedf(val); }
 inline void setMousefqso(int val)        { set_mousefqso(val); }
 inline void setNagain(int val)           { set_nagain(val); }
 inline void setNdepth(int val)           { set_ndepth(val); }
+inline void setNdepthq65(int val)        { set_ndepthq65(val); }
 inline void setNdiskdat(int val)         { set_ndiskdat(val); }
 inline void setNeme(int val)             { set_neme(val); }
 inline void setNewdat(int val)           { set_newdat(val); }

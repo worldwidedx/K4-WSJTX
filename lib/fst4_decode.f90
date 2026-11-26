@@ -1,15 +1,80 @@
 module fst4_decode
+   use fst4_osd_workspace, only: fst4_osd_workspace_type
+   use fst4_ldpc_74, only: decode240_74_owned
+   use fst4_ldpc_101, only: decode240_101_owned
+   use fst4_wavegen, only: fst4_wavegen_workspace,gen_fst4wave_owned
+   use fst4_baseline_workspace, only: fst4_baseline_owned
+   use fst4_bitmetrics, only: fst4_bitmetrics_workspace,get_fst4_bitmetrics_owned
+   use decoder_engine_types, only: fst4_result
+   use packjt77, only: pack77_state,initialize_pack77_state,reset_pack77_state, &
+      pack77_for_state,unpack77_for_state
+   use, intrinsic :: iso_c_binding
+   use fftw3, only: fftwf_alloc_complex,fftwf_free,fftwf_plan_dft_r2c_1d,fftwf_plan_dft_1d, &
+      fftwf_destroy_plan,fftwf_execute_dft_r2c,fftwf_execute_dft,FFTW_ESTIMATE,FFTW_FORWARD,FFTW_BACKWARD
+   private
+   public :: fst4_decoder,fst4_options,fst4_decode_callback,fst4_diagnostic_callback,fst4_spectrum_callback
+
+   integer, parameter :: MAXCAND=200
+
+   type fst4_options
+      integer :: utc=0,period=15,receive_frequency=1500,low_frequency=200,high_frequency=4000
+      integer :: tolerance=100,effort=1,qso_progress=0,blanker_percent=0,blanker_step=0
+      integer :: fft_flags=FFTW_ESTIMATE
+      real :: eme_delay=0
+      logical :: wspr=.false.,single_decode=.false.,ap_cq_only=.false.
+      logical :: measure_doppler=.false.
+      character(len=12) :: mycall='',hiscall=''
+   end type
+
 
    type :: fst4_decoder
-      procedure(fst4_decode_callback), pointer :: callback
+      type(fst4_bitmetrics_workspace) :: metrics
+      type(fst4_osd_workspace_type) :: fec
+      type(fst4_wavegen_workspace) :: wavegen
+      type(pack77_state), pointer :: knowledge=>null()
+      complex(c_float_complex), pointer, contiguous :: big(:)=>null(),baseband(:)=>null(),frame(:)=>null()
+      integer, allocatable :: blanker_hist(:)
+      type(c_ptr) :: big_plan=c_null_ptr,baseband_plan=c_null_ptr,big_storage=c_null_ptr
+      integer :: fft_length=0,down_length=0,nwcalls=0
+      integer :: fft_flags=FFTW_ESTIMATE
+      character(len=20) :: wcalls(100)=''
+      character(len=12) :: mycall0='',hiscall0=''
+      integer :: apbits(240)=0,nappasses(0:5)=0,naptypes(0:5,4)=0
+      logical :: first=.true.,measure_doppler=.false.,owns_knowledge=.false.
+      logical :: host_history_loaded=.false.,history_dirty=.false.
+      procedure(fst4_diagnostic_callback), pointer, nopass :: diagnostic=>null()
+      procedure(fst4_spectrum_callback), pointer, nopass :: spectrum_sink=>null()
+      complex, allocatable :: sync1(:),sync2(:),synct1(:),synct2(:),sync_tweak(:)
+      integer :: sync_nss=0,sync_period=0
+      real :: sync_frequency=-1.e30,sync_dt=0,sync_fac=0
+      complex, pointer :: dopwave(:)=>null()
+      complex(c_float_complex), pointer, contiguous :: dopgain(:)=>null()
+      real, pointer :: dopss(:)=>null()
+      real, allocatable :: candidate_s(:),candidate_s2(:),candidate_base(:),baseline_scratch(:)
+      type(c_ptr) :: dop_plan=c_null_ptr,dop_storage=c_null_ptr
+      integer :: dop_length=0
+      real, allocatable :: spectrum(:)
+      procedure(fst4_decode_callback), pointer :: callback=>null()
    contains
-      procedure :: decode
+      procedure :: decode_pcm
+      procedure :: initialize
+      procedure :: reset
+      procedure :: destroy
+      procedure :: set_known_calls
+      procedure :: get_known_calls
+      final :: finalize
    end type fst4_decoder
 
    abstract interface
+      subroutine fst4_spectrum_callback(spectrum,df,first_frequency)
+         real, intent(in) :: spectrum(:),df,first_frequency
+      end subroutine
+      subroutine fst4_diagnostic_callback(line)
+         character(len=*), intent(in) :: line
+      end subroutine
       subroutine fst4_decode_callback (this,nutc,sync,nsnr,dt,freq,    &
-         decoded,nap,qual,ntrperiod,fmid,w50)
-         import fst4_decoder
+         decoded,nap,qual,ntrperiod,fmid,w50,result)
+         import fst4_decoder,fst4_result
          implicit none
          class(fst4_decoder), intent(inout) :: this
          integer, intent(in) :: nutc
@@ -23,102 +88,253 @@ module fst4_decode
          integer, intent(in) :: ntrperiod
          real, intent(in) :: fmid
          real, intent(in) :: w50
+         type(fst4_result), optional, intent(in) :: result
       end subroutine fst4_decode_callback
    end interface
 
 contains
 
-   subroutine decode(this,callback,iwave,nutc,nQSOProgress,nfa,nfb,nfqso, &
-      ndepth,ntrperiod,nexp_decode,ntol,emedelay,lagain,lapcqonly,mycall, &
-      hiscall,iwspr,lprinthash22)
+   subroutine initialize(this)
+      class(fst4_decoder), intent(inout) :: this
+      if(.not.associated(this%knowledge)) then
+         allocate(this%knowledge)
+         this%owns_knowledge=.true.
+         call initialize_pack77_state(this%knowledge)
+      endif
+   end subroutine
 
-      use prog_args
+   subroutine reset(this)
+      class(fst4_decoder), intent(inout) :: this
+      this%wcalls=''
+      this%nwcalls=0
+      this%mycall0=''
+      this%hiscall0=''
+      this%first=.true.
+      this%host_history_loaded=.false.
+      this%history_dirty=.false.
+      this%sync_nss=0
+      this%sync_period=0
+      this%sync_frequency=-1.e30
+      if(associated(this%knowledge)) call reset_pack77_state(this%knowledge)
+   end subroutine
+
+   subroutine destroy(this)
+      class(fst4_decoder), intent(inout) :: this
+      call clear_fft_plans(this)
+      call release_large_workspace(this)
+      if(associated(this%baseband)) deallocate(this%baseband)
+      if(associated(this%frame)) deallocate(this%frame)
+      nullify(this%baseband,this%frame)
+      if(allocated(this%blanker_hist)) deallocate(this%blanker_hist)
+      if(allocated(this%metrics%ci)) deallocate(this%metrics%ci)
+      if(allocated(this%metrics%one)) deallocate(this%metrics%one,this%metrics%zero)
+      if(allocated(this%metrics%s2)) deallocate(this%metrics%s2)
+      this%metrics%nss=0
+      this%wavegen=fst4_wavegen_workspace()
+      if(associated(this%knowledge).and.this%owns_knowledge) deallocate(this%knowledge)
+      this%owns_knowledge=.false.
+      nullify(this%knowledge,this%callback,this%diagnostic,this%spectrum_sink)
+      if(allocated(this%sync1)) deallocate(this%sync1,this%sync2,this%synct1,this%synct2,this%sync_tweak)
+      if(allocated(this%spectrum)) deallocate(this%spectrum)
+      if(associated(this%dopss)) deallocate(this%dopss)
+      nullify(this%dopss)
+      call this%fec%destroy()
+      call this%reset()
+   end subroutine
+
+   subroutine clear_fft_plans(this)
+     use fftw_tsan, only: wsjt_tsan_acquire_fftw, wsjt_tsan_release_fftw
+      class(fst4_decoder), intent(inout) :: this
+      !$omp critical(fftw)
+      call wsjt_tsan_acquire_fftw()
+      if(c_associated(this%big_plan)) call fftwf_destroy_plan(this%big_plan)
+      if(c_associated(this%baseband_plan)) call fftwf_destroy_plan(this%baseband_plan)
+      if(c_associated(this%dop_plan)) call fftwf_destroy_plan(this%dop_plan)
+      call wsjt_tsan_release_fftw()
+      !$omp end critical(fftw)
+      this%big_plan=c_null_ptr
+      this%baseband_plan=c_null_ptr
+      this%dop_plan=c_null_ptr
+      this%dop_length=0
+      this%fft_length=0
+      this%down_length=0
+   end subroutine
+
+   subroutine ensure_fft_buffer(storage,buffer,length,status)
+      type(c_ptr), intent(inout) :: storage
+      complex(c_float_complex), pointer, contiguous, intent(inout) :: buffer(:)
+      integer, intent(in) :: length
+      integer, intent(out) :: status
+      complex(c_float_complex), pointer, contiguous :: one_based(:)
+      status=0
+      if(associated(buffer)) then
+         if(size(buffer)>=length) return
+         call fftwf_free(storage)
+         storage=c_null_ptr
+         nullify(buffer)
+      endif
+      storage=fftwf_alloc_complex(int(length,c_size_t))
+      if(.not.c_associated(storage)) then
+         status=-1
+         return
+      endif
+      call c_f_pointer(storage,one_based,[length])
+      buffer(0:length-1)=>one_based
+   end subroutine
+
+   subroutine release_candidate_workspace(this)
+      class(fst4_decoder), intent(inout) :: this
+      if(allocated(this%candidate_s)) deallocate(this%candidate_s)
+      if(allocated(this%candidate_s2)) deallocate(this%candidate_s2)
+      if(allocated(this%candidate_base)) deallocate(this%candidate_base)
+      if(allocated(this%baseline_scratch)) deallocate(this%baseline_scratch)
+   end subroutine
+
+   subroutine release_large_workspace(this)
+      class(fst4_decoder), intent(inout) :: this
+      ! Aligned replacement buffers can reuse the retained plans through new-array execution.
+      if(c_associated(this%big_storage)) call fftwf_free(this%big_storage)
+      if(c_associated(this%dop_storage)) call fftwf_free(this%dop_storage)
+      this%big_storage=c_null_ptr
+      this%dop_storage=c_null_ptr
+      nullify(this%big,this%dopgain)
+      if(associated(this%dopwave)) deallocate(this%dopwave)
+      nullify(this%dopwave)
+      call release_candidate_workspace(this)
+   end subroutine
+
+   subroutine finalize(this)
+      type(fst4_decoder), intent(inout) :: this
+      call this%destroy()
+   end subroutine
+
+   subroutine set_known_calls(this,calls,status)
+      class(fst4_decoder), intent(inout) :: this
+      character(len=*), intent(in) :: calls(:)
+      integer, intent(out) :: status
+      status=-1
+      if(size(calls)>100) return
+      this%wcalls=''
+      this%nwcalls=size(calls)
+      this%wcalls(1:size(calls))=calls
+      status=0
+   end subroutine
+
+   subroutine get_known_calls(this,calls,count)
+      class(fst4_decoder), intent(in) :: this
+      character(len=*), intent(out) :: calls(:)
+      integer, intent(out) :: count
+      count=this%nwcalls
+      calls=''
+      calls(1:min(size(calls),count))=this%wcalls(1:min(size(calls),count))
+   end subroutine
+
+   subroutine decode_pcm(this,callback,samples,sample_count,options,status)
+      class(fst4_decoder), intent(inout) :: this
+      procedure(fst4_decode_callback) :: callback
+      integer(c_int16_t), intent(in) :: samples(:)
+      integer, intent(in) :: sample_count
+      type(fst4_options), intent(in) :: options
+      integer, intent(out) :: status
+      integer :: nfa,nfb,period,n
+      character(len=12) :: mycall,hiscall
+      status=-1
+      period=options%period
+      n=period*12000
+      ! The engine validates options and supplies a zero-padded full period.
+      if(sample_count<1.or.sample_count/=n.or.sample_count>size(samples)) return
+      call this%initialize()
+      if(options%fft_flags/=this%fft_flags) then
+         call clear_fft_plans(this)
+         this%fft_flags=options%fft_flags
+      endif
+      this%measure_doppler=options%measure_doppler
+      nfa=options%low_frequency
+      nfb=options%high_frequency
+      mycall=options%mycall
+      hiscall=options%hiscall
+      call decode_kernel(this,callback,samples,options%utc,options%qso_progress,nfa,nfb, &
+         options%receive_frequency,options%effort,period,options%blanker_percent,options%blanker_step, &
+         options%single_decode,options%tolerance, &
+         options%eme_delay,options%ap_cq_only,mycall,hiscall,merge(1,0,options%wspr),status)
+      if(period>=300) call release_large_workspace(this)
+   end subroutine
+
+   subroutine decode_kernel(this,callback,iwave,nutc,nQSOProgress,nfa,nfb,nfqso, &
+      ndepth,ntrperiod,blanker_percent,blanker_step,single_decode,ntol,emedelay,lapcqonly,mycall, &
+      hiscall,iwspr,status)
+     use fftw_tsan, only: wsjt_tsan_acquire_fftw, wsjt_tsan_release_fftw
+
       use timer_module, only: timer
       use packjt77
       use, intrinsic :: iso_c_binding
       include 'fst4/fst4_params.f90'
-      parameter (MAXCAND=100,MAXWCALLS=100)
+      parameter (MAXWCALLS=100)
       class(fst4_decoder), intent(inout) :: this
       procedure(fst4_decode_callback) :: callback
-      character*37 decodes(100)
+      integer, intent(in) :: blanker_percent,blanker_step
+      logical, intent(in) :: single_decode
+      character*37 decodes(MAXCAND)
+      integer decoded_hashes(MAXCAND),unresolved_hash
       character*37 msg,msgsent
-      character*20 wcalls(MAXWCALLS), wpart
+      character*20 wpart
       character*77 c77
       character*12 mycall,hiscall
-      character*12 mycall0,hiscall0
-      complex, allocatable :: c2(:)
-      complex, allocatable :: cframe(:)
-      complex, allocatable :: c_bigfft(:)          !Complex waveform
+      complex(c_float_complex), pointer, contiguous :: c2(:),cframe(:),c_bigfft(:)
       real llr(240),llrs(240,4)
-      real candidates0(200,5),candidates(200,5)
+      real candidates0(MAXCAND,5),candidates(MAXCAND,5)
       real bitmetrics(320,4)
       real s4(0:3,NN)
       real minsync
-      logical lagain,lapcqonly
+      logical lapcqonly
       integer itone(NN)
       integer hmod
       integer*1 apmask(240),cw(240),hdec(240)
       integer*1 message101(101),message74(74),message77(77)
-      integer*1 rvec(77)
-      integer apbits(240)
-      integer nappasses(0:5)   ! # of decoding passes for QSO states 0-5
-      integer naptypes(0:5,4)  ! (nQSOProgress,decoding pass)
-      integer mcq(29),mrrr(19),m73(19),mrr73(19)
 
-      logical badsync,unpk77_success,single_decode
-      logical first,nohiscall
-      logical new_callsign,plotspec_exists,wcalls_exists,do_k50_decode
+      logical badsync,unpk77_success
+      logical nohiscall
+      logical new_callsign,plotspec_exists,do_k50_decode
       logical decdata_exists
-      logical lprinthash22
+      character(len=256) :: diagnostic_line
 
-      integer*2 iwave(30*60*12000)
+      integer*2 iwave(*)
+      integer status
+      real(c_float), pointer, contiguous :: fft_input(:)
+      type(fst4_result) :: result
 
-      data   mcq/0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0/
-      data  mrrr/0,1,1,1,1,1,1,0,1,0,0,1,0,0,1,0,0,0,1/
-      data   m73/0,1,1,1,1,1,1,0,1,0,0,1,0,1,0,0,0,0,1/
-      data mrr73/0,1,1,1,1,1,1,0,0,1,1,1,0,1,0,1,0,0,1/
-      data  rvec/0,1,0,0,1,0,1,0,0,1,0,1,1,1,1,0,1,0,0,0,1,0,0,1,1,0,1,1,0, &
+      integer, parameter :: rvec(77)=[0,1,0,0,1,0,1,0,0,1,0,1,1,1,1,0,1,0,0,0,1,0,0,1,1,0,1,1,0, &
          1,0,0,1,0,1,1,0,0,0,0,1,0,0,0,1,0,1,0,0,1,1,1,1,0,0,1,0,1, &
-         0,1,0,1,0,1,1,0,1,1,1,1,1,0,0,0,1,0,1/
-      data first/.true./,hmod/1/,fcbest/0.0/
+         0,1,0,1,0,1,1,0,1,1,1,1,1,0,0,0,1,0,1]
+      integer, parameter :: mcq(29)= &
+         2*mod([0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0]+rvec(1:29),2)-1
+      integer, parameter :: mrrr(19)=2*mod([0,1,1,1,1,1,1,0,1,0,0,1,0,0,1,0,0,0,1]+rvec(59:77),2)-1
+      integer, parameter :: m73(19)=2*mod([0,1,1,1,1,1,1,0,1,0,0,1,0,1,0,0,0,0,1]+rvec(59:77),2)-1
+      data hmod/1/
 
-      save first,apbits,nappasses,naptypes,mycall0,hiscall0
-      save wcalls,nwcalls
 
+
+      status=0
       this%callback => callback
-      dxcall13=hiscall   ! initialize for use in packjt77
-      mycall13=mycall
+      this%knowledge%dxcall13=hiscall
+      this%knowledge%mycall13=mycall
 
-      if(iwspr.ne.0 .and. iwspr.ne.1) return 
+      if(iwspr.ne.0 .and. iwspr.ne.1) return
 
-      if(lagain) continue ! use lagain to keep compiler happy 
+      fa=0.
+      fb=0.
 
-      if(first) then
-! read the fst4_calls.txt file
-         inquire(file=trim(data_dir)//'/fst4w_calls.txt',exist=wcalls_exists)
-         if( wcalls_exists ) then
-            open(42,file=trim(data_dir)//'/fst4w_calls.txt',status='unknown')
-            do i=1,MAXWCALLS
-               wcalls(i)=''
-               read(42,fmt='(a)',end=2867) wcalls(i)
-               wcalls(i)=adjustl(wcalls(i))
-               if(len(trim(wcalls(i))).eq.0) exit
-            enddo
-2867        nwcalls=i-1
-            close(42)
-         endif
+      if(this%first) then
+         this%apbits=0
+         this%apbits(1)=99
+         this%apbits(30)=99
 
-         mcq=2*mod(mcq+rvec(1:29),2)-1
-         mrrr=2*mod(mrrr+rvec(59:77),2)-1
-         m73=2*mod(m73+rvec(59:77),2)-1
-         mrr73=2*mod(mrr73+rvec(59:77),2)-1
-
-         nappasses(0)=2
-         nappasses(1)=2
-         nappasses(2)=2
-         nappasses(3)=2
-         nappasses(4)=2
-         nappasses(5)=3
+         this%nappasses(0)=2
+         this%nappasses(1)=2
+         this%nappasses(2)=2
+         this%nappasses(3)=2
+         this%nappasses(4)=2
+         this%nappasses(5)=3
 
 ! iaptype
 !------------------------
@@ -130,49 +346,49 @@ contains
 !   6        MyCall DxCall RR73          (77 ap bits)
 !********
 
-         naptypes(0,1:4)=(/1,2,0,0/) ! Tx6 selected (CQ)
-         naptypes(1,1:4)=(/2,3,0,0/) ! Tx1
-         naptypes(2,1:4)=(/2,3,0,0/) ! Tx2
-         naptypes(3,1:4)=(/3,6,0,0/) ! Tx3
-         naptypes(4,1:4)=(/3,6,0,0/) ! Tx4
-         naptypes(5,1:4)=(/3,1,2,0/) ! Tx5
+         this%naptypes(0,1:4)=(/1,2,0,0/) ! Tx6 selected (CQ)
+         this%naptypes(1,1:4)=(/2,3,0,0/) ! Tx1
+         this%naptypes(2,1:4)=(/2,3,0,0/) ! Tx2
+         this%naptypes(3,1:4)=(/3,6,0,0/) ! Tx3
+         this%naptypes(4,1:4)=(/3,6,0,0/) ! Tx4
+         this%naptypes(5,1:4)=(/3,1,2,0/) ! Tx5
 
-         mycall0=''
-         hiscall0=''
-         first=.false.
+         this%mycall0=''
+         this%hiscall0=''
+         this%first=.false.
       endif
 
       l1=index(mycall,char(0))
       if(l1.ne.0) mycall(l1:)=" "
       l1=index(hiscall,char(0))
       if(l1.ne.0) hiscall(l1:)=" "
-      if(mycall.ne.mycall0 .or. hiscall.ne.hiscall0) then
-         apbits=0
-         apbits(1)=99
-         apbits(30)=99
+      if(mycall.ne.this%mycall0 .or. hiscall.ne.this%hiscall0) then
+         this%apbits=0
+         this%apbits(1)=99
+         this%apbits(30)=99
 
          if(len(trim(mycall)) .lt. 3) go to 10
 
          nohiscall=.false.
-         hiscall0=hiscall
-         if(len(trim(hiscall0)).lt.3) then
-            hiscall0=mycall  ! use mycall for dummy hiscall - mycall won't be hashed.
+         this%hiscall0=hiscall
+         if(len(trim(this%hiscall0)).lt.3) then
+            this%hiscall0=mycall  ! use mycall for dummy hiscall - mycall won't be hashed.
             nohiscall=.true.
          endif
-         msg=trim(mycall)//' '//trim(hiscall0)//' RR73'
+         msg=trim(mycall)//' '//trim(this%hiscall0)//' RR73'
          i3=-1
          n3=-1
-         call pack77(msg,i3,n3,c77)
-         call unpack77(c77,1,msgsent,unpk77_success)
+         call pack77_for_state(this%knowledge,msg,i3,n3,c77)
+         call unpack77_for_state(this%knowledge,c77,1,msgsent,unpk77_success)
          if(i3.ne.1 .or. (msg.ne.msgsent) .or. .not.unpk77_success) go to 10
          read(c77,'(77i1)') message77
          message77=mod(message77+rvec,2)
-         apbits(1:77)=2*message77-1
-         if(nohiscall) apbits(30)=99
+         this%apbits(1:77)=2*message77-1
+         if(nohiscall) this%apbits(30)=99
 
 10       continue
-         mycall0=mycall
-         hiscall0=hiscall
+         this%mycall0=mycall
+         this%hiscall0=hiscall
       endif
 !************************************
 
@@ -228,9 +444,54 @@ contains
       nfft1=nfft2*ndown
       nh1=nfft1/2
 
-      allocate( c_bigfft(0:nfft1/2) )
-      allocate( c2(0:nfft2-1) )
-      allocate( cframe(0:160*nss-1) )
+      call ensure_fft_buffer(this%big_storage,this%big,nfft1/2+1,status)
+      if(status/=0) return
+      call c_f_pointer(this%big_storage,fft_input,[nfft1+2])
+      if(this%fft_length/=nfft1.or..not.c_associated(this%big_plan)) then
+         !$omp critical(fftw)
+         call wsjt_tsan_acquire_fftw()
+         if(c_associated(this%big_plan)) call fftwf_destroy_plan(this%big_plan)
+         this%big_plan=fftwf_plan_dft_r2c_1d(nfft1,fft_input,this%big,this%fft_flags)
+         call wsjt_tsan_release_fftw()
+         !$omp end critical(fftw)
+         this%fft_length=nfft1
+      endif
+      if(this%down_length/=nfft2.or..not.c_associated(this%baseband_plan)) then
+         !$omp critical(fftw)
+         call wsjt_tsan_acquire_fftw()
+         if(c_associated(this%baseband_plan)) call fftwf_destroy_plan(this%baseband_plan)
+         call wsjt_tsan_release_fftw()
+         !$omp end critical(fftw)
+         this%baseband_plan=c_null_ptr
+         if(associated(this%baseband)) then
+            if(size(this%baseband)<nfft2) then
+               deallocate(this%baseband)
+               nullify(this%baseband)
+            endif
+         endif
+         if(.not.associated(this%baseband)) allocate(this%baseband(0:nfft2-1))
+         !$omp critical(fftw)
+         call wsjt_tsan_acquire_fftw()
+         ! in==out requests an intentional in-place FFTW transform.
+         this%baseband_plan=fftwf_plan_dft_1d(nfft2,this%baseband,this%baseband,FFTW_BACKWARD,this%fft_flags)
+         call wsjt_tsan_release_fftw()
+         !$omp end critical(fftw)
+         this%down_length=nfft2
+      endif
+      if(.not.c_associated(this%big_plan).or..not.c_associated(this%baseband_plan)) then
+         status=-1
+         return
+      endif
+      if(associated(this%frame)) then
+         if(size(this%frame)<160*nss) then
+            deallocate(this%frame)
+            nullify(this%frame)
+         endif
+      endif
+      if(.not.associated(this%frame)) allocate(this%frame(0:160*nss-1))
+      c_bigfft(0:)=>this%big(0:nfft1/2)
+      c2(0:)=>this%baseband(0:nfft2-1)
+      cframe(0:)=>this%frame(0:160*nss-1)
 
       jittermax=2
       do_k50_decode=.false.
@@ -250,20 +511,12 @@ contains
 
 ! Noise blanker setup
       ndropmax=1
-      single_decode=iand(nexp_decode,32).ne.0
-      npct=0
-      nb=nexp_decode/256 - 3
-      if(nb.ge.0) npct=nb
-      inb1=20
-      inb2=5
-      if(nb.eq.-1) then
-         inb2=5                !Try NB = 0, 5, 10, 15, 20%
-      else if(nb.eq.-2) then
-         inb2=2                !Try NB = 0, 2, 4,... 20%
-      else if(nb.eq.-3) then
-         inb2=1                !Try NB = 0, 1, 2,... 20%
-      else
-         inb1=0                !Fixed NB value, 0 to 25%
+      npct=blanker_percent
+      inb1=0
+      inb2=1
+      if(blanker_step>0) then
+         inb1=20
+         inb2=blanker_step
       endif
 
 
@@ -295,27 +548,29 @@ contains
 
       ndecodes=0
       decodes=' '
+      decoded_hashes=-1
       new_callsign=.false.
+      if(.not.allocated(this%blanker_hist)) allocate(this%blanker_hist(0:32768))
       do inb=0,inb1,inb2
-         if(nb.lt.0) npct=inb ! we are looping over blanker settings
-         call blanker(iwave,nfft1,ndropmax,npct,c_bigfft)
+         if(blanker_step>0) npct=inb
+         call blanker(iwave,nfft1,ndropmax,npct,c_bigfft,this%blanker_hist)
 
 ! The big fft is done once and is used for calculating the smoothed spectrum
 ! and also for downconverting/downsampling each candidate.
-         call four2a(c_bigfft,nfft1,1,-1,0)         !r2c
+         call fftwf_execute_dft_r2c(this%big_plan,fft_input,this%big)
          nhicoh=1
          nsyncoh=8
          minsync=1.20
          if(ntrperiod.eq.15) minsync=1.15
 
-! Get first approximation of candidate frequencies
-         call get_candidates_fst4(c_bigfft,nfft1,nsps,hmod,fs,fa,fb,nfa,nfb,  &
-            minsync,ncand,candidates0)
+         call get_candidates_fst4(this,c_bigfft,nfft1,nsps,hmod,fs,fa,fb,nfa,nfb,  &
+            minsync,ncand,candidates0,status)
+         if(status/=0) return
          isbest=0
          fc2=0.
          do icand=1,ncand
             fc0=candidates0(icand,1)
-            if(iwspr.eq.0 .and. nb.lt.0 .and. npct.ne.0 .and.            &
+            if(iwspr.eq.0 .and. blanker_step>0 .and. npct.ne.0 .and.    &
                abs(fc0-(nfqso+1.5*baud)).gt.ntol) cycle  ! blanker loop only near nfqso
             detmet=candidates0(icand,2)
 
@@ -324,13 +579,17 @@ contains
 ! Output array c2 is complex baseband sampled at 12000/ndown Sa/sec.
 ! The size of the downsampled c2 array is nfft2=nfft1/ndown
             call timer('dwnsmpl ',0)
-            call fst4_downsample(c_bigfft,nfft1,ndown,fc0,sigbw,c2)
+            call fst4_downsample(this,c_bigfft,nfft1,ndown,fc0,sigbw,c2)
             call timer('dwnsmpl ',1)
 
             call timer('sync240 ',0)
-            call fst4_sync_search(c2,nfft2,hmod,fs2,nss,ntrperiod,nsyncoh, &
+            call fst4_sync_search(this,c2,nfft2,hmod,fs2,nss,ntrperiod,nsyncoh, &
                  emedelay,sbest,fcbest,isbest)
             call timer('sync240 ',1)
+            if(isbest<0) then
+               candidates0(icand,3)=-1
+               cycle
+            endif
 
             fc_synced = fc0 + fcbest
             dt_synced = (isbest-fs2)*dt2  !nominal dt is 1 second so frame starts at sample fs2
@@ -392,7 +651,7 @@ contains
             xdt=(isbest-nspsec)/fs2
             if(ntrperiod.eq.15) xdt=(isbest-real(nspsec)/2.0)/fs2
             call timer('dwnsmpl ',0)
-            call fst4_downsample(c_bigfft,nfft1,ndown,fc_synced,sigbw,c2)
+            call fst4_downsample(this,c_bigfft,nfft1,ndown,fc_synced,sigbw,c2)
             call timer('dwnsmpl ',1)
 
             do ijitter=0,jittermax
@@ -405,7 +664,7 @@ contains
                cframe=c2(is0:iend)
                bitmetrics=0
                call timer('bitmetrc',0)
-               call get_fst4_bitmetrics(cframe,nss,bitmetrics, &
+               call get_fst4_bitmetrics_owned(this%metrics,cframe,nss,bitmetrics, &
                   s4,nsync_qual,badsync)
                call timer('bitmetrc',1)
                if(badsync) cycle
@@ -418,7 +677,7 @@ contains
                enddo
 
                apmag=maxval(abs(llrs(:,4)))*1.1
-               ntmax=nblock+nappasses(nQSOProgress)
+               ntmax=nblock+this%nappasses(nQSOProgress)
                if(lapcqonly) ntmax=nblock+1
                if(ndepth.eq.1) ntmax=nblock ! no ap for ndepth=1
                apmask=0
@@ -440,10 +699,10 @@ contains
 
                   if(itry.gt.nblock .and. iwspr.eq.0) then ! do ap passes
                      llr=llrs(:,nblock)  ! Use largest blocksize as the basis for AP passes
-                     iaptype=naptypes(nQSOProgress,itry-nblock)
+                     iaptype=this%naptypes(nQSOProgress,itry-nblock)
                      if(lapcqonly) iaptype=1
-                     if(iaptype.ge.2 .and. apbits(1).gt.1) cycle  ! No, or nonstandard, mycall
-                     if(iaptype.ge.3 .and. apbits(30).gt.1) cycle ! No, or nonstandard, dxcall
+                     if(iaptype.ge.2 .and. this%apbits(1).gt.1) cycle  ! No, or nonstandard, mycall
+                     if(iaptype.ge.3 .and. this%apbits(30).gt.1) cycle ! No, or nonstandard, dxcall
                      if(iaptype.eq.1) then   ! CQ
                         apmask=0
                         apmask(1:29)=1
@@ -453,22 +712,22 @@ contains
                      if(iaptype.eq.2) then  ! MyCall ??? ???
                         apmask=0
                         apmask(1:29)=1
-                        llr(1:29)=apmag*apbits(1:29)
+                        llr(1:29)=apmag*this%apbits(1:29)
                      endif
 
                      if(iaptype.eq.3) then  ! MyCall DxCall ???
                         apmask=0
                         apmask(1:58)=1
-                        llr(1:58)=apmag*apbits(1:58)
+                        llr(1:58)=apmag*this%apbits(1:58)
                      endif
 
                      if(iaptype.eq.4 .or. iaptype.eq.5 .or. iaptype .eq.6) then
                         apmask=0
                         apmask(1:77)=1
-                        llr(1:58)=apmag*apbits(1:58)
+                        llr(1:58)=apmag*this%apbits(1:58)
                         if(iaptype.eq.4) llr(59:77)=apmag*mrrr(1:19)
                         if(iaptype.eq.5) llr(59:77)=apmag*m73(1:19)
-                        if(iaptype.eq.6) llr(59:77)=apmag*mrr73(1:19)
+                        if(iaptype.eq.6) llr(59:77)=apmag*this%apbits(59:77)
                      endif
                   endif
 
@@ -480,7 +739,7 @@ contains
                      Keff=91
                      norder=3
                      call timer('d240_101',0)
-                     call decode240_101(llr,Keff,maxosd,norder,apmask,message101, &
+                     call decode240_101_owned(this%fec,llr,Keff,maxosd,norder,apmask,message101, &
                         cw,ntype,nharderrors,dmin)
                      call timer('d240_101',1)
                      if(count(cw.eq.1).eq.0) then
@@ -488,14 +747,14 @@ contains
                         cycle
                      endif
                      write(c77,'(77i1)') mod(message101(1:77)+rvec,2)
-                     call unpack77(c77,1,msg,unpk77_success)
+                     call unpack77_for_state(this%knowledge,c77,1,msg,unpk77_success)
                   elseif(iwspr.eq.1) then
 ! Try decoding with Keff=66
                      maxosd=2
                      call timer('d240_74 ',0)
                      Keff=66
                      norder=3
-                     call decode240_74(llr,Keff,maxosd,norder,apmask,message74,cw, &
+                     call decode240_74_owned(this%fec,llr,Keff,maxosd,norder,apmask,message74,cw, &
                         ntype,nharderrors,dmin)
                      call timer('d240_74 ',1)
                      if(nharderrors.lt.0) goto 3465
@@ -505,14 +764,7 @@ contains
                      endif
                      write(c77,'(50i1)') message74(1:50)
                      c77(51:77)='000000000000000000000110000'
-                     call unpack77(c77,1,msg,unpk77_success)
-                     if(lprinthash22 .and. unpk77_success .and. index(msg,'<...>').gt.0) then
-                        read(c77,'(b22.22)') n22tmp
-                        i1=index(msg,' ')
-                        wpart=trim(msg(i1+1:))
-                        write(msg,'(a1,i7.7,a1)') '<',n22tmp,'>' 
-                        msg=trim(msg)//' '//trim(wpart)
-                     endif
+                     call unpack77_for_state(this%knowledge,c77,1,msg,unpk77_success)
                      if(unpk77_success .and. do_k50_decode) then
 ! If decode was obtained with Keff=66, save call/grid in fst4w_calls.txt if not there already.
                         i1=index(msg,' ')
@@ -521,18 +773,18 @@ contains
 ! Only save callsigns/grids from type 1 messages
                         if(index(wpart,'/').eq.0 .and. index(wpart,'<').eq.0) then
                            ifound=0
-                           do i=1,nwcalls
-                              if(index(wcalls(i),wpart).ne.0) ifound=1
+                           do i=1,this%nwcalls
+                              if(index(this%wcalls(i),wpart).ne.0) ifound=1
                            enddo
 
                            if(ifound.eq.0) then ! This is a new callsign
                               new_callsign=.true.
-                              if(nwcalls.lt.MAXWCALLS) then
-                                 nwcalls=nwcalls+1
-                                 wcalls(nwcalls)=wpart
+                              if(this%nwcalls.lt.MAXWCALLS) then
+                                 this%nwcalls=this%nwcalls+1
+                                 this%wcalls(this%nwcalls)=wpart
                               else
-                                 wcalls(1:nwcalls-1)=wcalls(2:nwcalls)
-                                 wcalls(nwcalls)=wpart
+                                 this%wcalls(1:this%nwcalls-1)=this%wcalls(2:this%nwcalls)
+                                 this%wcalls(this%nwcalls)=wpart
                               endif
                            endif
                         endif
@@ -546,7 +798,7 @@ contains
                         call timer('d240_74 ',0)
                         Keff=50
                         norder=4
-                        call decode240_74(llr,Keff,maxosd,norder,apmask,message74,cw, &
+                        call decode240_74_owned(this%fec,llr,Keff,maxosd,norder,apmask,message74,cw, &
                            ntype,nharderrors,dmin)
                         call timer('d240_74 ',1)
                         if(count(cw.eq.1).eq.0) then
@@ -555,12 +807,12 @@ contains
                         endif
                         write(c77,'(50i1)') message74(1:50)
                         c77(51:77)='000000000000000000000110000'
-                        call unpack77(c77,1,msg,unpk77_success)
+                        call unpack77_for_state(this%knowledge,c77,1,msg,unpk77_success)
 ! No CRC in this mode, so only accept the decode if call/grid have been seen before
                         if(unpk77_success) then
                            unpk77_success=.false.
-                           do i=1,nwcalls
-                              if(index(msg,trim(wcalls(i))).gt.0) then
+                           do i=1,this%nwcalls
+                              if(len_trim(this%wcalls(i))>0.and.index(msg,trim(this%wcalls(i))).gt.0) then
                                  unpk77_success=.true.
                               endif
                            enddo
@@ -570,25 +822,32 @@ contains
                   endif
 
                   if(nharderrors .ge.0 .and. unpk77_success) then
+                     unresolved_hash=-1
+                     if(iwspr==1.and.index(msg,'<...>')>0) read(c77,'(b22.22)') unresolved_hash
                      idupe=0
                      do i=1,ndecodes
-                        if(decodes(i).eq.msg) idupe=1
+                        if(decodes(i)==msg.and.decoded_hashes(i)==unresolved_hash) idupe=1
                      enddo
                      if(idupe.eq.1) goto 800
+                     if(ndecodes.ge.size(decodes)) goto 800
                      ndecodes=ndecodes+1
                      decodes(ndecodes)=msg
+                     decoded_hashes(ndecodes)=unresolved_hash
 
                      if(iwspr.eq.0) then
                         call get_fst4_tones_from_bits(message101,itone,0)
                      else
                         call get_fst4_tones_from_bits(message74,itone,1)
                      endif
-                     inquire(file='plotspec',exist=plotspec_exists)
+                     plotspec_exists=this%measure_doppler
+
                      fmid=-999.0
+                     w50=0.0
                      call timer('dopsprd ',0)
                      if(plotspec_exists) then
-                        call dopspread(itone,iwave,nsps,nmax,ndown,hmod,  &
-                           isbest,fc_synced,fmid,w50)
+                        call dopspread(this,itone,iwave,nsps,nmax,ndown,hmod,  &
+                           isbest,fc_synced,fmid,w50,status)
+                        if(status/=0) return
                      endif
                      call timer('dopsprd ',1)
                      xsig=0
@@ -623,21 +882,33 @@ contains
                      nsnr=nint(xsnr)
                      qual=0.0
                      fsig=fc_synced - 1.5*baud
-                     inquire(file=trim(data_dir)//'/decdata',exist=decdata_exists)
+                     decdata_exists=associated(this%diagnostic)
                      if(decdata_exists) then
                         hdec=0
                         where(llrs(:,1).ge.0.0) hdec=1
                         nhp=count(hdec.ne.cw) ! # hard errors wrt N=1 soft symbols
                         hd=sum(ieor(hdec,cw)*abs(llrs(:,1))) ! weighted distance wrt N=1 symbols
-                        open(21,file=trim(data_dir)//'/fst4_decodes.dat',status='unknown',position='append')
-                        write(21,3021) nutc,icand,itry,nsyncoh,iaptype,  &
+                        write(diagnostic_line,3021) nutc,icand,itry,nsyncoh,iaptype,  &
                            ijitter,npct,ntype,Keff,nsync_qual,nharderrors,dmin,nhp,hd,  &
                            sync,xsnr,xdt,fsig,w50,trim(msg)
 3021                    format(i6.6,i4,6i3,3i4,f6.1,i4,f6.1,f9.2,f6.1,f6.2,f7.1,f7.3,1x,a)
-                        close(21)
+                        call this%diagnostic(trim(diagnostic_line))
                      endif
-                     call this%callback(nutc,smax1,nsnr,xdt,fsig,msg,    &
-                        iaptype,qual,ntrperiod,fmid,w50)
+                     result=fst4_result()
+                     result%period_seconds=ntrperiod
+                     result%effective_bits=Keff
+                     result%blanker_percent=npct
+                     if(unresolved_hash>=0) then
+                        result%has_hash22=1
+                        result%hash22=unresolved_hash
+                     endif
+                     result%has_doppler=merge(1,0,plotspec_exists)
+                     if(plotspec_exists) then
+                        result%fmid_hz=fmid
+                        result%width_hz=w50
+                     endif
+                     call this%callback(nutc,sync,nsnr,xdt,fsig,msg, &
+                        iaptype,qual,ntrperiod,fmid,w50,result)
                      goto 800
                   endif
                enddo  ! metrics
@@ -645,42 +916,39 @@ contains
 800      enddo !candidate list
       enddo ! noise blanker loop
 
-      if(new_callsign .and. do_k50_decode) then ! re-write the fst4w_calls.txt file
-         open(42,file=trim(data_dir)//'/fst4w_calls.txt',status='unknown')
-         do i=1,nwcalls
-            write(42,'(a20)') trim(wcalls(i))
-         enddo
-         close(42)
-      endif
+      if(new_callsign) this%history_dirty=.true.
 
       return
-   end subroutine decode
+   end subroutine decode_kernel
 
-   subroutine sync_fst4(cd0,i0,f0,hmod,ncoh,np,nss,ntr,fs,sync)
+   subroutine sync_fst4(this,cd0,i0,f0,hmod,ncoh,np,nss,ntr,fs,sync)
 
 ! Compute sync power for a complex, downsampled FST4 signal.
 
       use timer_module, only: timer
       include 'fst4/fst4_params.f90'
+      class(fst4_decoder), intent(inout) :: this
       complex cd0(0:np-1)
-      complex csync1,csync2,csynct1,csynct2
-      complex ctwk(3200)
+
       complex z1,z2,z3,z4,z5
       integer hmod,isyncword1(0:7),isyncword2(0:7)
-      real f0save
-      common/sync240com/csync1(3200),csync2(3200),csynct1(3200),csynct2(3200)
+
+
       data isyncword1/0,1,3,2,1,0,2,3/
       data isyncword2/2,3,1,0,3,2,0,1/
-      data f0save/-99.9/,nss0/-1/,ntr0/-1/
-      save twopi,dt,fac,f0save,nss0,ntr0
 
-      p(z1)=(real(z1*fac)**2 + aimag(z1*fac)**2)**0.5     !Compute power
 
+
+      p(z1)=(real(z1*this%sync_fac)**2 + aimag(z1*this%sync_fac)**2)**0.5     !Compute power
+
+      if(.not.allocated(this%sync1)) allocate(this%sync1(3200),this%sync2(3200), &
+         this%synct1(3200),this%synct2(3200),this%sync_tweak(3200))
+      twopi=8.0*atan(1.0)
       nz=8*nss
       call timer('sync240a',0)
-      if(nss.ne.nss0 .or. ntr.ne.ntr0) then
+      if(nss.ne.this%sync_nss .or. ntr.ne.this%sync_period) then
          twopi=8.0*atan(1.0)
-         dt=1/fs
+         this%sync_dt=1/fs
          k=1
          phi1=0.0
          phi2=0.0
@@ -688,30 +956,30 @@ contains
             dphi1=twopi*hmod*(isyncword1(i)-1.5)/real(nss)
             dphi2=twopi*hmod*(isyncword2(i)-1.5)/real(nss)
             do j=1,nss
-               csync1(k)=cmplx(cos(phi1),sin(phi1))
-               csync2(k)=cmplx(cos(phi2),sin(phi2))
+               this%sync1(k)=cmplx(cos(phi1),sin(phi1))
+               this%sync2(k)=cmplx(cos(phi2),sin(phi2))
                phi1=mod(phi1+dphi1,twopi)
                phi2=mod(phi2+dphi2,twopi)
                k=k+1
             enddo
          enddo
-         fac=1.0/(8.0*nss)
-         nss0=nss
-         ntr0=ntr
-         f0save=-1.e30
+         this%sync_fac=1.0/(8.0*nss)
+         this%sync_nss=nss
+         this%sync_period=ntr
+         this%sync_frequency=-1.e30
       endif
 
-      if(f0.ne.f0save) then
-         dphi=twopi*f0*dt
+      if(f0.ne.this%sync_frequency) then
+         dphi=twopi*f0*this%sync_dt
          phi=0.0
          do i=1,nz
-            ctwk(i)=cmplx(cos(phi),sin(phi))
+            this%sync_tweak(i)=cmplx(cos(phi),sin(phi))
             phi=mod(phi+dphi,twopi)
          enddo
-         csynct1(1:nz)=ctwk(1:nz)*csync1(1:nz)
-         csynct2(1:nz)=ctwk(1:nz)*csync2(1:nz)
-         f0save=f0
-         nss0=nss
+         this%synct1(1:nz)=this%sync_tweak(1:nz)*this%sync1(1:nz)
+         this%synct2(1:nz)=this%sync_tweak(1:nz)*this%sync2(1:nz)
+         this%sync_frequency=f0
+         this%sync_nss=nss
       endif
       call timer('sync240a',1)
 
@@ -733,14 +1001,14 @@ contains
             is=(i-1)*ncoh*nss
             z1=0
             if(i1+is.ge.1) then
-               z1=sum(cd0(i1+is:i1+is+ncoh*nss-1)*conjg(csynct1(is+1:is+ncoh*nss)))
+               z1=sum(cd0(i1+is:i1+is+ncoh*nss-1)*conjg(this%synct1(is+1:is+ncoh*nss)))
             endif
-            z2=sum(cd0(i2+is:i2+is+ncoh*nss-1)*conjg(csynct2(is+1:is+ncoh*nss)))
-            z3=sum(cd0(i3+is:i3+is+ncoh*nss-1)*conjg(csynct1(is+1:is+ncoh*nss)))
-            z4=sum(cd0(i4+is:i4+is+ncoh*nss-1)*conjg(csynct2(is+1:is+ncoh*nss)))
+            z2=sum(cd0(i2+is:i2+is+ncoh*nss-1)*conjg(this%synct2(is+1:is+ncoh*nss)))
+            z3=sum(cd0(i3+is:i3+is+ncoh*nss-1)*conjg(this%synct1(is+1:is+ncoh*nss)))
+            z4=sum(cd0(i4+is:i4+is+ncoh*nss-1)*conjg(this%synct2(is+1:is+ncoh*nss)))
             z5=0
-            if(i5+is+ncoh*nss-1.le.np) then
-               z5=sum(cd0(i5+is:i5+is+ncoh*nss-1)*conjg(csynct1(is+1:is+ncoh*nss)))
+            if(i5+is+ncoh*nss-1.lt.np) then
+               z5=sum(cd0(i5+is:i5+is+ncoh*nss-1)*conjg(this%synct1(is+1:is+ncoh*nss)))
             endif
             s1=s1+abs(z1)/nz
             s2=s2+abs(z2)/nz
@@ -756,14 +1024,14 @@ contains
                is=(i-1)*nss+(isub-1)*nps
                z1=0.0
                if(i1+is.ge.1) then
-                  z1=sum(cd0(i1+is:i1+is+nps-1)*conjg(csynct1(is+1:is+nps)))
+                  z1=sum(cd0(i1+is:i1+is+nps-1)*conjg(this%synct1(is+1:is+nps)))
                endif
-               z2=sum(cd0(i2+is:i2+is+nps-1)*conjg(csynct2(is+1:is+nps)))
-               z3=sum(cd0(i3+is:i3+is+nps-1)*conjg(csynct1(is+1:is+nps)))
-               z4=sum(cd0(i4+is:i4+is+nps-1)*conjg(csynct2(is+1:is+nps)))
+               z2=sum(cd0(i2+is:i2+is+nps-1)*conjg(this%synct2(is+1:is+nps)))
+               z3=sum(cd0(i3+is:i3+is+nps-1)*conjg(this%synct1(is+1:is+nps)))
+               z4=sum(cd0(i4+is:i4+is+nps-1)*conjg(this%synct2(is+1:is+nps)))
                z5=0.0
-               if(i5+is+ncoh*nss-1.le.np) then
-                  z5=sum(cd0(i5+is:i5+is+nps-1)*conjg(csynct1(is+1:is+nps)))
+               if(i5+is+ncoh*nss-1.lt.np) then
+                  z5=sum(cd0(i5+is:i5+is+nps-1)*conjg(this%synct1(is+1:is+nps)))
                endif
                s1=s1+abs(z1)/(8*nss)
                s2=s2+abs(z2)/(8*nss)
@@ -777,10 +1045,11 @@ contains
       return
    end subroutine sync_fst4
 
-   subroutine fst4_downsample(c_bigfft,nfft1,ndown,f0,sigbw,c1)
+   subroutine fst4_downsample(this,c_bigfft,nfft1,ndown,f0,sigbw,c1)
 
 ! Output: Complex data in c(), sampled at 12000/ndown Hz
 
+      class(fst4_decoder), intent(inout) :: this
       complex c_bigfft(0:nfft1/2)
       complex c1(0:nfft1/ndown-1)
 
@@ -796,25 +1065,28 @@ contains
          if(i0-i.ge.0) c1(nfft2-i)=c_bigfft(i0-i)
       enddo
       c1=c1/nfft2
-      call four2a(c1,nfft2,1,1,1)            !c2c FFT back to time domain
+      call fftwf_execute_dft(this%baseband_plan,c1,c1)
       return
 
    end subroutine fst4_downsample
 
-   subroutine get_candidates_fst4(c_bigfft,nfft1,nsps,hmod,fs,fa,fb,nfa,nfb,   &
-      minsync,ncand,candidates)
+   subroutine get_candidates_fst4(this,c_bigfft,nfft1,nsps,hmod,fs,fa,fb,nfa,nfb,   &
+      minsync,ncand,candidates,status)
 
+      class(fst4_decoder), intent(inout) :: this
       complex c_bigfft(0:nfft1/2)              !Full length FFT of raw data
       integer hmod                             !Modulation index (submode)
       integer im(1)                            !For maxloc
-      real candidates(200,5)                   !Candidate list
-      real, allocatable :: s(:)                !Low resolution power spectrum
-      real, allocatable :: s2(:)               !CCF of s() with 4 tones
-      real, allocatable :: sbase(:)            !noise baseline estimate
+      real candidates(MAXCAND,5)               !Candidate list
       real xdb(-3:3)                           !Model 4-tone CCF peaks
       real minsync
+      integer, intent(out) :: status
+      integer allocation_status
       data xdb/0.25,0.50,0.75,1.0,0.75,0.50,0.25/
 
+      status=0
+      ncand=0
+      candidates=0
       nh1=nfft1/2
       df1=fs/nfft1
       baud=fs/nsps                             !Keying rate
@@ -827,9 +1099,22 @@ contains
       inb=nint(min(4800.0,real(nfb))/df2)      !High freq limit for noise fit
       if(ia.lt.ina) ia=ina
       if(ib.gt.inb) ib=inb
+      if(ib<ia.or.inb-ina<8) return
 
       nnw=nint(48000.*nsps*2./fs)
-      allocate (s(nnw))
+      if(allocated(this%candidate_s)) then
+         if(size(this%candidate_s)<nnw) call release_candidate_workspace(this)
+      endif
+      if(.not.allocated(this%candidate_s)) then
+         allocate(this%candidate_s(nnw),this%candidate_s2(nnw),this%candidate_base(nnw), &
+            this%baseline_scratch(nnw),stat=allocation_status)
+         if(allocation_status/=0) then
+            call release_candidate_workspace(this)
+            status=-1
+            return
+         endif
+      endif
+      associate(s=>this%candidate_s(1:nnw),s2=>this%candidate_s2(1:nnw),sbase=>this%candidate_base(1:nnw))
       s=0.                                  !Compute low-resolution power spectrum
       do i=ina,inb   ! noise analysis window includes signal analysis window
          j0=nint(i*df2/df1)
@@ -840,14 +1125,12 @@ contains
 
       ina=max(ina,1+3*hmod)                       !Don't run off the ends
       inb=min(inb,nnw-3*hmod)
-      allocate (s2(nnw))
-      allocate (sbase(nnw))
       s2=0.
       do i=ina,inb                                !Compute CCF of s() and 4 tones
          s2(i)=s(i-hmod*3) + s(i-hmod) +s(i+hmod) +s(i+hmod*3)
       enddo
       npctile=30
-      call fst4_baseline(s2,nnw,ina+hmod*3,inb-hmod*3,npctile,sbase)
+      call fst4_baseline_owned(s2,nnw,ina+hmod*3,inb-hmod*3,npctile,sbase,this%baseline_scratch(1:nnw))
       if(any(sbase(ina:inb).le.0.0)) return
       s2(ina:inb)=s2(ina:inb)/sbase(ina:inb)             !Normalize wrt noise level
 
@@ -859,7 +1142,7 @@ contains
 ! Find candidates, using the CLEAN algorithm to remove a model of each one
 ! from s2() after it has been found.
       pval=99.99
-      do while(ncand.lt.200)
+      do while(ncand.lt.size(candidates,1))
          im=maxloc(s2(ia:ib))
          iploc=ia+im(1)-1                         !Index of CCF peak
          pval=s2(iploc)                           !Peak value
@@ -875,14 +1158,20 @@ contains
          candidates(ncand,2)=pval              !Rough estimate of SNR
          candidates(ncand,5)=sbase(iploc)
       enddo
+      end associate
       return
    end subroutine get_candidates_fst4
 
-   subroutine fst4_sync_search(c2,nfft2,hmod,fs2,nss,ntrperiod,nsyncoh,   &
+   subroutine fst4_sync_search(this,c2,nfft2,hmod,fs2,nss,ntrperiod,nsyncoh,   &
         emedelay,sbest,fcbest,isbest)
+      class(fst4_decoder), intent(inout) :: this
       complex c2(0:nfft2-1)
       integer hmod
 
+      isbest=-1
+      fcbest=0.
+      sbest=0.
+      last_start=nfft2-160*nss
       nspsec=int(fs2)
       baud=fs2/real(nss)
       fc1=0.0
@@ -894,11 +1183,12 @@ contains
          ishw=1.5*nspsec
       endif
 
+      if(min(is0+ishw,last_start)<max(1,is0-ishw)) return
       sbest=-1.e30
       do if=-12,12
          fc=fc1 + 0.1*baud*if
-         do istart=max(1,is0-ishw),is0+ishw,4*hmod
-            call sync_fst4(c2,istart,fc,hmod,nsyncoh,nfft2,nss,   &
+         do istart=max(1,is0-ishw),min(is0+ishw,last_start),4*hmod
+            call sync_fst4(this,c2,istart,fc,hmod,nsyncoh,nfft2,nss,   &
                ntrperiod,fs2,sync)
             if(sync.gt.sbest) then
                fcbest=fc
@@ -916,8 +1206,8 @@ contains
       sbest=0.0
       do if=-7,7
          fc=fc1 + 0.02*baud*if
-         do istart=max(1,is0-ishw),is0+ishw,isst
-            call sync_fst4(c2,istart,fc,hmod,nsyncoh,nfft2,nss,   &
+         do istart=max(1,is0-ishw),min(is0+ishw,last_start),isst
+            call sync_fst4(this,c2,istart,fc,hmod,nsyncoh,nfft2,nss,   &
                ntrperiod,fs2,sync)
             if(sync.gt.sbest) then
                fcbest=fc
@@ -928,33 +1218,67 @@ contains
       enddo
    end subroutine fst4_sync_search
 
-   subroutine dopspread(itone,iwave,nsps,nmax,ndown,hmod,i0,fc,fmid,w50)
+   subroutine dopspread(this,itone,iwave,nsps,nmax,ndown,hmod,i0,fc,fmid,w50,status)
+     use fftw_tsan, only: wsjt_tsan_acquire_fftw, wsjt_tsan_release_fftw
 
 ! On "plotspec" special request, compute Doppler spread for a decoded signal
 
       include 'fst4/fst4_params.f90'
-      complex, allocatable :: cwave(:)       !Reconstructed complex signal
-      complex, allocatable :: g(:)           !Channel gain, g(t) in QEX paper
-      real,allocatable :: ss(:)              !Computed power spectrum of g(t)
+      class(fst4_decoder), intent(inout) :: this
+      complex, pointer :: cwave(:)       !Reconstructed complex signal
+      complex(c_float_complex), pointer, contiguous :: g(:)
+      real, pointer :: ss(:)              !Computed power spectrum of g(t)
+      real unused_wave(1)
       integer itone(160)                     !Tones for this message
       integer*2 iwave(nmax)                  !Raw Rx data
       integer hmod                           !Modulation index
-      data ncall/0/
-      save ncall
-
-      ncall=ncall+1
+      integer, intent(out) :: status
+      integer allocation_status
+      fmid=-999.
+      w50=0.
       nfft=2*nmax
       nwave=max(nmax,(NN+2)*nsps)
-      allocate(cwave(0:nwave-1))
-      allocate(g(0:nfft-1))
-      wave=0
+      call ensure_fft_buffer(this%dop_storage,this%dopgain,nfft,status)
+      if(status/=0) return
+      if(this%dop_length/=nfft.or..not.c_associated(this%dop_plan)) then
+         !$omp critical(fftw)
+         call wsjt_tsan_acquire_fftw()
+         if(c_associated(this%dop_plan)) call fftwf_destroy_plan(this%dop_plan)
+         ! in==out requests an intentional in-place FFTW transform.
+         this%dop_plan=fftwf_plan_dft_1d(nfft,this%dopgain,this%dopgain,FFTW_FORWARD,this%fft_flags)
+         call wsjt_tsan_release_fftw()
+         !$omp end critical(fftw)
+         this%dop_length=nfft
+      endif
+      if(.not.c_associated(this%dop_plan)) then
+         status=-1
+         return
+      endif
+      if(associated(this%dopwave)) then
+         if(size(this%dopwave)<nwave) then
+            deallocate(this%dopwave)
+            nullify(this%dopwave)
+         endif
+      endif
+      if(.not.associated(this%dopwave)) then
+         allocate(this%dopwave(0:nwave-1),stat=allocation_status)
+         if(allocation_status/=0) then
+            status=-1
+            return
+         endif
+      endif
+      cwave(0:)=>this%dopwave(0:nwave-1)
+      g(0:)=>this%dopgain(0:nfft-1)
+      unused_wave=0
       fsample=12000.0
-      call gen_fst4wave(itone,NN,nsps,nwave,fsample,hmod,fc,1,cwave,wave)
-      cwave=cshift(cwave,-i0*ndown)
+      call gen_fst4wave_owned(this%wavegen,itone,NN,nsps,nwave,fsample,hmod,fc,1,cwave,unused_wave)
       fac=1.0/32768
-      g(0:nmax-1)=fac*float(iwave)*conjg(cwave(:nmax-1))
+      do i=0,nmax-1
+         j=modulo(i-i0*ndown,nwave)
+         g(i)=fac*real(iwave(i+1))*conjg(cwave(j))
+      enddo
       g(nmax:)=0.
-      call four2a(g,nfft,1,-1,1)         !Forward c2c FFT
+      call fftwf_execute_dft(this%dop_plan,g,g)
 
       df=12000.0/nfft
       ia=1.0/df
@@ -967,7 +1291,14 @@ contains
       enddo
 
       ia=10.1/df
-      allocate(ss(-ia:ia))               !Allocate space for +/- 10 Hz
+      if(associated(this%dopss)) then
+         if(size(this%dopss)<2*ia+1) then
+            deallocate(this%dopss)
+            nullify(this%dopss)
+         endif
+      endif
+      if(.not.associated(this%dopss)) allocate(this%dopss(2*ia+1))
+      ss(-ia:)=>this%dopss(1:2*ia+1)
       sum1=0.
       sum2=0.
       nns=0
@@ -1015,13 +1346,20 @@ contains
       w50=xdiff*df                 !Compute Doppler spread
       fmid=xi2*df                  !Frequency midpoint of signal powere
 
-      do i=-ia,ia                          !Save the spectrum for plotting
-         y=ncall-1
-         j=i+nint(xi2)
-         if(abs(j*df).lt.10.0) y=0.99*ss(i+nint(xi2)) + ncall-1
-         write(52,1010) i*df,y
-1010     format(f12.6,f12.6)
-      enddo
+      if(associated(this%spectrum_sink)) then
+         nspectrum=2*ia+1
+         if(allocated(this%spectrum)) then
+            if(size(this%spectrum)<nspectrum) deallocate(this%spectrum)
+         endif
+         if(.not.allocated(this%spectrum)) allocate(this%spectrum(nspectrum))
+         do i=-ia,ia
+            y=0
+            j=i+nint(xi2)
+            if(abs(j*df).lt.10.0) y=0.99*ss(j)
+            this%spectrum(i+ia+1)=y
+         enddo
+         call this%spectrum_sink(this%spectrum(1:nspectrum),df,-ia*df)
+      endif
 
       return
    end subroutine dopspread

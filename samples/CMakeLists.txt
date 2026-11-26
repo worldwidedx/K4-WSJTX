@@ -18,7 +18,7 @@ set (SAMPLE_FILES
   JT65/JT65B/000000_0006.wav
   JT65/JT65B/000000_0007.wav
   JT9/130418_1742.wav
-  JTTY/260807_134110.wav
+  JTTY/261105_101915_567.wav
   MSK144/181211_120500.wav
   MSK144/181211_120800.wav
   WSPR/150426_0918.wav
@@ -50,18 +50,10 @@ add_custom_command (
   DEPENDS ${SAMPLE_FILES} make_contents.cmake
 )
 
-find_program (RSYNC_EXECUTABLE rsync)
-add_custom_command (
-  OUTPUT upload.timestamp
-  COMMAND ${CMAKE_COMMAND} ARGS -E copy_if_different ${contents_file} ${web_tree}/samples/${contents_file_name}
-  # Source path must be relative (no drive letter): on MSYS2/Windows, rsync
-  # parses any "X:" prefix as a remote host spec, and with an actually-remote
-  # destination too it then refuses with "source and destination cannot both
-  # be remote." WORKING_DIRECTORY defaults to CMAKE_CURRENT_BINARY_DIR here,
-  # so a bare "web/samples" resolves the same as the old absolute path did.
-  COMMAND ${RSYNC_EXECUTABLE} ARGS -avz --progress web/samples ${PROJECT_SAMPLES_UPLOAD_DEST}
-  COMMAND ${CMAKE_COMMAND} ARGS -E touch upload.timestamp
+set (WSJT_WEB_PAGES_DIR "" CACHE PATH "feat-web-pages checkout that the stage-samples target copies the samples into")
+add_custom_target (stage-samples
+  COMMAND ${CMAKE_COMMAND} -Dcontents_file=${contents_file} -Dweb_tree=${web_tree} -Dweb_pages_dir=${WSJT_WEB_PAGES_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/stage_samples.cmake
   DEPENDS ${contents_file}
-  COMMENT "Uploading WSJT-X samples to web server"
+  COMMENT "Staging WSJT-X samples"
+  VERBATIM
   )
-add_custom_target (upload-samples DEPENDS upload.timestamp)

@@ -287,8 +287,13 @@
  *      the normal WSJT-X user interface.
  *
  *      Copy the fields from Time through Low confidence unchanged from
- *      Decode. Substituting a Status mode name such as "FT8" for the
- *      decoded-line marker "~" prevents matching.
+ *      Decode. Decoder annotation suffixes, surrounding message padding,
+ *      and Low confidence are not part of matching. Time, snr, Delta
+ *      time (compared numerically), Delta frequency, Mode, and normalized
+ *      Message must still match a prior decode. Substituting a Status
+ *      mode name such as "FT8" for the decoded-line marker "~" prevents
+ *      matching. The stored decode is used for QSO handling; Modifiers
+ *      are taken from the Reply.
  *
  *      The  Modifiers   field  allows  the  equivalent   of  keyboard
  *      modifiers to be sent "as if" those modifier keys where pressed
@@ -444,7 +449,7 @@
  *
  *          <magic-number><schema-number><type><id><32-bit-count>  # binary encoded fields
  *          # the remainder is the contents of the ADIF text field
- *          <adif_ver:5>3.0.7
+ *          <adif_ver:5>3.1.8
  *          <programid:6>WSJT-X
  *          <EOH>
  *          ADIF log data fields ...<EOR>

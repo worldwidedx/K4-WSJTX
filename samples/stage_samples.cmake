@@ -1,0 +1,5 @@
+if (NOT IS_DIRECTORY "${web_pages_dir}")
+  message (FATAL_ERROR "Configure with -DWSJT_WEB_PAGES_DIR=<feat-web-pages checkout> to stage the samples (WSJT_WEB_PAGES_DIR is \"${web_pages_dir}\")")
+endif ()
+file (COPY "${contents_file}" DESTINATION "${web_tree}/samples")
+file (COPY "${web_tree}/samples" DESTINATION "${web_pages_dir}")

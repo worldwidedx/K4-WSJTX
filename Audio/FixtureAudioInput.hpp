@@ -5,6 +5,7 @@
 #include "Audio/AudioInputSource.hpp"
 
 #include <QByteArray>
+#include <QElapsedTimer>
 #include <QPointer>
 #include <QString>
 #include <QVector>
@@ -25,6 +26,7 @@ public:
   };
 
   explicit FixtureAudioInput (QString path, Profile profile = Profile::Ft8,
+                              unsigned pacingSpeed = 1,
                               QObject * parent = nullptr);
 
   Q_SLOT void start (QAudioDeviceInfo const&, int framesPerBuffer,
@@ -35,10 +37,12 @@ public:
   Q_SLOT void stop () override;
   Q_SLOT void reset (bool reportDroppedFrames) override;
   Q_SLOT void arm ();
+  QString fixturePath () const {return m_path;}
   Q_SLOT void acknowledgeJttyFrames (qint64 detectorFrames);
   QString emitFt8RolloverPrefix ();
   static constexpr int ft8RolloverFrames () {return 6912;}
   static constexpr qint16 ft8RolloverSample () {return -12345;}
+  static constexpr qint64 jttyCaptureOffsetMs () { return 177500; }
   Q_SLOT void advanceHandoff (qint64 captureFrames, bool fresh, bool flush);
   static qint16 handoffSample (qint64 period, qint64 offset)
   {
@@ -57,6 +61,7 @@ private:
   }
   void fail (QString const& message);
   qint64 captureTimestamp (qint64 frameIndex) const;
+  qint64 pacingTimestamp (qint64 frameIndex) const;
   void publishCaptureAnchor (qint64 firstFrame);
   void maybeSchedule ();
   void scheduleNextChunk ();
@@ -67,6 +72,7 @@ private:
 
   QString m_path;
   Profile m_profile;
+  unsigned const m_pacingSpeed;
   QByteArray m_pcm;
   QPointer<AudioDevice> m_sink;
   QTimer * m_timer;
@@ -76,7 +82,10 @@ private:
   qint64 m_tailFrames {0};
   qint64 m_framesEmitted {0};
   qint64 m_periodStartMs {0};
+  qint64 m_pacingStartMs {0};
   qint64 m_jttyAcknowledgedInputFrames {0};
+  QElapsedTimer m_emissionTimer;
+  qint64 m_nextChunkMs {0};
   int m_chunkIndex {0};
   bool m_started {false};
   bool m_armed {false};

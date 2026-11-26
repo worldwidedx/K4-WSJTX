@@ -1,14 +1,21 @@
 module ft4_decode
+   use packjt77, only: pack77_state,pack77_for_state,unpack77_for_state
+   use decoder_engine_types, only: ft4_signal_evidence,engine_payload_decoded
+   use ft4_codec, only: ft4_tones_from_77bits
 
    type :: ft4_decoder
-      procedure(ft4_decode_callback), pointer :: callback
+      procedure(ft4_decode_callback), pointer :: callback => null()
+      character(len=12) :: mycall0='',hiscall0=''
+      integer :: apbits(174)=99,apmy_ru(28)=0,aphis_fd(28)=0
+      logical :: ap_ready=.false.
    contains
       procedure :: decode
+      procedure :: reset
    end type ft4_decoder
 
    abstract interface
-      subroutine ft4_decode_callback (this,sync,snr,dt,freq,decoded,nap,qual)
-         import ft4_decoder
+      subroutine ft4_decode_callback (this,sync,snr,dt,freq,decoded,nap,qual,evidence)
+         import ft4_decoder,ft4_signal_evidence
          implicit none
          class(ft4_decoder), intent(inout) :: this
          real, intent(in) :: sync
@@ -18,25 +25,37 @@ module ft4_decode
          character(len=37), intent(in) :: decoded
          integer, intent(in) :: nap
          real, intent(in) :: qual
+         type(ft4_signal_evidence), intent(in) :: evidence
       end subroutine ft4_decode_callback
    end interface
 
 contains
 
+   subroutine reset(this)
+      class(ft4_decoder), intent(inout) :: this
+      this%mycall0=''
+      this%hiscall0=''
+      this%apbits=99
+      this%apmy_ru=0
+      this%aphis_fd=0
+      this%ap_ready=.false.
+      nullify(this%callback)
+   end subroutine reset
+
    subroutine decode(this,callback,iwave,nQSOProgress,nfqso,    &
-      nfa,nfb,ndepth,lapcqonly,ncontest,mycall,hiscall)
+      nfa,nfb,ndepth,lapcqonly,ncontest,mycall,hiscall,knowledge)
       use timer_module, only: timer
-      use packjt77
       include 'ft4/ft4_params.f90'
       parameter (MAXCAND=200)
       class(ft4_decoder), intent(inout) :: this
+      type(pack77_state), target, intent(inout) :: knowledge
+      type(ft4_signal_evidence) :: evidence
       procedure(ft4_decode_callback) :: callback
       parameter (NSS=NSPS/NDOWN,NDMAX=NMAX/NDOWN)
       character message*37,msgsent*37
       character c77*77
-      character*37 decodes(100)
+      character*37 decodes(MAXCAND)
       character*12 mycall,hiscall
-      character*12 mycall0,hiscall0
 
       complex cd2(0:NDMAX-1)                  !Complex waveform
       complex cb(0:NDMAX-1)
@@ -50,8 +69,6 @@ contains
       real candidate(2,MAXCAND)
       real savg(NH1),sbase(NH1)
 
-      integer apbits(2*ND)
-      integer apmy_ru(28),aphis_fd(28)
       integer*2 iwave(NMAX)                 !Raw received data
       integer*1 message77(77),rvec(77),apmask(2*ND),cw(2*ND)
       integer*1 message91(91)
@@ -80,12 +97,11 @@ contains
       data rvec/0,1,0,0,1,0,1,0,0,1,0,1,1,1,1,0,1,0,0,0,1,0,0,1,1,0,1,1,0, &
          1,0,0,1,0,1,1,0,0,0,0,1,0,0,0,1,0,1,0,0,1,1,1,1,0,0,1,0,1, &
          0,1,0,1,0,1,1,0,1,1,1,1,1,0,0,0,1,0,1/
-      save dd,fs,dt,tt,txt,twopi,h,first,apbits,nappasses,naptypes, &
-         mycall0,hiscall0,ctwk2
+      save dd,fs,dt,tt,txt,twopi,h,first,nappasses,naptypes,ctwk2
 
+      associate(mycall0=>this%mycall0,hiscall0=>this%hiscall0,apbits=>this%apbits, &
+           apmy_ru=>this%apmy_ru,aphis_fd=>this%aphis_fd)
       this%callback => callback
-      dxcall13=hiscall        ! initialize for use in packjt77
-      mycall13=mycall
 
       smax1=0.
       nd1=0
@@ -136,8 +152,6 @@ contains
          naptypes(4,1:4)=(/3,6,0,0/) ! Tx4
          naptypes(5,1:4)=(/3,1,2,0/) ! Tx5
 
-         mycall0=''
-         hiscall0=''
          first=.false.
       endif
 
@@ -145,7 +159,9 @@ contains
       if(l1.ne.0) mycall(l1:)=" "
       l1=index(hiscall,char(0))
       if(l1.ne.0) hiscall(l1:)=" "
-      if(mycall.ne.mycall0 .or. hiscall.ne.hiscall0) then
+      knowledge%dxcall13=hiscall
+      knowledge%mycall13=mycall
+      if(.not.this%ap_ready .or. mycall.ne.mycall0 .or. hiscall.ne.hiscall0) then
          apbits=0
          apbits(1)=99
          apbits(30)=99
@@ -163,8 +179,8 @@ contains
          message=trim(mycall)//' '//trim(hiscall0)//' RR73'
          i3=-1
          n3=-1
-         call pack77(message,i3,n3,c77)
-         call unpack77(c77,1,msgsent,unpk77_success)
+         call pack77_for_state(knowledge,message,i3,n3,c77)
+         call unpack77_for_state(knowledge,c77,1,msgsent,unpk77_success)
          if(i3.ne.1 .or. (message.ne.msgsent) .or. .not.unpk77_success) go to 10
          read(c77,'(77i1)') message77
          apmy_ru=2*mod(message77(1:28)+rvec(2:29),2)-1
@@ -177,6 +193,7 @@ contains
 10       continue
          mycall0=mycall
          hiscall0=hiscall
+         this%ap_ready=.true.
       endif
       ndecodes=0
       decodes=' '
@@ -189,6 +206,7 @@ contains
 ! ndepth=1: 1 pass, no subtraction
 
       max_iterations=40
+      napwid=50
       syncmin=1.18
       dosubtract=.true.
       doosd=.true.
@@ -426,10 +444,17 @@ contains
                   if( nharderror.ge.0 ) then
                      message77=mod(message77+rvec,2) ! remove rvec scrambling
                      write(c77,'(77i1)') message77(1:77)
-                     call unpack77(c77,1,message,unpk77_success)
+                     call unpack77_for_state(knowledge,c77,1,message,unpk77_success)
                      if(.not.unpk77_success) exit
+                     evidence=ft4_signal_evidence()
+                     evidence%payload77=message77
+                     evidence%payload_origin=engine_payload_decoded
+                     call ft4_tones_from_77bits(message77,i4tone)
+                     evidence%tones=int(i4tone,kind(evidence%tones))
+                     evidence%has_tones=1
+                     evidence%waveform_start_seconds=real(ibest)/666.67-real(NSPS)/12000.0
+                     evidence%has_waveform_start=1
                      if(dosubtract) then
-                        call get_ft4_tones_from_77bits(message77,i4tone)
                         dt=real(ibest)/666.67
                         call timer('subtract',0)
                         call subtractft4(dd,i4tone,f1,dt)
@@ -440,6 +465,7 @@ contains
                         if(decodes(i).eq.message) idupe=1
                      enddo
                      if(idupe.eq.1) exit
+                     if(ndecodes.ge.size(decodes)) cycle
                      ndecodes=ndecodes+1
                      decodes(ndecodes)=message
                      if(snr.gt.0.0) then
@@ -450,7 +476,7 @@ contains
                      nsnr=nint(max(-21.0,xsnr))
                      xdt=ibest/666.67 - 0.5
                      qual=1.0-(nharderror+dmin)/60.0 
-                     call this%callback(smax,nsnr,xdt,f1,message,iaptype,qual)
+                     call this%callback(smax,nsnr,xdt,f1,message,iaptype,qual,evidence)
                      exit
                   endif
                enddo                      !Sequence estimation
@@ -458,6 +484,7 @@ contains
             enddo                         !3 DT segments
          enddo                            !Candidate list
       enddo                               !Subtraction loop
+      end associate
       return
    end subroutine decode
 

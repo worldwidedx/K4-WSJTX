@@ -27,6 +27,18 @@ namespace Radio
     // suffixes that are often used and should not be interpreted as a
     // DXCC Entity prefix used as a suffix
     QRegularExpression non_prefix_suffix {R"(\A([0-9AMPQR]|QRP|F[DF]|[AM]M|L[HT]|LGT)\z)"};
+
+    QString callsign_without_operating_suffixes (QString callsign)
+    {
+      callsign = callsign.toUpper ();
+      auto slash_pos = callsign.lastIndexOf ('/');
+      while (slash_pos >= 0 && is_operating_suffix (callsign.mid (slash_pos + 1)))
+        {
+          callsign.truncate (slash_pos);
+          slash_pos = callsign.lastIndexOf ('/');
+        }
+      return callsign;
+    }
   }
 
 
@@ -129,6 +141,25 @@ namespace Radio
     return d_string.insert (d_string.size () - 3, QChar::Nbsp);
   }
 
+  bool is_standard_callsign (QString const& w)
+  {
+    static QRegularExpression standard_call_re {
+      R"(
+        ^\s*                                      # optional leading spaces
+        ( [A-Z]{0,2} | [A-Z][0-9] | [0-9][A-Z] )  # part 1
+        ( [0-9][A-Z]{0,3} )                       # part 2
+        (/R | /P)?                                # optional suffix
+        \s*$                                      # optional trailing spaces
+      )", QRegularExpression::CaseInsensitiveOption | QRegularExpression::ExtendedPatternSyntaxOption};
+    return standard_call_re.match (w).hasMatch ();
+  }
+
+  QRegularExpression const& decoded_grid_pattern ()
+  {
+    static QRegularExpression const pattern {"\\A(?![Rr]{2}73)[A-Ra-r]{2}[0-9]{2}([A-Xa-x]{2}){0,1}\\z"};
+    return pattern;
+  }
+
   bool is_callsign (QString const& callsign)
   {
     return callsign.contains (valid_callsign_regexp);
@@ -139,16 +170,21 @@ namespace Radio
     return callsign.contains ('/');
   }
 
+  bool is_operating_suffix (QString const& suffix)
+  {
+    return non_prefix_suffix.match (suffix.toUpper ()).hasMatch ();
+  }
+
   bool is_77bit_nonstandard_callsign (QString const& callsign)
   {
     return callsign.contains (callsign_alphabet_re)
       && !callsign.contains (strict_standard_callsign_re);
   }
 
-  // split on first '/' and return the larger portion or the whole if
-  // there is no '/'
+  // Ignore operating suffixes and return the larger callsign component.
   QString base_callsign (QString callsign)
   {
+    callsign = callsign_without_operating_suffixes (callsign);
     auto slash_pos = callsign.indexOf ('/');
     if (slash_pos >= 0)
       {
@@ -162,13 +198,14 @@ namespace Radio
             callsign = callsign.left (slash_pos);
           }
       }
-    return callsign.toUpper ();
+    return callsign;
   }
 
   // analyze the callsign and determine the effective prefix, returns
   // the full call if no valid prefix (or prefix as a suffix) is specified
   QString effective_prefix (QString callsign)
   {
+    callsign = callsign_without_operating_suffixes (callsign);
     auto prefix = callsign;
     auto slash_pos = callsign.indexOf ('/');
     if (slash_pos >= 0)
@@ -182,14 +219,8 @@ namespace Radio
         else
           {
             prefix = callsign.mid (slash_pos + 1);
-            if (prefix.contains (non_prefix_suffix))
-              {
-                prefix = callsign.left (slash_pos); // ignore
-                                                    // non-prefix
-                                                    // suffixes
-              }
           }
       }
-    return prefix.toUpper ();
+    return prefix;
   }
 }

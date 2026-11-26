@@ -10,6 +10,30 @@
 
 namespace
 {
+  bool wait_for_echosim (QProcess& process)
+  {
+    auto const finished = process.waitForFinished (30000);
+    if (!finished || process.exitStatus () != QProcess::NormalExit || process.exitCode () != 0)
+      {
+        auto const reason = !finished ? process.errorString ()
+          : process.exitStatus () != QProcess::NormalExit ? QString {"abnormal termination"}
+          : QString {"nonzero exit"};
+        if (process.state () != QProcess::NotRunning)
+          {
+            process.kill ();
+            process.waitForFinished (5000);
+          }
+        qWarning ().noquote () << QString {
+          "echosim %1 failed: %2 (exit status %3, exit code %4)\nstdout:\n%5\nstderr:\n%6"}
+          .arg (process.arguments ().join (' '), reason)
+          .arg (process.exitStatus () == QProcess::NormalExit ? "normal" : "crashed")
+          .arg (process.exitCode ())
+          .arg (QString::fromLocal8Bit (process.readAllStandardOutput ()),
+                QString::fromLocal8Bit (process.readAllStandardError ()));
+      }
+    return finished;
+  }
+
   QAudioFormat default_format ()
   {
     QAudioFormat format;
@@ -37,7 +61,8 @@ private:
     QProcess process;
     process.setWorkingDirectory (dir.path ());
     process.start (ECHOSIM_EXECUTABLE, {"1500", "0.0", "0.0", "1", "100"});
-    QVERIFY (process.waitForFinished (30000));
+    QVERIFY (wait_for_echosim (process));
+    QCOMPARE (process.exitStatus (), QProcess::NormalExit);
     QCOMPARE (process.exitCode (), 0);
 
     QDir out {dir.path ()};
@@ -66,7 +91,8 @@ private:
     QProcess process;
     process.setWorkingDirectory (dir.path ());
     process.start (ECHOSIM_EXECUTABLE, {"1500", "0.0", "4.0", "1", "-22"});
-    QVERIFY (process.waitForFinished (30000));
+    QVERIFY (wait_for_echosim (process));
+    QCOMPARE (process.exitStatus (), QProcess::NormalExit);
     QCOMPARE (process.exitCode (), 0);
 
     QDir out {dir.path ()};

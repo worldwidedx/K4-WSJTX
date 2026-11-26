@@ -1,5 +1,6 @@
 //------------------------------------------------------------------ MainWindow
 #include "mainwindow.h"
+#include "sample_rates.h"
 #include <fftw3.h>
 #include <QDir>
 #include <QRegularExpression>
@@ -30,11 +31,11 @@
 #include <QApplication>
 #include <QDebug>
 #include <QDateTime>
-#include <QTime>
 #include <QFile>
 #include <QTextStream>
 #include <QString>
 #include <QByteArray>
+#include <QElapsedTimer>
 
 //#include <io.h>
 #include <stdio.h>
@@ -50,20 +51,7 @@
 #include "fortran_mutex.hpp"
 #include "pskreporter_settings.h"
 #include "runtime_paths.h"
-
-#if !defined(Q_OS_WIN)
-extern "C" {
-    void ptt_set_override(const char *path);
-}
-#endif
-
-extern "C" {
-    int ptt_(int* nport, int* itx, int* iptt);
-}
-
-#ifdef __unix__
-extern "C" void ptt_close(void);
-#endif
+#include "libm65/ptt.h"
 
 #ifdef MessageBox
 #undef MessageBox
@@ -90,8 +78,6 @@ TxTune*    g_pTxTune = NULL;
 
 std::atomic<bool> stop_m65{false};
 
-QString guiDate;         //liveCQ
-QStringList allDecodes;  //liveCQ
 QStringList allDecodes2;  //liveCQ
 QString m_otherUrl;
 bool m_w3szUrl;
@@ -115,34 +101,6 @@ MainWindow::DecoderContext::DecoderContext()
 MainWindow::DecoderContext::~DecoderContext()
 {
     delete stdoutChan;
-}
-
-// TEMP diagnostic 2026-09-10 for the "decode reaches map65_rx.log but not the
-// Messages window, only on the first decode cycle after MAP65 starts" report.
-// Writes to its own separate log file rather than the shared w3sz_debug.log
-// Fortran's dbg() uses -- the two processes/threads have no lock between
-// them, and sharing a file produces torn, interleaved lines. Timestamps use
-// the same sec_midn()-style local h*3600+m*60+s+ms/1000 format as the
-// Fortran log, so the two can still be correlated by eye. Strip both files'
-// worth of logging before merge.
-//
-// Mirrors run_m65.f90's dbg_enabled flag -- flip to true to re-enable this
-// log without touching any of the cppDbg(...) call sites scattered through
-// this file.
-static bool const cppDbgEnabled = false;
-
-static void cppDbg(const QString &msg)
-{
-    if (!cppDbgEnabled) return;
-    double const t = [] {
-        QTime const now = QTime::currentTime();
-        return now.hour() * 3600.0 + now.minute() * 60.0 + now.second() + now.msec() / 1000.0;
-    }();
-    QFile f("w3sz_debug_cpp.log");
-    if (f.open(QIODevice::Append | QIODevice::Text)) {
-        QTextStream out(&f);
-        out << "mainwindow: " << msg << " at t=" << QString::number(t, 'f', 3) << "\n";
-    }
 }
 
 //-------------------------------------------------- MainWindow constructor
@@ -200,12 +158,14 @@ MainWindow::MainWindow(QWidget *parent) :
   std::cout << "ss pointer set to: " << ss << std::endl;
   set_savg_ptr(savg, 4, active_nfft); 
   std::cout << "savg pointer set to: " << savg << std::endl; 
-  dd_old = new float[ddSize];
-  set_dd_old_ptr(dd_old, channels, pairsWorst);
-  ss_old = new float[4 * 322 * active_nfft]; 
-  savg_old = new float[4 * active_nfft];
-  set_ss_old_ptr(ss_old, 4, 322, active_nfft);   
-  set_savg_old_ptr(savg_old, 4, active_nfft); 
+  // Two snapshot sets, one per automatic decode pass (1 = nhsym 280, 2 = nhsym 302).
+  // They are filled in dataSink() at each trigger; see snapshot_buffers().
+  for (int idx = 1; idx <= 2; idx++) {
+    float* sdd   = new float[ddSize]();
+    float* sss   = new float[4 * 322 * active_nfft]();
+    float* ssavg = new float[4 * active_nfft]();
+    set_snap_ptr(idx, sdd, sss, ssavg, pairsWorst, active_nfft);
+  }
 
   qDebug() << "MAINWINDOW created dd ss savg ";
 
@@ -242,11 +202,15 @@ MainWindow::MainWindow(QWidget *parent) :
   ui->actionSave_all->setActionGroup(saveGroup);
   ui->actionNone->setActionGroup(saveGroup);
 
+  QActionGroup* DepthGroupJT65 = new QActionGroup(this);
+  ui->actionJT65_No_Deep_Search->setActionGroup(DepthGroupJT65);
+  ui->actionJT65_Normal_Deep_Search->setActionGroup(DepthGroupJT65);
+  ui->actionJT65_Aggressive_Deep_Search->setActionGroup(DepthGroupJT65);
+
   QActionGroup* DepthGroup = new QActionGroup(this);
-  ui->actionNo_Deep_Search->setActionGroup(DepthGroup);
-  ui->actionNormal_Deep_Search->setActionGroup(DepthGroup);
-  ui->actionAggressive_Deep_Search->setActionGroup(DepthGroup);
-  ui->actionFull_Deep_Search->setActionGroup(DepthGroup);
+  ui->actionQ65_Fast->setActionGroup(DepthGroup);
+  ui->actionQ65_Normal->setActionGroup(DepthGroup);
+  ui->actionQ65_Deep->setActionGroup(DepthGroup);
 
   QButtonGroup* txMsgButtonGroup = new QButtonGroup;
   txMsgButtonGroup->addButton(ui->txrb1,1);
@@ -485,17 +449,28 @@ MainWindow::MainWindow(QWidget *parent) :
   watcher2 = new QFutureWatcher<void>;
   connect(watcher2, SIGNAL(finished()),this,SLOT(diskWriteFinished()));
 
+  findSavedDevices();
+
 // Assign input device and start input thread
+  if(!m_network) cacheInputDeviceRates(m_paInDevice);
   soundInThread.setInputDevice(m_paInDevice);
-  if(m_fs96000 == 1) soundInThread.setRate(96000.0);
-  else if(m_fs96000 ==0) soundInThread.setRate(95238.1);
-  else if(m_fs96000 ==2) soundInThread.setRate(192000.0);
+  soundInThread.setRate(m_fs96000 == 0 ? 95238.1 : double(sampleRateForCode(m_fs96000)));
   soundInThread.setBufSize(10*7056);
   soundInThread.setNetwork(m_network);
   soundInThread.setPort(m_udpPort);
   if(!m_xpol) soundInThread.setNrx(1);
   if(m_xpol) soundInThread.setNrx(2);
-  soundInThread.start(QThread::HighestPriority);
+  if(m_network or m_paInDevice >= 0) {
+    soundInThread.start(QThread::HighestPriority);
+    m_soundInDevice = m_network ? -1 : m_paInDevice;
+    m_soundInChannels = m_xpol ? 4 : 2;
+    if (!m_network) {
+      m_lastCardDevice = m_soundInDevice;
+      m_lastCardChannels = m_soundInChannels;
+    }
+  } else {
+    m_soundInStopped = true;            // Settings starts it once a device is chosen
+  }
 
   // Assign output device and start output thread
   soundOutThread.setOutputDevice(m_paOutDevice);
@@ -512,21 +487,7 @@ MainWindow::MainWindow(QWidget *parent) :
   m_wide_graph_window->m_TxOffset=m_TxOffset;
   if(m_initIQplus) m_wide_graph_window->initIQplus();
 
-// Create "m_worked", a dictionary of all calls in wsjt.log
-  QFile f("wsjt.log");
-  qDebug() << "MainWindow Constructor File open result:" << f.open(QFileDevice::ReadOnly);
-  if(f.isOpen()) {
-    QTextStream in(&f);
-    QString line,t,callsign;
-    for(int i=0; i<99999; i++) {
-      line=in.readLine();
-      if(line.length()<=0) break;
-      t=line.mid(18,12);
-      callsign=t.mid(0,t.indexOf(","));
-      m_worked[callsign]=true;
-    }
-    f.close();
-  }
+  loadWorkedLog();
 
   if(ui->actionLinrad->isChecked()) on_actionLinrad_triggered();
   if(ui->actionCuteSDR->isChecked()) on_actionCuteSDR_triggered();
@@ -581,16 +542,19 @@ MainWindow::~MainWindow()
   if (stdoutReaderThread.joinable())
       stdoutReaderThread.join();
   writeSettings();
-  if (soundInThread.isRunning()) {
-    soundInThread.quit();
-    soundInThread.wait(3000);
-  }
+  fftwf_export_wisdom_to_filename (QDir {m_dataDir}.absoluteFilePath ("map65_wisdom.dat").toLocal8Bit ());
+  bool stopped = !soundInThread.isRunning() || stopSoundIn(false);
   if (soundOutThread.isRunning()) {
     soundOutThread.quitExecution=true;
-    soundOutThread.wait(3000);
+    stopped = soundOutThread.wait(3000) && stopped;
   }
-  Pa_Terminate();
-  fftwf_export_wisdom_to_filename (QDir {m_dataDir}.absoluteFilePath ("map65_wisdom.dat").toLocal8Bit ());
+  // A thread stuck in PortAudio (e.g. on a stream that never delivered) can't
+  // be stopped, and destroying a running QThread aborts. Settings are saved,
+  // so end here.
+  if (!stopped) std::_Exit(0);
+  // Pa_Terminate closes every open stream, and closing one whose start
+  // failed waits forever.
+  if (!soundInThread.m_streamLeftOpen && !soundOutThread.m_streamLeftOpen) Pa_Terminate();
   delete ui;
 }
 
@@ -643,24 +607,26 @@ void MainWindow::startSharedMemoryStdoutReader(DecoderContext* ctx)
         // Linux: eventHandle is a void* pointing to posix_event_t
         void* ev = ctx->stdoutChan->eventHandle;
 
-      // NEW: start reading from the current writeIndex
       StdoutSharedHeader h0 = region->header;
       std::uint32_t readIndex = h0.writeIndex;
       if (readIndex >= bufSize)
           readIndex = 0;
       region->header.readIndex = readIndex;
 
-      // TEMP diagnostic 2026-09-10: h0.writeIndex should always be 0 here --
-      // StdoutSharedMemory's constructor unconditionally zeroes writeIndex/
-      // readIndex right after mapping (see stdout_shared_memory.cpp), and
-      // that happens synchronously on the main thread before this reader
-      // thread is even spawned. If this ever logs a nonzero value, that
-      // assumption is wrong and this "start from current writeIndex" line
-      // is silently skipping over real data written before this point.
-      cppDbg(QString("stdout reader INIT readIndex=%1 (h0.writeIndex=%2) bufSize=%3")
-                 .arg(readIndex).arg(h0.writeIndex).arg(bufSize));
-
       std::string lineBuffer;
+      QStringList displayLines;
+      auto flushDisplayLines = [this, &displayLines]() {
+          if (displayLines.isEmpty()) return;
+          QStringList lines;
+          lines.swap(displayLines);
+          QMetaObject::invokeMethod(
+              this,
+              [this, lines]() {
+                  for (const QString& line : lines) processStdOut(line);
+              },
+              Qt::QueuedConnection
+          );
+      };
 
       while (!stdoutReaderStop.load()) {
 
@@ -685,6 +651,11 @@ void MainWindow::startSharedMemoryStdoutReader(DecoderContext* ctx)
                   lineBuffer.clear();
 
                   QString text = QString::fromStdString(line);
+                  if (text.startsWith('@') || text.startsWith('&')) {
+                      displayLines.append(text);
+                      continue;
+                  }
+                  flushDisplayLines();
                   QMetaObject::invokeMethod(
                       this,
                       [this, text]() { processStdOut(text); },
@@ -699,6 +670,8 @@ void MainWindow::startSharedMemoryStdoutReader(DecoderContext* ctx)
           region->header.readIndex = readIndex;
       }
 
+      flushDisplayLines();
+
     });
 }
 
@@ -707,16 +680,14 @@ void MainWindow::processStdOut(QString t)
 
 //  qDebug().noquote() << QDateTime::currentMSecsSinceEpoch() << "PROCESS STDOUT:" << t;
 
-  // TEMP diagnostic 2026-09-10: confirms whether a decode line that made it
-  // into map65_rx.log (written Fortran-side, independent of this whole
-  // path) ever actually arrived here on the GUI thread. If a "!"-prefixed
-  // line is missing from this log around the time of a report-vs-rx.log
-  // mismatch, the loss is upstream (shared-memory ring buffer / reader
-  // thread); if it IS here but never appended to the Messages window, the
-  // loss is in handleControlLine/shouldDisplay below.
-  cppDbg(QString("processStdOut RECV \"%1\"").arg(t.trimmed()));
-
   if (m_decodeDisplayFilter.handleControlLine(t)) return;
+
+  if (t.startsWith("<Map65DisplayBegin>")) {
+    m_messagesText.clear();
+    m_bandmapText.clear();
+    m_widebandDecode = true;
+    return;
+  }
 
   if (t.startsWith("<DecodeSkipped>")) {
     bool validRequestId = false;
@@ -783,9 +754,6 @@ if (t.indexOf("<QuickDecodeDone>") >= 0) {
     return;
 }
 
-    // --- same position as legacy ---
-    read_log();
-
     // --- "!" decoded text lines ---
     if (t.startsWith("!")) {
         int n = t.length();
@@ -804,11 +772,6 @@ if (t.indexOf("<QuickDecodeDone>") >= 0) {
 
         if (n >= 30 || t.indexOf("Best-fit") >= 0) {
           bool const display = m_decodeDisplayFilter.shouldDisplay(decode_line);
-          // TEMP diagnostic 2026-09-10 -- see the matching note at the top
-          // of processStdOut(). If display=false here for a line that has
-          // no legitimate earlier-pass duplicate, the display filter itself
-          // (map65_decode_display_filter.cpp) is the culprit.
-          cppDbg(QString("shouldDisplay=%1 for \"%2\"").arg(display ? "true" : "false").arg(decode_line));
           if (display)
             ui->decodedTextBrowser->append(decode_line);
         }
@@ -873,16 +836,13 @@ if (t.indexOf("<QuickDecodeDone>") >= 0) {
                 }
             }
             static const QRegularExpression call_re(
-                "^[A-Z0-9]{1,3}[0-9][A-Z0-9]{0,3}[A-Z](/[A-Z0-9]+)?$");
+                "^([A-Z0-9]{1,4}/)?[A-Z0-9]{1,3}[0-9][A-Z0-9]{0,3}[A-Z](/[A-Z0-9]+)?$");
             if (freq_khz > 0 && !sender.isEmpty()
                 && call_re.match(sender.toUpper()).hasMatch()) {
                 m_wide_graph_window->addDecodeLabel(freq_khz, sender, is_jt65);
             }
         }
 
-        // clear snapshots for this decode run, just like legacy
-        m_messagesText.clear();
-        m_bandmapText.clear();
     }
 
     // --- "@" message lines ---
@@ -894,7 +854,9 @@ if (t.indexOf("<QuickDecodeDone>") >= 0) {
     // --- "&" bandmap lines ---
     // N6NU 2026-05-24: format widened to include the 5-char ndf from
     // line3(k)(9:13). New layout:
-    //   "&" + I3 kHz + I5 ndf + " " + A6 call + A2 age
+    //   "&" + I3 kHz + I5 ndf + " " + A12 call + A2 age + A1 mode + A4 UTC
+    // where mode is '#' (JT65) or ':' (Q65) and UTC (hhmm) is the call's
+    // latest decode; older builds omit both.
     // Old layout (pre-260524, used by stock map65):
     //   "&" + I3 kHz + " " + A6 call + A2 age
     // We auto-detect by checking column 4: if it's a digit/space-of-int,
@@ -911,7 +873,7 @@ if (t.indexOf("<QuickDecodeDone>") >= 0) {
         QString callsign = q.mid(call_start);
         callsign = callsign.mid(0, callsign.indexOf(" "));
         if (callsign.length() > 2) {
-            if (m_worked[callsign]) {
+            if (m_worked.contains(callsign)) {
                 q = q.mid(1,4) + "  " + q.mid(call_start);
             } else {
                 q = q.mid(1,4) + " *" + q.mid(call_start);
@@ -919,24 +881,30 @@ if (t.indexOf("<QuickDecodeDone>") >= 0) {
             m_bandmapText += q;
 
             // Fallback overlay tap (N6NU 2026-05-13, DG2YCB feedback r4).
-            // We can't know the mode from this line, so pass is_jt65=false
-            // and mode_reliable=false. With the new format we now also
-            // have ndf precision, so freq_reliable=true. Old format
-            // callers still pass freq_reliable=false (integer kHz only).
+            // The mode character, when present, sets the label color;
+            // without it, pass is_jt65=false and mode_reliable=false. With
+            // the new format we now also have ndf precision, so
+            // freq_reliable=true. Old format callers still pass
+            // freq_reliable=false (integer kHz only).
             if (m_wide_graph_window) {
+                const QString mode = ndf_ok ? t.mid(call_start + 14, 1) : QString();
+                const bool mode_known = (mode == "#" || mode == ":");
+                bool utc_ok = false;
+                const int utc = mode_known ? t.mid(call_start + 15, 4).toInt(&utc_ok) : -1;
                 bool ok_khz = false;
                 const int nkHz = t.mid(1, 3).trimmed().toInt(&ok_khz);
                 const double freq_khz = ndf_ok
                     ? (nkHz + ndf_hz / 1000.0)
                     : double(nkHz);
                 static const QRegularExpression call_re(
-                    "^[A-Z0-9]{1,3}[0-9][A-Z0-9]{0,3}[A-Z](/[A-Z0-9]+)?$");
+                    "^([A-Z0-9]{1,4}/)?[A-Z0-9]{1,3}[0-9][A-Z0-9]{0,3}[A-Z](/[A-Z0-9]+)?$");
                 if (ok_khz && freq_khz > 0
                     && call_re.match(callsign.toUpper()).hasMatch()) {
                     m_wide_graph_window->addDecodeLabel(
-                        freq_khz, callsign, /*is_jt65=*/false,
-                        /*mode_reliable=*/false,
-                        /*freq_reliable=*/ndf_ok);
+                        freq_khz, callsign, /*is_jt65=*/mode == "#",
+                        /*mode_reliable=*/mode_known,
+                        /*freq_reliable=*/ndf_ok,
+                        /*decode_utc=*/utc_ok ? utc : -1);
                 }
             }
         }
@@ -962,6 +930,19 @@ void MainWindow::onDiskDecodeFinished()
 
     if (m_loopall)
         on_actionOpen_next_in_directory_triggered();
+}
+
+static QString paDeviceName(int device)
+{
+  PaDeviceInfo const* info = Pa_GetDeviceInfo(device);
+  return info ? QString(info->name) : QString();
+}
+
+static QString paHostApiName(int device)
+{
+  PaDeviceInfo const* info = Pa_GetDeviceInfo(device);
+  PaHostApiInfo const* api = info ? Pa_GetHostApiInfo(info->hostApi) : nullptr;
+  return api ? QString(api->name) : QString();
 }
 
 //-------------------------------------------------------- writeSettings()
@@ -997,11 +978,18 @@ void MainWindow::writeSettings()
   settings.setValue("Fcal",m_fCal);
   settings.setValue("Fadd",m_fAdd);
   settings.setValue("NetworkInput", m_network);
-  settings.setValue("FSam96000", QString::number(m_pendingFs96000 >= 0 ? m_pendingFs96000 : m_fs96000));
+  settings.setValue("FSam96000", QString::number(dialogSampleRateCode(m_fs96000, m_pendingFs96000)));
   settings.setValue("SoundInIndex",m_nDevIn);
-  settings.setValue("paInDevice",m_paInDevice);
+  int const inDevice = savedInputDevice(m_paInDevice, m_pendingPaInDevice);
+  settings.setValue("paInDevice",inDevice);
+  settings.setValue("paInDeviceName",inDevice >= 0 ? paDeviceName(inDevice) : m_paInDeviceName);
+  settings.setValue("paInDeviceApi",inDevice >= 0 ? paHostApiName(inDevice) : m_paInDeviceApi);
   settings.setValue("SoundOutIndex",m_nDevOut);
   settings.setValue("paOutDevice",m_paOutDevice);
+  settings.setValue("paOutDeviceName",m_paOutDevice >= 0 ? paDeviceName(m_paOutDevice)
+                                                         : m_paOutDeviceName);
+  settings.setValue("paOutDeviceApi",m_paOutDevice >= 0 ? paHostApiName(m_paOutDevice)
+                                                       : m_paOutDeviceApi);
   settings.setValue("IQswap",m_IQswap);
   settings.setValue("Scale_dB",m_dB);
   settings.setValue("IQxt",m_bIQxt);
@@ -1017,7 +1005,8 @@ void MainWindow::writeSettings()
   settings.setValue("TxMode",m_modeTx);
   settings.setValue("SaveNone",ui->actionNone->isChecked());
   settings.setValue("SaveAll",ui->actionSave_all->isChecked());
-  settings.setValue("NDepth",m_ndepth);
+  settings.setValue("NDepthJT65",m_ndepth);
+  settings.setValue("NDepthQ65",m_ndepthq65);
   settings.setValue("NEME",m_onlyEME);
   settings.setValue("KB8RQ",m_kb8rq);
   settings.setValue("NB",m_NB);
@@ -1070,10 +1059,12 @@ void MainWindow::readSettings()
   m_myCall=settings.value("MyCall","").toString();
   m_myGrid=settings.value("MyGrid","").toString();
   m_idInt=settings.value("IDint",0).toInt();
-  m_pttPath=settings.value("PTTpath",0).toString();
+  m_pttPath=settings.value("PTTpath","NONE").toString();
+  if (m_pttPath.isEmpty() || m_pttPath == "0") m_pttPath = "NONE";
   m_pttPortNumber = settings.value("PTTPortNumber",0).toInt();
+  if (m_pttPath == "NONE") m_pttPortNumber = 0;
   #if !defined(Q_OS_WIN)
-    ptt_set_override(m_pttPath.toUtf8().constData());
+    ptt_set_override(m_pttPath == "NONE" ? nullptr : m_pttPath.toUtf8().constData());
   #endif
   m_astroFont=settings.value("AstroFont",20).toInt();
   m_xpol=settings.value("Xpol",false).toBool();
@@ -1096,7 +1087,7 @@ void MainWindow::readSettings()
   }
   m_editorCommand=settings.value("Editor","notepad").toString();
   m_dxccPfx=settings.value("DXCCpfx","").toString();
-  m_timeout=settings.value("Timeout",20).toInt();
+  m_timeout=qBound(10,settings.value("Timeout",20).toInt(),40);
   m_applyIQcal=settings.value("ApplyIQcal",0).toInt();
   ui->actionApply_IQ_Calibration->setChecked(m_applyIQcal!=0);
   m_dPhi=settings.value("dPhi",0).toInt();
@@ -1105,11 +1096,16 @@ void MainWindow::readSettings()
   soundInThread.setFadd(m_fAdd);
   m_network = settings.value("NetworkInput",true).toBool();
   m_fs96000 = readFSam96000(settings,1);
+  m_fs96000 = startupSampleRateCode(m_network, m_fs96000);
   qDebug() << "In MainWindow::readSettings FSam96000 is read as:" << m_fs96000;
   m_nDevIn = settings.value("SoundInIndex", 0).toInt();
   m_paInDevice = settings.value("paInDevice",0).toInt();
+  m_paInDeviceName = settings.value("paInDeviceName").toString();
+  m_paInDeviceApi = settings.value("paInDeviceApi").toString();
   m_nDevOut = settings.value("SoundOutIndex", 0).toInt();
   m_paOutDevice = settings.value("paOutDevice",0).toInt();
+  m_paOutDeviceName = settings.value("paOutDeviceName").toString();
+  m_paOutDeviceApi = settings.value("paOutDeviceApi").toString();
   m_IQswap = settings.value("IQswap",false).toBool();
   m_dB = settings.value("Scale_dB",0).toInt();
   m_initIQplus = settings.value("InitIQplus",false).toBool();
@@ -1143,7 +1139,11 @@ void MainWindow::readSettings()
   ui->actionNone->setChecked(settings.value("SaveNone",true).toBool());
   ui->actionSave_all->setChecked(settings.value("SaveAll",false).toBool());
   m_saveAll=ui->actionSave_all->isChecked();
-  m_ndepth=settings.value("NDepth",0).toInt();
+  // Older versions stored one shared level under "NDepth".
+  int ndepthOld=settings.value("NDepth",0).toInt();
+  m_ndepth=qBound(0,settings.value("NDepthJT65",qMin(ndepthOld,2)).toInt(),2);
+  // Q65 levels 0 and 1 behave identically, so the menu starts at 1 (Fast).
+  m_ndepthq65=qBound(1,settings.value("NDepthQ65",ndepthOld).toInt(),3);
   m_onlyEME=settings.value("NEME",false).toBool();
   ui->actionOnly_EME_calls->setChecked(m_onlyEME);
   m_kb8rq=settings.value("KB8RQ",false).toBool();
@@ -1168,10 +1168,12 @@ void MainWindow::readSettings()
     on_actionLinrad_triggered();
     ui->actionLinrad->setChecked(true);
   }
-  if(m_ndepth==0) ui->actionNo_Deep_Search->setChecked(true);
-  if(m_ndepth==1) ui->actionNormal_Deep_Search->setChecked(true);
-  if(m_ndepth==2) ui->actionAggressive_Deep_Search->setChecked(true);
-  if(m_ndepth==3) ui->actionFull_Deep_Search->setChecked(true);
+  if(m_ndepth==0) ui->actionJT65_No_Deep_Search->setChecked(true);
+  if(m_ndepth==1) ui->actionJT65_Normal_Deep_Search->setChecked(true);
+  if(m_ndepth==2) ui->actionJT65_Aggressive_Deep_Search->setChecked(true);
+  if(m_ndepthq65==1) ui->actionQ65_Fast->setChecked(true);
+  if(m_ndepthq65==2) ui->actionQ65_Normal->setChecked(true);
+  if(m_ndepthq65==3) ui->actionQ65_Deep->setChecked(true);
   m_w3szUrl=settings.value("w3szUrl",true).toBool();
   m_otherUrl=settings.value("otherUrl","").toString();
   m_spot_to_psk_reporter = pskReporterSettings.enabled;
@@ -1222,10 +1224,7 @@ void MainWindow::dataSink(int k)
   static int nzap=0;
   static int ntrz=0;
   static int nkhz;
-  int nfsample = 96000; 
-  if (m_fs96000 == 0) nfsample = 95238;
-  else if(m_fs96000 == 2) nfsample = 192000;
-  setNfsample(nfsample);
+  setNfsample(sampleRateForCode(m_fs96000));
   int nxpol= m_xpol ? 1 : 0;
   setNxpol(nxpol);
   static int nsec0=0;
@@ -1276,7 +1275,7 @@ void MainWindow::dataSink(int k)
   nsec0=nsec;
 
   QString t;
-  m_pctZap=nzap/178.3;
+  m_pctZap=zapPercent(nzap,g_sampleRate);
   ui->yMeterFrame->setVisible(m_xpol);
   if(m_xpol) {
     lab4->setText (
@@ -1353,6 +1352,7 @@ void MainWindow::dataSink(int k)
     setNewdat(1);
     setNagain(0);
     setNhsym(280);
+    snapshot_buffers(1, k, 280);                        //Freeze this pass's data now
     QDateTime t = QDateTime::currentDateTimeUtc();
     m_dateTime=t.toString("yyyy-MMM-dd hh:mm");
     decode();                                           //Start the decoder
@@ -1365,6 +1365,7 @@ void MainWindow::dataSink(int k)
     setNewdat(1);
     setNagain(0);
     setNhsym(302);
+    snapshot_buffers(2, k, 302);                        //Freeze this pass's data now
     QDateTime t = QDateTime::currentDateTimeUtc();
     m_dateTime=t.toString("yyyy-MMM-dd hh:mm");
     decode();                                           //Start the decoder
@@ -1543,6 +1544,60 @@ void MainWindow::getfile(QString fname, bool xpol, int dbDgrd)
     }
 }
 
+// SoundIn ignores new settings while it runs and a stream it still holds
+// can't be reopened, so wait until it has really finished (closing an ALSA
+// plugin stream can take more than a second).
+bool MainWindow::stopSoundIn(bool report)
+{
+  soundInThread.quit();
+  if (soundInThread.wait(5000)) return true;
+  if (report) msgBox("Sound input did not stop. Please exit MAP65 and start it again.");
+  return false;
+}
+
+// map65.ini keeps the device numbers of the run that saved them; find the
+// same devices by name in this run. A device that isn't found is not opened.
+void MainWindow::findSavedDevices()
+{
+  int const count = Pa_GetDeviceCount();
+  // Windows lists one device under several host APIs with the same name, so
+  // a name is matched only under the host API it was saved with. Both sides
+  // go through QString, so names that aren't UTF-8 still compare equal.
+  auto nameIf = [](int device, bool input, QString const& api) {
+    PaDeviceInfo const* info = Pa_GetDeviceInfo(device);
+    if (!info || (input ? info->maxInputChannels : info->maxOutputChannels) < 1) return std::string();
+    if (!api.isEmpty() && paHostApiName(device) != api) return std::string();
+    return QString(info->name).toStdString();
+  };
+  int const in = resolveSavedDevice(m_paInDevice, m_paInDeviceName.toStdString(), count,
+                                    [&](int i) { return nameIf(i, true, m_paInDeviceApi); });
+  int out = resolveSavedDevice(m_paOutDevice, m_paOutDeviceName.toStdString(), count,
+                               [&](int i) { return nameIf(i, false, m_paOutDeviceApi); });
+  // A number saved without a name (older map65.ini) is used only if that
+  // device has inputs (outputs). An output never chosen falls back to the
+  // default output quietly, so network-only users aren't asked about it.
+  auto described = [](QString const& name, int number) {
+    return name.isEmpty() ? QString("number %1").arg(number) : QString("\"%1\"").arg(name);
+  };
+  bool const inFound = in >= 0 && !nameIf(in, true, m_paInDeviceApi).empty();
+  bool outFound = out >= 0 && !nameIf(out, false, m_paOutDeviceApi).empty();
+  QStringList missing;
+  if (!inFound && !m_network)
+    missing << "input device " + described(m_paInDeviceName, m_paInDevice);
+  if (!outFound && m_paOutDeviceName.isEmpty()) {
+    out = Pa_GetDefaultOutputDevice();
+    outFound = out >= 0;
+  }
+  if (!outFound)
+    missing << "output device " + described(m_paOutDeviceName, m_paOutDevice);
+  m_paInDevice = inFound ? in : -1;
+  m_paOutDevice = outFound ? out : -1;
+  if (!missing.isEmpty())
+    msgBox(QString("The saved %1 %2 not found.\nChoose %3 in Setup > Options > I/O Devices.")
+           .arg(missing.join(" and the saved "), missing.size() > 1 ? "were" : "was",
+                missing.size() > 1 ? "them" : "one"));
+}
+
 void MainWindow::showSoundInError(const QString& errorMsg)
  {QMessageBox::critical(this, tr("Error in SoundIn"), errorMsg);}
 
@@ -1560,50 +1615,101 @@ void MainWindow::on_actionDeviceSetup_triggered()
 
     if (dlg.exec() == QDialog::Accepted)
     {
-        if (dlg.m_restartRequired)
+        m_pendingFs96000 = dlg.m_pendingFs96000;
+
+        // The selected input device can't run at the running rate: no input
+        // until the restart, rather than data that doesn't match the settings.
+        if (dlg.m_stopSoundIn && stopSoundIn())
         {
-            m_pendingFs96000 = dlg.m_pendingFs96000;
-            writeSettings();
-            if (m_messages_window) {
-                m_messages_window->setPSKReportingEnabled(m_spot_to_psk_reporter);
-            }
-            return;
+            m_soundInDevice = -1;
+            m_soundInStopped = true;
         }
-        m_pendingFs96000 = -1;
 
         //
         // Apply runtime effects for SoundIn
         //
-        if (dlg.m_restartSoundIn)
+        // notify false: SoundIn's own start-failure box is already on its way.
+        auto holdSoundIn = [this](bool stoppedNow, bool notify = true) {
+            if (stoppedNow) {
+                m_soundInDevice = -1;
+                m_soundInStopped = true;
+            }
+            if (notify && (!m_soundInFailedNoticeShown || stoppedNow))
+                msgBox("Sound input failed to start earlier, so the new input settings take "
+                       "effect only after a restart. They have been saved. Please exit MAP65 "
+                       "and start it again.");
+            m_soundInFailedNoticeShown = true;
+        };
+        if (dlg.m_restartSoundIn && soundInThread.m_streamLeftOpen && !m_network)
         {
-      soundInThread.quit();
-      soundInThread.wait(1000);
+            // Network input may be running (chosen after the failed start);
+            // it stops too, so input matches the settings until the restart.
+            holdSoundIn(soundInThread.isRunning() && stopSoundIn());
+        }
+        else if (dlg.m_restartSoundIn && stopSoundIn())
+        {
+            // SoundIn may still have been opening its stream when Settings was
+            // accepted; m_streamLeftOpen is final only once the thread has stopped.
+            if (!m_network && soundInThread.m_streamLeftOpen)
+            {
+                holdSoundIn(true, false);
+            }
+            else
+            {
+                if(!m_network) cacheInputDeviceRates(m_paInDevice);
+                soundInThread.setInputDevice(m_paInDevice);
+                soundInThread.setNetwork(m_network);
+                soundInThread.setFadd(m_fAdd);
+                soundInThread.setRate(m_fs96000 == 0 ? 95238.1 : double(sampleRateForCode(m_fs96000)));
+                soundInThread.setSwapIQ(m_IQswap);
+                soundInThread.setScale(m_dB);
+                soundInThread.setPort(m_udpPort);
+                soundInThread.setNrx(m_xpol ? 2 : 1);
 
-            soundInThread.setInputDevice(m_paInDevice);
-      soundInThread.setNetwork(m_network);
-      soundInThread.setFadd(m_fAdd);
-            if (m_fs96000 == 1) soundInThread.setRate(96000.0);
-            else if (m_fs96000 == 0) soundInThread.setRate(95238.1);
-            else if (m_fs96000 == 2) soundInThread.setRate(192000.0);
-            soundInThread.setSwapIQ(m_IQswap);
-            soundInThread.setScale(m_dB);
-            soundInThread.setPort(m_udpPort);
-            soundInThread.setNrx(m_xpol ? 2 : 1);
-
-      soundInThread.start(QThread::HighestPriority);
-    }
+                soundInThread.start(QThread::HighestPriority);
+                m_soundInDevice = m_network ? -1 : m_paInDevice;
+                m_soundInChannels = m_xpol ? 4 : 2;
+                m_soundInStopped = false;
+                if (!m_network) {
+                    m_lastCardDevice = m_soundInDevice;
+                    m_lastCardChannels = m_soundInChannels;
+                }
+            }
+        }
 
         //
         // Apply runtime effects for SoundOut
         //
         if (dlg.m_restartSoundOut)
         {
-      soundOutThread.quitExecution=true;
-      soundOutThread.wait(1000);
-
-      soundOutThread.setOutputDevice(m_paOutDevice);
-            soundOutThread.start();
-    }
+            bool stopped = true;
+            if (!soundOutThread.m_streamLeftOpen)
+            {
+                soundOutThread.quitExecution=true;
+                stopped = soundOutThread.wait(1000);
+            }
+            // SoundOut may still have been opening its stream when Settings was
+            // accepted; m_streamLeftOpen is final only once the thread has stopped.
+            if (soundOutThread.m_streamLeftOpen)
+            {
+                if (!m_soundOutFailedNoticeShown)
+                    msgBox("Sound output failed to start earlier, so the new output settings take "
+                           "effect only after a restart. They have been saved. Please exit MAP65 "
+                           "and start it again.");
+                m_soundOutFailedNoticeShown = true;
+            }
+            else if (!stopped)
+            {
+                msgBox("Sound output is still starting, so the new output settings take "
+                       "effect only after a restart. They have been saved. Please exit MAP65 "
+                       "and start it again.");
+            }
+            else
+            {
+                soundOutThread.setOutputDevice(m_paOutDevice);
+                soundOutThread.start();
+            }
+        }
 
         //
         // GUI updates
@@ -1639,10 +1745,7 @@ void MainWindow::onSampleRateChanged(int newRate)
     if (!m_wide_graph_window)
         return;
 
-    if (newRate == 96000 || newRate == 95238)
-        m_wide_graph_window->setFreqSpanLimits(60, 90);
-    else
-        m_wide_graph_window->setFreqSpanLimits(60, 190);
+    m_wide_graph_window->setFreqSpanLimits(60, maxFreqSpanKHz(newRate));
 
     m_wide_graph_window->updateSpanFromSpinbox();
 }
@@ -1831,6 +1934,44 @@ void MainWindow::createStatusBar()                           //createStatusBar
   lab8->setMinimumSize(QSize(50,10));
   lab8->setFrameStyle(QFrame::Panel | QFrame::Sunken);
   statusBar()->addWidget(lab8);
+
+  labLag = new QLabel("Decoder OK");
+  labLag->setAlignment(Qt::AlignHCenter);
+  labLag->setMinimumSize(QSize(50,10));
+  labLag->setFrameStyle(QFrame::Panel | QFrame::Sunken);
+  labLag->setToolTip("Decoder keeping up with the minute");
+  statusBar()->addWidget(labLag);
+}
+
+// Shows when the decoder cannot keep up: a decode pass was dropped or cut
+// short. Stays on for three minutes after the last event.
+void MainWindow::updateDecoderLagIndicator()
+{
+  constexpr qint64 holdMs = 180000;
+  qint64 const now = QDateTime::currentMSecsSinceEpoch();
+  int const count = get_decoder_lag_count();
+  if (count != m_lagSeen) {
+    m_lagTotal += count - m_lagSeen;
+    m_lagSeen = count;
+    m_lagLastMs = now;
+    QString what;
+    switch (get_decoder_lag_kind()) {
+    case 1:  what = "a decode pass was dropped because the previous one was still running"; break;
+    case 2:  what = "a queued decode pass was skipped"; break;
+    default: what = "a decode pass was stopped at its 40 s time limit"; break;
+    }
+    labLag->setText("Decoder behind");
+    labLag->setStyleSheet("QLabel{background-color: #ffb266}");
+    labLag->setToolTip(QString("Last event: %1.\n%2 decoder-behind events so far this session. Some stations may be "
+                               "missing from the Messages window.\nTry closing other programs, "
+                               "a lower sample rate, or single polarization.").arg(what).arg(m_lagTotal));
+  } else if (m_lagLastMs != 0 and now - m_lagLastMs > holdMs) {
+    m_lagLastMs = 0;
+    labLag->setText("Decoder OK");
+    labLag->setStyleSheet("");
+    labLag->setToolTip(QString("Decoder keeping up with the minute (%1 decoder-behind events so far this session)")
+                       .arg(m_lagTotal));
+  }
 }
 
 void MainWindow::on_tolSpinBox_valueChanged(int i)             //tolSpinBox
@@ -1864,9 +2005,7 @@ void MainWindow::closeEvent(QCloseEvent *e)
     }
     if (m_wide_graph_window) m_wide_graph_window->close();
 
-#ifdef __unix__
-    ptt_close();   // close persistent Linux serial port
-#endif
+    ptt_close();
 
     if (g_pTxTune) {
         g_pTxTune->close();
@@ -2056,9 +2195,8 @@ void MainWindow::diskDat()                                   //diskDat()
     setFcenter(m_wide_graph_window->m_dForceCenterFreq);
   }
 
-  hsym=2048.0*96000.0/11025.0;   //Samples per JT65 half-symbol if SR = 96000
-  if(m_fs96000 == 0) hsym=2048.0*95238.1/11025.0; // Samples per JT65 half-symbol if SR =  95238.1
-  else if(m_fs96000 == 2) hsym=2048.0*192000.0/11025.0;   //Samples per JT65 half-symbol if SR = 192000
+  // Samples per JT65 half-symbol at the active sample rate
+  hsym=2048.0*(m_fs96000 == 0 ? 95238.1 : double(sampleRateForCode(m_fs96000)))/11025.0;
   for(int i=0; i<304; i++) {           // Do the half-symbol FFTs
     int k = i*hsym + 2048.5;
     dataSink(k);
@@ -2098,11 +2236,7 @@ void MainWindow::on_actionErase_Band_Map_and_Messages_triggered()
 {
   m_band_map_window->setText("");
   m_messages_window->setText("","");
-  // m_messagesText/m_bandmapText accumulate across decode cycles and are
-  // only reset when a "!" line arrives (processStdOut). Without clearing
-  // them here too, the next <EarlyFinished>/<DecodeFinished> redisplay
-  // (or a cycle with no fresh decodes) repaints the stale pre-erase text
-  // right back into the windows.
+  m_messages_window->clearLiveCQHistory();
   m_messagesText.clear();
   m_bandmapText.clear();
   m_widebandDecode = false;
@@ -2130,24 +2264,34 @@ void MainWindow::on_actionNo_shorthands_if_Tx1_triggered()
   stub();
 }
 
-void MainWindow::on_actionNo_Deep_Search_triggered()          //No Deep Search
+void MainWindow::on_actionJT65_No_Deep_Search_triggered()          //JT65 No DS
 {
   m_ndepth=0;
 }
 
-void MainWindow::on_actionNormal_Deep_Search_triggered()      //Normal DS
+void MainWindow::on_actionJT65_Normal_Deep_Search_triggered()      //JT65 Normal DS
 {
   m_ndepth=1;
 }
 
-void MainWindow::on_actionAggressive_Deep_Search_triggered()  //Aggressive DS
+void MainWindow::on_actionJT65_Aggressive_Deep_Search_triggered()  //JT65 Aggressive DS
 {
   m_ndepth=2;
 }
 
-void MainWindow::on_actionFull_Deep_Search_triggered()        //Full DS
+void MainWindow::on_actionQ65_Fast_triggered()      //Q65 Fast
 {
-  m_ndepth=3;
+  m_ndepthq65=1;
+}
+
+void MainWindow::on_actionQ65_Normal_triggered()  //Q65 Normal
+{
+  m_ndepthq65=2;
+}
+
+void MainWindow::on_actionQ65_Deep_triggered()        //Q65 Deep
+{
+  m_ndepthq65=3;
 }
 
 void MainWindow::on_actionNone_triggered()                    //Save None
@@ -2228,6 +2372,7 @@ void MainWindow::decode()                                       //decode()
   setMousedf(m_wide_graph_window->DF());
   setMousefqso(m_wide_graph_window->QSOfreq());
   setNdepth(m_ndepth);
+  setNdepthq65(m_ndepthq65);
   setNdiskdat(0);
   if(m_diskData) {
     if(m_myGrid.trimmed().length()>=6) {
@@ -2283,9 +2428,7 @@ void MainWindow::decode()                                       //decode()
   if(getNutc() < m_nutc0) m_map65RxLog |= 1;  //Date and Time to map65_rx.log
   m_nutc0=getNutc();
   setMap65RxLog(m_map65RxLog);
-  if(m_fs96000 == 1) setNfsample(96000);
-  if(m_fs96000 == 0) setNfsample(95238);
-  else if(m_fs96000 == 2) setNfsample(192000);
+  setNfsample(sampleRateForCode(m_fs96000));
  // qDebug() << "MainWindow::decode setting nfsample to " << m_fs96000;
   setNxpol(0);
   if(m_xpol) setNxpol(1);
@@ -2349,7 +2492,7 @@ void MainWindow::writeCrashData() {
 
       out << "nutc: " << getNutc() << ", idphi: " << getIdphi()
           << ", mousedf: " << getMousedf() << ", mousefqso: " << getMousefqso()
-          << ", nagain: " << getNagain() << ", ndepth: " << getNdepth() << "\n";
+          << ", nagain: " << getNagain() << ", ndepth: " << getNdepth() << ", ndepthq65: " << getNdepthq65() << "\n";
 
       out << "ndiskdat: " << getNdiskdat() << ", neme: " << getNeme()
           << ", newdat: " << getNewdat() << ", nfa: " << getNfa()
@@ -2416,9 +2559,15 @@ void MainWindow::guiUpdate()
   static bool bMonitoring0=false;
   static int nc0=1;
   static int nc1=1;
+  static bool pttReleasePending=false;
+  static QElapsedTimer pttReleaseRetry;
+  static QString pttPath;
+  static int pttPortNumber=0;
   static char msgsent[23];
   static int nsendingsh=0;
   int khsym=0;
+
+  updateDecoderLagIndicator();
 
   double tx1=0.0;
   double tx2=126.0*4096.0/11025.0 + 1.8;
@@ -2444,25 +2593,66 @@ void MainWindow::guiUpdate()
   if(bTune and !bTune0) bMonitoring0=m_monitoring;
   bTune0=bTune;
 
-  if(m_auto or bTune) {
-    if ((bTxTime or bTune) && iptt == 0 && !m_txMute) {
+  auto stopForPttError = [this] (int error) {
+    bool deviceLost = error == PTT_DEVICE_LOST;
+    pttReleasePending = !deviceLost;
+    pttReleaseRetry.start();
+    nc0 = nc1 = 1;
+    iptt0 = iptt;
+    btxok0 = false;
+    on_stopTxButton_clicked();
+    if (bTune && g_pTxTune) g_pTxTune->accept();
+    bTune = false;
+    soundOutThread.quitExecution = true;
+    m_transmitting = false;
+    if (deviceLost) {
+      m_wide_graph_window->enableSetRxHardware(true);
+      m_pttErrorShown = false;
+      msgBox(tr("Lost connection to PTT port: %1. PTT release could not be confirmed. "
+                "Check that the radio is no longer transmitting before starting another transmission.")
+             .arg(pttPath));
+    } else if (!m_pttErrorShown) {
+      m_pttErrorShown = true;
+      msgBox(tr("Cannot open or control PTT port: %1").arg(pttPath));
+    }
+  };
 
-  if (m_pttPath != "NONE") {
-      int itx = 1;
-      int nport = m_pttPortNumber;   // the real COM port number
-      int ierr = ptt_(&nport, &itx, &iptt);
-
-      if (ierr != 0) {
-          if (!m_pttErrorShown) {
-              char s[256];
-              snprintf(s, sizeof(s), "Cannot open Port: %s",
-                      m_pttPath.toUtf8().constData());
-              msgBox(s);
-              m_pttErrorShown = true;
-          }
-          on_stopTxButton_clicked();
-      }
+  if (pttReleasePending) {
+    on_stopTxButton_clicked();
+    if (bTune && g_pTxTune) g_pTxTune->accept();
+    bTune = false;
   }
+
+  if((m_auto or bTune) && !pttReleasePending) {
+    if ((bTxTime or bTune) && iptt == 0 && !m_txMute && m_paOutDevice < 0) {
+      // No output device (the saved one wasn't found): don't key a silent carrier.
+      on_stopTxButton_clicked();
+      if (bTune && g_pTxTune) g_pTxTune->accept();
+      bTune = false;
+      if (!m_noOutputShown) {
+        m_noOutputShown = true;
+        msgBox("No output device is selected, so MAP65 can't transmit.\n"
+               "Choose one in Setup > Options > I/O Devices.");
+      }
+    } else if ((bTxTime or bTune) && iptt == 0 && !m_txMute && soundOutThread.m_streamLeftOpen) {
+      // Its start failed and the stream is still held: don't key a silent carrier.
+      on_stopTxButton_clicked();
+      if (bTune && g_pTxTune) g_pTxTune->accept();
+      bTune = false;
+      if (!m_soundOutTxNoticeShown) {
+        m_soundOutTxNoticeShown = true;
+        msgBox("Sound output failed to start, so MAP65 can't transmit.\n"
+               "Please exit MAP65 and start it again.");
+      }
+    } else if ((bTxTime or bTune) && iptt == 0 && !m_txMute) {
+      pttPath = m_pttPath;
+      pttPortNumber = m_pttPortNumber;
+      int itx = 1;
+      int ierr = ptt_(&pttPortNumber, &itx, &iptt);
+      if (ierr != PTT_OK) {
+        stopForPttError(ierr);
+        return;
+      }
 
         if (m_bIQxt)
             m_wide_graph_window->tx570();
@@ -2556,15 +2746,19 @@ void MainWindow::guiUpdate()
   if(!btxok && btxok0 && iptt==1) nc0=-11;  //RxDelay = 1.0 s
   btxok0=btxok;
   if(nc0 <= 0) nc0++;
-  if(nc0 == 0) {
+  if(nc0 == 0 || (pttReleasePending && pttReleaseRetry.hasExpired(1000))) {
     if(m_bIQxt) m_wide_graph_window->rx570();     // Set Si570 back to Rx Freq
-  int itx = 0;
-  int nport = m_pttPortNumber;   // the real COM port number
-  ptt_(&nport, &itx, &iptt);     // Lower PTT
-  m_pttErrorShown = false;
+    int itx = 0;
+    int ierr = ptt_(&pttPortNumber, &itx, &iptt);
+    if (ierr != PTT_OK) {
+      stopForPttError(ierr);
+      return;
+    }
+    pttReleasePending = false;
+    m_pttErrorShown = false;
 
     if(!m_txMute) {
-      soundOutThread.quitExecution=true;\
+      soundOutThread.quitExecution=true;
     }
     m_transmitting=false;
     m_wide_graph_window->enableSetRxHardware(true);
@@ -2651,7 +2845,6 @@ void MainWindow::guiUpdate()
     m_setftx=0;
     QString utc = t.date().toString(" yyyy MMM dd \n") + t.time().toString();
     ui->labUTC->setText(utc);
-    guiDate = ui->labUTC->text().trimmed().mid(0,12); //liveCQ
     if((!m_monitoring and !m_diskData) or (khsym==m_hsym0)) {
       xSignalMeter->setValue(0);
       ySignalMeter->setValue(0);
@@ -2747,7 +2940,7 @@ void MainWindow::selectCall2(bool ctrl)                         //selectCall2
                                                           //doubleClickOnCall
 void MainWindow::doubleClickOnCall(QString hiscall, bool ctrl)
 {
-  if(m_worked[hiscall]) {
+  if(m_worked.contains(hiscall)) {
     msgBox("Possible dupe: " + hiscall + " already in log.");
   }
   ui->dxCallEntry->setText(hiscall);
@@ -2789,7 +2982,7 @@ void MainWindow::doubleClickOnCall(QString hiscall, bool ctrl)
 void MainWindow::doubleClickOnMessages(QString hiscall, QString t2, bool ctrl)
 {
   if(hiscall.length()<3) return;
-  if(m_worked[hiscall]) {
+  if(m_worked.contains(hiscall)) {
     msgBox("Possible dupe: " + hiscall + " already in log.");
   }
   ui->dxCallEntry->setText(hiscall);
@@ -3117,8 +3310,13 @@ void MainWindow::on_logQSOButton_clicked()                 //Log QSO button
   }
   QTextStream out(&f);
   out << logEntry;
+  out.flush();
+  if (out.status() != QTextStream::Ok || !f.flush()) {
+    msgBox("Cannot write file \"wsjt.log\".");
+    return;
+  }
   f.close();
-  m_worked[m_hisCall]=true;
+  m_worked.insert(m_hisCall);
 }
 
 void MainWindow::on_actionErase_map65_rx_log_triggered()     //Erase Rx log
@@ -3271,7 +3469,7 @@ void MainWindow::on_actionFUNcube_Dongle_triggered()
 
 void MainWindow::on_actionEdit_wsjt_log_triggered()
 {
-  proc_editor.start (QDir::toNativeSeparators (m_editorCommand), {QDir::toNativeSeparators (m_appDir + "/wsjt.log"), });
+  proc_editor.start (QDir::toNativeSeparators (m_editorCommand), {QDir::toNativeSeparators (m_dataDir + "/wsjt.log"), });
 }
 
 void MainWindow::on_actionTx_Tune_triggered()
@@ -3311,25 +3509,18 @@ bool MainWindow::isGrid4(QString g)
   return true;
 }
 
-void MainWindow::read_log()
+void MainWindow::loadWorkedLog()
 {
-  // Update "m_worked" by reading wsjtx.log
-  m_worked.clear();                     //Start from scratch
-  QFile f("wsjtx.log");
-  qDebug() << "MainWindow::read_log File open result:" << f.open(QFileDevice::ReadOnly);
-  if(f.isOpen()) {
-    QTextStream in(&f);
-    QString line,callsign;
-    for(int i=0; i<99999; i++) {
-      line=in.readLine();
-      if(line.length()<=0) break;
-      callsign=line.mid(40,6);
-      int n=callsign.indexOf(",");
-      if(n>0) callsign=callsign.left(n);
-      m_worked[callsign]=true;
-    }
-    f.close();
+  QFile f("wsjt.log");
+  if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return;
+  QSet<QString> worked;
+  QTextStream in(&f);
+  while (!in.atEnd()) {
+    const QString callsign = in.readLine().section(',', 2, 2).trimmed();
+    if (!callsign.isEmpty()) worked.insert(callsign);
   }
+  if (in.status() != QTextStream::Ok) return;
+  m_worked.swap(worked);
 }
 
 void pa_deinit()

@@ -166,6 +166,8 @@ public:
   bool setPermissions (Permissions permissions);
   FileError error () const;
   bool flush ();
+  // Finalize a writable file's metadata and close it, reporting write failures.
+  bool finalize ();
   int handle () const;
 
   // The mapping offset is relative to the start of the sample data

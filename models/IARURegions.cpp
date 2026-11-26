@@ -34,21 +34,26 @@ char const * IARURegions::name (Region r)
   return region_names[static_cast<int> (r)];
 }
 
-IARURegions::Region IARURegions::value (QString const& s)
+QString IARURegions::display_name (Region r)
+{
+  return tr (name (r));
+}
+
+IARURegions::Region IARURegions::fromCanonicalName (QString const& s)
 {
   auto end = region_names + region_names_size;
   auto p = std::find_if (region_names, end
                          , [&s] (char const * const name) {
-                           return tr (name) == s;
+                           return name == s;
                          });
-  return p != end ? static_cast<Region> (p - region_names) : ALL;
+  return p != end ? static_cast<Region> (p - region_names) : SENTINAL;
 }
 
 QVariant IARURegions::data (QModelIndex const& index, int role) const
 {
   QVariant item;
 
-  if (index.isValid ())
+  if (index.isValid () && index.row () >= 0 && index.row () < SENTINAL)
     {
       auto const& row = index.row ();
       switch (role)
@@ -59,12 +64,12 @@ QVariant IARURegions::data (QModelIndex const& index, int role) const
           break;
 
         case Qt::EditRole:
-          item = static_cast<Region> (row);
+          item = QVariant::fromValue (static_cast<Region> (row));
           break;
 
         case Qt::DisplayRole:
         case Qt::AccessibleTextRole:
-          item = tr (region_names[row]);
+          item = display_name (static_cast<Region> (row));
           break;
 
         case Qt::TextAlignmentRole:

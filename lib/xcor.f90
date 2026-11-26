@@ -9,13 +9,14 @@ subroutine xcor(ipk,nsteps,nsym,lag1,lag2,ccf,ccf0,lagpk,flip,fdot,nrobust)
   use jt65_mod
   parameter (NHMAX=3413)           !Max length of power spectra
   parameter (NSMAX=552)            !Max number of quarter-symbol steps
-  real ss(NSMAX,NHMAX)             !2d spectrum, stepped by half-symbols
   real a(NSMAX)
 !  real ccf(-44:118)
   real ccf(lag1:lag2)
 !  save
-  common/sync/ss
 
+  call ensure_jt65_workspace()
+  if(.not.allocated(jt65_work%spectra)) allocate(jt65_work%spectra(552,3413))
+  associate(ss=>jt65_work%spectra)
   df=12000.0/8192.
 !  dtstep=0.5/df
   dtstep=0.25/df
@@ -73,5 +74,6 @@ subroutine xcor(ipk,nsteps,nsym,lag1,lag2,ccf,ccf0,lagpk,flip,fdot,nrobust)
      flip=-1.0
   endif
 
+  end associate
   return
 end subroutine xcor

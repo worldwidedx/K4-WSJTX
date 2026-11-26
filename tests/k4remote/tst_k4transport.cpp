@@ -12,7 +12,6 @@
 struct dec_data dec_data {};
 extern "C" { decltype(foxcom_) foxcom_ {}; }
 int volatile itone[MAX_NUM_SYMBOLS] {};
-int volatile icw[NUM_CW_SYMBOLS] {};
 
 class FakeK4 : public QObject {
 public:
@@ -286,10 +285,6 @@ private slots:
     request.ptt(true);
     rig.set(request, 2);
     QTRY_VERIFY(rig.state().ptt());
-    icw[0] = 3;
-    icw[1] = 1;
-    icw[2] = 0;
-    icw[3] = 1;
     request.tx_audio(true);
     request.jtmode("WSPR");
     request.symbolslength(1);
@@ -298,12 +293,14 @@ private slots:
     request.tonespacing(0.);
     request.synchronize(false);
     request.trperiod(120.);
+    auto tx = request.tx_request();
+    tx.cw_id = {1, 0, 1};
+    request.tx_request(tx);
     rig.set(request, 3);
     QTRY_VERIFY_WITH_TIMEOUT(modulation.size() >= 2 &&
                              !modulation.last()[0].toBool(), 2000);
     QVERIFY(radio.audio.size() >= 5);
     QVERIFY(errors.isEmpty());
-    icw[0] = 0;
     request.tx_audio(false);
     request.ptt(false);
     rig.set(request, 4);

@@ -27,7 +27,7 @@ jobs:
     outputs:
       version: ${{ steps.identity.outputs.version }}
       release_channel: ${{ steps.identity.outputs.channel }}
-      rc_number: ${{ steps.identity.outputs.rc_number }}
+      prerelease_number: ${{ steps.identity.outputs.prerelease_number }}
       windows_signing: ${{ steps.identity.outputs.windows_signing }}
       linux_image_tag: ${{ steps.linux-image.outputs.image_tag }}
       armhf_image_tag: ${{ steps.armhf-image.outputs.image_tag }}
@@ -53,7 +53,7 @@ jobs:
           {
             echo "version=$(jq -r .version <<<"$IDENTITY")"
             echo "channel=$(jq -r .channel <<<"$IDENTITY")"
-            echo "rc_number=$(jq -r .rc_number <<<"$IDENTITY")"
+            echo "prerelease_number=$(jq -r .prerelease_number <<<"$IDENTITY")"
             echo "windows_signing=$(jq -r .windows_signing <<<"$IDENTITY")"
           } >> "$GITHUB_OUTPUT"
 
@@ -95,7 +95,7 @@ jobs:
       runner: macos-15
       deployment_target: "11.0"
       release_channel: ${{ needs.prepare.outputs.release_channel }}
-      rc_number: ${{ needs.prepare.outputs.rc_number }}
+      prerelease_number: ${{ needs.prepare.outputs.prerelease_number }}
       signing_mode: validation
 
   macos-intel:
@@ -108,7 +108,7 @@ jobs:
       runner: macos-15-intel
       deployment_target: "10.13"
       release_channel: ${{ needs.prepare.outputs.release_channel }}
-      rc_number: ${{ needs.prepare.outputs.rc_number }}
+      prerelease_number: ${{ needs.prepare.outputs.prerelease_number }}
     secrets: inherit
 
   linux:
@@ -119,7 +119,7 @@ jobs:
       hamlib_branch: "4.7.1"
       arch: x86_64
       release_channel: ${{ needs.prepare.outputs.release_channel }}
-      rc_number: ${{ needs.prepare.outputs.rc_number }}
+      prerelease_number: ${{ needs.prepare.outputs.prerelease_number }}
 
   linux-arm:
     needs: prepare
@@ -129,7 +129,7 @@ jobs:
       hamlib_branch: "4.7.1"
       arch: aarch64
       release_channel: ${{ needs.prepare.outputs.release_channel }}
-      rc_number: ${{ needs.prepare.outputs.rc_number }}
+      prerelease_number: ${{ needs.prepare.outputs.prerelease_number }}
 
   windows:
     needs: prepare
@@ -138,7 +138,7 @@ jobs:
       version: ${{ needs.prepare.outputs.version }}
       hamlib_branch: "4.7.2"
       release_channel: ${{ needs.prepare.outputs.release_channel }}
-      rc_number: ${{ needs.prepare.outputs.rc_number }}
+      prerelease_number: ${{ needs.prepare.outputs.prerelease_number }}
 
   release:
     needs: [prepare, macos, macos-intel, linux, linux-arm, windows]

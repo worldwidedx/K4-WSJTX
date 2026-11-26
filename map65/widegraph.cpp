@@ -11,6 +11,7 @@
 #include "SettingsGroup.hpp"
 #include "ui_widegraph.h"
 #include "globals.h"
+#include "sample_rates.h"
 
 extern int g_sampleRate;
 
@@ -44,17 +45,16 @@ WideGraph::WideGraph (QString const& settings_filename, QWidget * parent)
   ui->gainSpinBox->setValue(ui->widePlot->getPlotGain());
   int n = settings.value("FreqSpan",60).toInt();
   int w = settings.value("PlotWidth",1000).toInt();
+  // Widen the range first: the spinbox's UI-defined maximum would clamp a
+  // saved span above 190 kHz.
+  setFreqSpanLimits(60, maxFreqSpanKHz(g_sampleRate));
   ui->freqSpanSpinBox->setValue(n);
-
-  if (g_sampleRate == 96000 || g_sampleRate == 95238)
-      setFreqSpanLimits(60, 90);
-  else
-      setFreqSpanLimits(60, 190);
+  n = ui->freqSpanSpinBox->value();
   updateSpanFromSpinbox();
 
   extern int g_sampleRate;          // at top of widegraph.cpp
   ui->widePlot->setNSpan(n);
-  double sr_kHz = g_sampleRate / 1000.0;   // 96.0 or 192.0
+  double sr_kHz = g_sampleRate / 1000.0;   // 96.0, 128.0, 192.0 or 256.0
   int sr_display = int(sr_kHz + 0.5);
   ui->srValueLabel->setText(QString::number(sr_display));
   int nbpp = int(n * g_activeNfft / (w * sr_kHz) + 0.5);
@@ -215,14 +215,15 @@ void WideGraph::saveSettings()
 
 void WideGraph::addDecodeLabel(double freq_khz, const QString& callsign,
                                bool is_jt65, bool mode_reliable,
-                               bool freq_reliable)
+                               bool freq_reliable, int decode_utc)
 {
   if (callsign.isEmpty()) return;
   if (!m_decodeLabelsEnabled) return;
   const qint64 now = QDateTime::currentMSecsSinceEpoch();
   for (auto& lab : m_decodeLabels) {
     if (lab.callsign == callsign) {
-      lab.last_seen_ms = now;
+      if (decode_utc < 0 || decode_utc != lab.last_utc) lab.last_seen_ms = now;
+      if (decode_utc >= 0) lab.last_utc = decode_utc;
       // Only overwrite freq when the caller has sub-kHz precision.
       // The "&" bandmap tap only has 3-char integer-kHz precision
       // (display.f90 cfreq0 is character(3) � no ndf field), so it
@@ -230,24 +231,28 @@ void WideGraph::addDecodeLabel(double freq_khz, const QString& callsign,
       // includes ndf, leaving the tick up to ~500 Hz off the signal.
       if (freq_reliable) lab.freq_khz = freq_khz;
       // Only overwrite the mode flag when the caller knows for sure.
-      // The "&" bandmap-line tap has no cmode in its payload, so it
-      // would otherwise stomp on an authoritative JT65 mark from the
-      // "!" decoder tap and flip the label color.
+      // An "&" bandmap line without the mode character would otherwise
+      // stomp on an authoritative JT65 mark from the "!" decoder tap and
+      // flip the label color.
       if (mode_reliable) lab.is_jt65 = is_jt65;
       ++lab.hits;
       if (ui && ui->widePlot) ui->widePlot->setDecodeLabels(m_decodeLabels);
       return;
     }
   }
+  if (decode_utc >= 0 && m_expiredLabelUtc.value(callsign, -1) == decode_utc) return;
+  m_expiredLabelUtc.remove(callsign);
   if (m_decodeLabels.size() >= kDecodeLabelMax) {
     m_decodeLabels.removeFirst();
   }
   m_decodeLabels.append(DecodeLabel{freq_khz, callsign, now, 1, is_jt65});
+  m_decodeLabels.last().last_utc = decode_utc;
   if (ui && ui->widePlot) ui->widePlot->setDecodeLabels(m_decodeLabels);
 }
 
 void WideGraph::clearDecodeLabels()
 {
+  m_expiredLabelUtc.clear();
   if (m_decodeLabels.isEmpty()) return;
   m_decodeLabels.clear();
   if (ui && ui->widePlot) ui->widePlot->setDecodeLabels(m_decodeLabels);
@@ -260,6 +265,10 @@ void WideGraph::ageDecodeLabels()
   const qint64 ttl_ms = static_cast<qint64>(trp * m_decodeLabelPeriods * 1000.0);
   const qint64 cutoff = QDateTime::currentMSecsSinceEpoch() - ttl_ms;
   const int    before = m_decodeLabels.size();
+  for (const auto& l : m_decodeLabels) {
+    if (l.last_seen_ms < cutoff && l.last_utc >= 0)
+      m_expiredLabelUtc.insert(l.callsign, l.last_utc);
+  }
   m_decodeLabels.erase(
       std::remove_if(m_decodeLabels.begin(), m_decodeLabels.end(),
                      [cutoff](const DecodeLabel& l) {
@@ -277,6 +286,7 @@ void WideGraph::setDecodeLabelsEnabled(bool on)
   m_decodeLabelsEnabled = on;
   if (!on) {
     m_decodeLabels.clear();
+    m_expiredLabelUtc.clear();
     if (ui && ui->widePlot) ui->widePlot->setDecodeLabels(m_decodeLabels);
   }
   // Persist immediately so the choice survives a crash before saveSettings runs.

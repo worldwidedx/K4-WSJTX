@@ -1,0 +1,30 @@
+{
+  "schema": 2,
+  "generation": "validated-build-20261109-42679434784-1",
+  "images": {
+    "x86_64": {
+      "reference": "ghcr.io/wsjtx/wsjtx/linux-noble@sha256:3502e73aac261c7d9d123757c98f35c45e85e3b6748b81c2d3c7dfcc982f0bb5",
+      "recipe_sha256": "a96a347b0a4d3b234fe1a463f28e63fca4ab264c55afc4f6a29a39aba70e5127"
+    },
+    "aarch64": {
+      "reference": "ghcr.io/wsjtx/wsjtx/linux-arm64-bookworm@sha256:5b2ddb05115d3dc9030999d4071232adaacacf2bf360f61d70819bb295613380",
+      "recipe_sha256": "a83e0bddb2c6b9820b3cec1311afe49a9bd142fa9010504864f427f829249f3c"
+    },
+    "armhf_cross": {
+      "reference": "ghcr.io/wsjtx/wsjtx/linux-armhf-cross-bookworm@sha256:5e82bf8ad79e61a4c77877e8e57396e3c92186c62d8a7522a1802dce4440ea85",
+      "recipe_sha256": "785c6d5639534ae4eb35123d878e05bbb32bee2b5edd0139b1a0a7b6051753f8"
+    },
+    "armhf_runtime": {
+      "reference": "ghcr.io/wsjtx/wsjtx/linux-armv7-bookworm@sha256:175ae28be103e823d3c5acd3647e682345388611bd1a45b15290fc4fe01470c1",
+      "recipe_sha256": "553c4cf4e791891c2389f67641407245e593d3528b041091d8a45594add62c2f"
+    },
+    "armhf_trixie_cross": {
+      "reference": "ghcr.io/wsjtx/wsjtx/linux-armhf-cross-trixie@sha256:2e9492a8088944eb31fef5fa7ce46e84049219f9eb97be7f0911de7d84e11d32",
+      "recipe_sha256": "51824bc94c4a3d60b833941b3a95e361297779983ccc707767d4374a60baec89"
+    },
+    "armhf_trixie_runtime": {
+      "reference": "ghcr.io/wsjtx/wsjtx/linux-armv7-trixie@sha256:82617d9a3b1966b8bb52d8c854a67852287c27060bb72062b0da6a123b94d39a",
+      "recipe_sha256": "553c4cf4e791891c2389f67641407245e593d3528b041091d8a45594add62c2f"
+    }
+  }
+}

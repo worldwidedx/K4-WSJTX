@@ -30,16 +30,16 @@ class TCITransceiver final
   Q_OBJECT;
 
 public:
-  // UTC milliseconds, called on the transceiver thread for receive audio.
+  // UTC milliseconds, called on the transceiver thread for audio timing.
   // An empty provider retains the system-clock behavior.
-  using ReceiveClock = std::function<qint64 ()>;
+  using UtcClock = std::function<qint64 ()>;
   static void register_transceivers (logger_type *, TransceiverFactory::Transceivers *, unsigned id1, unsigned id2);
 
   // Takes ownership of the wrapped transceiver.
   explicit TCITransceiver (logger_type * logger, std::unique_ptr<TransceiverBase> wrapped, QString const& rignr,
                                            QString const& address, bool use_for_ptt,
                                            int poll_interval, QObject * parent = nullptr,
-                                           ReceiveClock receive_clock = {});
+                                           UtcClock utc_clock = {});
 
 enum Tci_Cmd {
 Cmd_Unknown,
@@ -108,7 +108,6 @@ qreal txAtten;
 
 public slots:
   void sendTextMessage(const QString &message);
-  void txAudioData(quint32 len, float * data);
   void enqueue_jtty_pcm (QByteArray const& samples, TxAudioQueueEpoch epoch,
                          qint64 enqueueId) noexcept override;
   void clear_jtty_pcm (TxAudioQueueEpoch epoch) noexcept override;
@@ -126,6 +125,7 @@ signals:
   void sendAudioData(int, quint32, float*);
   void receiveIQ(bool,int);
   void txAudioChrono(quint32);
+  void txChronoDiagnostic (QString const& stage, qint64 bytes, qint64 expectedBytes);
   void tci_done1();
   void tci_done2();
   void tci_done3();
@@ -147,6 +147,12 @@ protected:
   void do_audio (bool on) override;
   void do_tune (bool on) override;
   void do_period(double period) override;
+  void do_receive_policy (ReceivePolicy) override;
+  void do_receive_context (quint64) override;
+  void receive_discontinuity (JttyReceiveReason) override;
+  void receive_stop_reason (JttyReceiveReason reason) override { m_inputStopReason = reason; }
+  void requestContinuousReceiveDrain (quint64 requestId) override
+  { Q_EMIT continuousReceiveDrained (requestId, m_jttyPublisher.mailbox ()); }
   void do_blocksize(qint32 blocksize) override;
   void do_spread(double spread) override {m_fSpread=spread;}
   void do_nsym(int nsym) override {m_symbolsLength=nsym;}
@@ -191,6 +197,8 @@ protected:
   enum ModulatorState {Synchronizing, Active, Idle};
 
 private:
+  friend class TestTciTransceiverCharacterization;
+
   MODE get_mode (bool requested = false);
   QString frequency_to_string (Frequency) const;
   Frequency string_to_frequency (QString const&) const;
@@ -252,7 +260,6 @@ private:
   // Rig state
   QString requested_mode_;
   QString mode_;
-  QString started_mode_;
   QString requested_rx_frequency_;
   QString rx_frequency_;
   QString requested_other_frequency_;
@@ -287,8 +294,14 @@ private:
     void clear ();                // discard buffer contents
 
   double m_period = 15.0;
-  ReceiveClock receive_clock_;
+  qint64 utc_msecs () const;
+  UtcClock utc_clock_;
   ReceiveAudioProducer m_receiveAudioProducer;
+  ReceivePolicy m_receivePolicy = ReceivePolicy::Timed;
+  quint64 m_receiveContext = 0;
+  JttyReceiveReason m_inputStopReason = JttyReceiveReason::MonitorStopped;
+  JttyReceivePublisher m_jttyPublisher;
+  std::array<short, 7 * 512> m_jttyOutput {};
   std::array<float, 49> m_downsampleState {};
   unsigned m_lastPeriodOffsetMs = 999999;
   unsigned m_downSampleFactor;
@@ -333,6 +346,7 @@ private:
   TxAudioQueue m_txAudioQueue;
   QTimer * m_jttyDrainTimer;
   qint64 m_jttyDrainGuard;
+  TxAudioQueueProgress m_jttyLastProgress;
   TxEvidence::TxStartSnapshot m_txStartSnapshot;
   qint64 m_tciBackendStartSequence;
   qint64 m_tciSuccessfullyWrittenFrames;
@@ -341,14 +355,15 @@ private:
   bool m_tciFinalSnapshotEmitted;
 
   bool m_tuning;
+  bool m_silent {false};       // footswitch TX: keep timing, send no audio
   bool m_addNoise;
   bool m_bFastMode;
 
   bool m_cwLevel;
   QVector<int> m_cwId;
-  unsigned m_ic;
+  qint64 m_ic;
   unsigned m_isym0;
-  int m_j0;
+  qint64 m_j0;
   double m_toneFrequency0;
   
   QByteArray m_tx1[8];

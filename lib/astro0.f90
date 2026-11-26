@@ -1,4 +1,5 @@
 subroutine astro0(nyear,month,nday,uth8,freq8,mygrid,hisgrid,              &
+     use_home_coordinates,home_latitude,home_longitude,                     &
      AzSun8,ElSun8,AzMoon8,ElMoon8,AzMoonB8,ElMoonB8,ntsky,ndop,ndop00,    &
      dbMoon8,RAMoon8,DecMoon8,HA8,Dgrd8,sd8,poloffset8,xnr8,dfdt,dfdt0,    &
      width1,width2,xlst8,techo8,ephemeris_result)
@@ -12,7 +13,8 @@ subroutine astro0(nyear,month,nday,uth8,freq8,mygrid,hisgrid,              &
   real*8 AzSun8,ElSun8,AzMoon8,ElMoon8,AzMoonB8,ElMoonB8
   real*8 dbMoon8,RAMoon8,DecMoon8,HA8,Dgrd8,xnr8,dfdt,dfdt0,dt
   real*8 sd8,poloffset8,width1,width2,xlst8
-  real*8 uth8,techo8,freq8
+  real*8 uth8,techo8,freq8,home_latitude,home_longitude
+  logical use_home_coordinates
   real*8 xl,b
   integer ephemeris_result,result_dx,result_self,last_result
   integer last_reader_generation
@@ -33,7 +35,7 @@ subroutine astro0(nyear,month,nday,uth8,freq8,mygrid,hisgrid,              &
   call astro(nyear,month,nday,uth,freq8,hisgrid_calc,2,1,            &
        AzSun,ElSun,AzMoon,ElMoon,ntsky,doppler00,doppler,            &
        dbMoon,RAMoon,DecMoon,HA,Dgrd,sd,poloffset,xnr,               &
-       day,xlon2,xlat2,xlst,techo,result_dx)
+       day,xlon2,xlat2,xlst,techo,result_dx,.false.,0.d0,0.d0)
   if(result_dx.eq.EPHEMERIS_INVALID_INPUT .or.                       &
        result_dx.eq.EPHEMERIS_UNAVAILABLE) then
      ephemeris_result=result_dx
@@ -48,7 +50,8 @@ subroutine astro0(nyear,month,nday,uth8,freq8,mygrid,hisgrid,              &
   call astro(nyear,month,nday,uth,freq8,mygrid_calc,1,1,             &
        AzSun,ElSun,AzMoon,ElMoon,ntsky,doppler00,doppler,            &
        dbMoon,RAMoon,DecMoon,HA,Dgrd,sd,poloffset,xnr,               &
-       day,xlon1,xlat1,xlst,techo,result_self)
+       day,xlon1,xlat1,xlst,techo,result_self,use_home_coordinates,  &
+       home_latitude,home_longitude)
   if(result_self.eq.EPHEMERIS_INVALID_INPUT .or.                     &
        result_self.eq.EPHEMERIS_UNAVAILABLE) then
      ephemeris_result=result_self

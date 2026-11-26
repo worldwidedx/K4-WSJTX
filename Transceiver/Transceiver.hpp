@@ -11,11 +11,13 @@
 
 #include "qt_helpers.hpp"
 #include "Radio.hpp"
+#include "FrequencyControl.hpp"
 #include "Audio/TxAudioQueue.hpp"
 #include "Audio/TxIdentity.hpp"
 #include "Audio/TxPlaybackEvidence.hpp"
 #include "Audio/TxRequest.hpp"
 #include "ReceiveAudio.hpp"
+#include "JttyReceiveAudio.hpp"
 
 class QString;
 
@@ -85,6 +87,14 @@ public:
   enum MODE {UNK, CW, CW_R, USB, LSB, FSK, FSK_R, DIG_U, DIG_L, AM, FM, DIG_FM};
   Q_ENUM (MODE)
 
+  // Applied permits command completion when receive-mode readback is unavailable.
+  enum class ModeStatusKind { Preparing, Observed, Applied, Unavailable };
+  struct ModeStatus
+  {
+    MODE mode {UNK};
+    ModeStatusKind kind {ModeStatusKind::Observed};
+  };
+
   //
   // Aggregation of all of the rig and PTT state accessible via this
   // interface.
@@ -118,6 +128,8 @@ public:
     bool online () const {return online_;}
     Frequency frequency () const {return rx_frequency_;}
     Frequency tx_frequency () const {return tx_frequency_;}
+    RigFrequency::Request const& frequency_request (RigFrequency::Path path) const
+    { return frequency_requests_[path == RigFrequency::Path::Tx]; }
     bool split () const {return Split::on == split_;}
     MODE mode () const {return mode_;}
     bool ptt () const {return ptt_;}
@@ -126,6 +138,8 @@ public:
     bool tune () const {return tune_;}
     bool quick () const {return quick_;}
     double period () const {return period_;}
+    ReceivePolicy receive_policy () const { return receive_policy_; }
+    quint64 receive_context () const { return receive_context_; }
     qint32 blocksize () const {return blocksize_;}
     unsigned symbolslength () const {return tx_request_.symbols_length;}
     double framespersymbol () const {return tx_request_.frames_per_symbol;}
@@ -141,6 +155,7 @@ public:
     int level () const {return level_;}
     unsigned int power () const {return power_;}
     unsigned int swr () const {return swr_;}
+    RigFrequency::Ranges const& tuning_ranges () const {return tuning_ranges_;}
     QString jtmode () const {return tx_request_.mode;}  //w3sz tci
     bool fastmode () const {return tx_request_.fast_mode;}  //w3sz tci
     TxEvidence::TxSessionId tx_session_id () const {return tx_request_.session_id;}
@@ -150,6 +165,10 @@ public:
     void online (bool state) {online_ = state;}
     void frequency (Frequency f) {rx_frequency_ = f;}
     void tx_frequency (Frequency f) {tx_frequency_ = f;}
+    void frequency_request (RigFrequency::Request const& request)
+    { frequency_requests_[request.path == RigFrequency::Path::Tx] = request; }
+    void frequency_request (RigFrequency::Path slot, RigFrequency::Request const& request)
+    { frequency_requests_[slot == RigFrequency::Path::Tx] = request; }
     void split (bool state) {split_ = state ? Split::on : Split::off;}
     void mode (MODE m) {mode_ = m;}
     void ptt (bool state) {ptt_ = state;}
@@ -158,6 +177,8 @@ public:
     void tune (bool state) {tune_ = state;}
     void quick (bool state) {quick_ = state;}
     void period (double period) {period_ = period;}
+    void receive_policy (ReceivePolicy policy) { receive_policy_ = policy; }
+    void receive_context (quint64 context) { receive_context_ = context; }
     void blocksize (qint32 blocksize) {blocksize_ = blocksize;}
     void symbolslength (unsigned symbolslength) {tx_request_.symbols_length = symbolslength;}
     void framespersymbol (double framespersymbol) {tx_request_.frames_per_symbol = framespersymbol;}
@@ -173,6 +194,7 @@ public:
     void level (int strength) {level_ = strength;}
     void power (unsigned int mwpower) {power_ = mwpower;}
     void swr (unsigned int mswr) {swr_ = mswr;}
+    void tuning_ranges (RigFrequency::Ranges const& ranges) {tuning_ranges_ = ranges;}
     void jtmode(QString jtmode) {tx_request_.mode = jtmode;}  //w3sz tci
     void fastmode(bool fastmode) {tx_request_.fast_mode = fastmode;}  //w3sz tci
     void tx_session_id (TxEvidence::TxSessionId value) {tx_request_.session_id = value;}
@@ -183,6 +205,7 @@ public:
     bool online_;
     Frequency rx_frequency_;
     Frequency tx_frequency_;    // 0 means use Rx
+    RigFrequency::Request frequency_requests_[2];
     MODE mode_;
     enum class Split {unknown, off, on} split_;
     bool ptt_;
@@ -191,6 +214,8 @@ public:
     bool tune_;
     bool quick_;
     double period_;
+    ReceivePolicy receive_policy_ = ReceivePolicy::Timed;
+    quint64 receive_context_ = 0;
     qint32 blocksize_;
     TxEvidence::TxRequest tx_request_;
     double spread_;
@@ -200,6 +225,7 @@ public:
     int level_;
     unsigned int power_;
     unsigned int swr_;
+    RigFrequency::Ranges tuning_ranges_;  // empty when the backend does not report them
 
     // Don't forget to update the debug print and != operator if you
     // add more members here
@@ -243,13 +269,22 @@ public:
   // 0 - 1Hz
   // 1 - 10Hz rounded
   // -1 - 10Hz truncated
-  // 2 - 100Hz rounded
-  // -2 - 100Hz truncated
+  // 2 - 20Hz rounded
+  // -2 - 20Hz truncated
+  // 3 - 100Hz rounded
+  // -3 - 100Hz truncated
   Q_SIGNAL void resolution (int);
 
   // rig audio data transfer w3sz tci
   Q_SIGNAL void tciframeswritten (qint64);
   Q_SIGNAL void receiveAudio (ReceiveAudio);
+  Q_SIGNAL void continuousAudioAvailable (JttyReceiveMailboxPtr);
+  Q_SIGNAL void continuousReceptionStopped (JttyReceiveMailboxPtr);
+  Q_SIGNAL void continuousReceiveDrained (quint64 requestId, JttyReceiveMailboxPtr);
+  Q_SLOT virtual void requestContinuousReceiveDrain (quint64 requestId)
+  { Q_EMIT continuousReceiveDrained (requestId, {}); }
+  Q_SLOT virtual void receive_discontinuity (JttyReceiveReason) {}
+  Q_SLOT virtual void receive_stop_reason (JttyReceiveReason) {}
 
   // rig audio data transfer  w3sz tci
   Q_SIGNAL void tci_mod_active (bool);
@@ -258,9 +293,11 @@ public:
   Q_SIGNAL void txSourceCommitted (TxEvidence::TxStartSnapshot);
   Q_SIGNAL void rawTxPlayoutSnapshot (TxEvidence::TxRawPlayoutSnapshot);
   Q_SIGNAL void jtty_drained (TxAudioQueueDrainState drain);
+  Q_SIGNAL void jtty_progress (TxAudioQueueProgress progress);
   Q_SIGNAL void jtty_enqueue_accepted (qint64 enqueueId, qint64 sampleCount,
                                        TxAudioQueueProgress progress);
-  Q_SIGNAL void jtty_enqueue_failed (TxAudioQueueEpoch epoch, qint64 enqueueId);
+  Q_SIGNAL void jtty_enqueue_failed (TxAudioQueueEpoch epoch, qint64 enqueueId,
+                                     TxAudioQueueEnqueueFailure failure);
 
   Q_SIGNAL void remote_input_calibration_progress (QString const& message,
                                                    float gain) const;
@@ -274,6 +311,9 @@ public:
   // rig state changed
   Q_SIGNAL void update (Transceiver::TransceiverState const&,
                         unsigned sequence_number) const;
+  Q_SIGNAL void frequency_result (RigFrequency::Result const&) const;
+  Q_SIGNAL void frequency_observation (RigFrequency::Evidence const&) const;
+  Q_SIGNAL void mode_status (Transceiver::ModeStatus const&, unsigned sequence_number) const;
   // something went wrong - not recoverable, start new instance
   Q_SIGNAL void failure (QString const& reason) const;
 
@@ -285,6 +325,7 @@ private:
 };
 
 Q_DECLARE_METATYPE (Transceiver::TransceiverState);
+Q_DECLARE_METATYPE (Transceiver::ModeStatus);
 
 #if !defined (QT_NO_DEBUG_STREAM)
 QDebug operator << (QDebug, Transceiver::TransceiverState const&);

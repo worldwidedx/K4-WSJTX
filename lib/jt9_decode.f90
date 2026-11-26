@@ -1,9 +1,36 @@
 module jt9_decode
+  use, intrinsic :: iso_c_binding, only: c_short, c_ptr, c_float, c_float_complex, c_null_ptr, c_associated
+  use fftw3, only: fftwf_plan_dft_r2c_1d, fftwf_execute_dft_r2c, fftwf_destroy_plan, FFTW_ESTIMATE
+  use jt9_downsample, only: jt9_downsample_workspace
+  use jt9_soft_symbols, only: softsym
+  private
+  public :: jt9_decoder, jt9_spectrum_workspace
+
+  type :: jt9_spectrum_workspace
+     private
+     real(c_float), allocatable :: input(:), window(:)
+     complex(c_float_complex), allocatable :: output(:)
+     type(c_ptr) :: plan=c_null_ptr
+   contains
+     procedure :: initialize => initialize_spectrum
+     procedure :: prepare_spectra
+     procedure :: clear => clear_spectrum
+     final :: finalize_spectrum
+  end type jt9_spectrum_workspace
 
   type :: jt9_decoder
-     procedure(jt9_decode_callback), pointer :: callback
+     procedure(jt9_decode_callback), pointer :: callback=>null()
+     type(jt9_downsample_workspace), private :: downsample
+     type(jt9_spectrum_workspace), private :: spectrum
+     real, allocatable, private :: spectra(:,:), ccfred(:), red2(:)
+     logical, allocatable, private :: ccfok(:), done(:)
    contains
+     procedure :: initialize
      procedure :: decode
+     procedure :: decode_pcm
+     procedure :: release_input
+     procedure :: reset
+     final :: finalize_decoder
   end type jt9_decoder
 
   abstract interface
@@ -23,6 +50,112 @@ module jt9_decode
 
 contains
 
+  subroutine initialize(this)
+    class(jt9_decoder), intent(inout) :: this
+    if(.not.allocated(this%ccfred)) then
+       allocate(this%ccfred(6827),this%red2(6827),this%ccfok(6827),this%done(6827))
+    endif
+  end subroutine initialize
+
+  subroutine decode_pcm(this,callback,samples,sample_count,receive_frequency, &
+       search_low,search_high,tolerance,depth,submode,repeat,low_sidelobes)
+    class(jt9_decoder), intent(inout) :: this
+    procedure(jt9_decode_callback) :: callback
+    ! The engine owns the full analysis buffer and pads beyond sample_count.
+    integer(c_short), intent(in) :: samples(60*12000)
+    integer, intent(in) :: sample_count,receive_frequency,search_low,search_high,tolerance,depth,submode
+    logical, intent(in) :: repeat
+    logical, intent(in), optional :: low_sidelobes
+    integer :: count,half_symbols
+
+    count=max(0,min(sample_count,60*12000))
+    half_symbols=min(181,max(0,(count-2048)/3456))
+    call this%release_input()
+    if(half_symbols.lt.2) return
+    if(.not.any(samples(1:count).ne.0)) return
+    if(.not.allocated(this%spectra)) allocate(this%spectra(184,6827))
+    call this%spectrum%prepare_spectra(samples,half_symbols,this%spectra,low_sidelobes)
+    call this%decode(callback,this%spectra,samples,receive_frequency,.true.,count/8, &
+         search_low,search_low,search_high,tolerance,half_symbols,repeat,depth,9,submode,0)
+  end subroutine decode_pcm
+
+  subroutine initialize_spectrum(this)
+    use fftw_tsan, only: wsjt_tsan_acquire_fftw, wsjt_tsan_release_fftw
+    class(jt9_spectrum_workspace), intent(inout) :: this
+    if(c_associated(this%plan)) return
+    allocate(this%input(16384),this%output(0:8192),this%window(16384))
+    call nuttal_window(this%window,16384)
+    !$omp critical(fftw)
+    call wsjt_tsan_acquire_fftw()
+    this%plan=fftwf_plan_dft_r2c_1d(16384,this%input,this%output,FFTW_ESTIMATE)
+    call wsjt_tsan_release_fftw()
+    !$omp end critical(fftw)
+  end subroutine initialize_spectrum
+
+  ! low_sidelobes applies symspec's Nuttall window (the GUI's Low sidelobes
+  ! setting); absent means unwindowed.
+  subroutine prepare_spectra(this,samples,half_symbols,spectra,low_sidelobes)
+    class(jt9_spectrum_workspace), intent(inout) :: this
+    integer(c_short), intent(in) :: samples(:)
+    integer, intent(in) :: half_symbols
+    real, intent(out) :: spectra(184,6827)
+    logical, intent(in), optional :: low_sidelobes
+    integer :: row,first,last,source_first
+    real, parameter :: scale=(1.0/16384)**2
+
+    call this%initialize()
+    spectra=0.
+    do row=1,half_symbols
+       last=row*3456
+       first=last-16384+1
+       source_first=max(1,first)
+       this%input=0.
+       this%input(source_first-first+1:16384)=0.1*samples(source_first:last)
+       if(present(low_sidelobes)) then
+          if(low_sidelobes) this%input=this%window*this%input
+       endif
+       call fftwf_execute_dft_r2c(this%plan,this%input,this%output)
+       spectra(row,:)=scale*(real(this%output(0:6826))**2+aimag(this%output(0:6826))**2)
+    enddo
+  end subroutine prepare_spectra
+
+  subroutine clear_spectrum(this)
+    use fftw_tsan, only: wsjt_tsan_acquire_fftw, wsjt_tsan_release_fftw
+    class(jt9_spectrum_workspace), intent(inout) :: this
+    !$omp critical(fftw)
+    call wsjt_tsan_acquire_fftw()
+    if(c_associated(this%plan)) call fftwf_destroy_plan(this%plan)
+    call wsjt_tsan_release_fftw()
+    !$omp end critical(fftw)
+    this%plan=c_null_ptr
+    if(allocated(this%input)) deallocate(this%input,this%output,this%window)
+  end subroutine clear_spectrum
+
+  subroutine finalize_spectrum(this)
+    type(jt9_spectrum_workspace), intent(inout) :: this
+    call this%clear()
+  end subroutine finalize_spectrum
+
+  subroutine release_input(this)
+    class(jt9_decoder), intent(inout) :: this
+    call this%downsample%invalidate()
+    nullify(this%callback)
+  end subroutine release_input
+
+  subroutine reset(this)
+    class(jt9_decoder), intent(inout) :: this
+    call this%release_input()
+  end subroutine reset
+
+  subroutine finalize_decoder(this)
+    type(jt9_decoder), intent(inout) :: this
+    call this%downsample%clear()
+    call this%spectrum%clear()
+    if(allocated(this%spectra)) deallocate(this%spectra)
+    if(allocated(this%ccfred)) deallocate(this%ccfred,this%red2,this%ccfok,this%done)
+    nullify(this%callback)
+  end subroutine finalize_decoder
+
   subroutine decode(this,callback,ss,id2,nfqso,newdat,npts8,nfa,    &
        nfsplit,nfb,ntol,nzhsym,nagain,ndepth,nmode,nsubmode,nexp_decode)
     use timer_module, only: timer
@@ -33,20 +166,18 @@ contains
     real ss(184,NSMAX)
     logical, intent(in) :: newdat, nagain
     character*22 msg
-    real*4 ccfred(NSMAX)
-    real*4 red2(NSMAX)
-    logical ccfok(NSMAX)
-    logical done(NSMAX)
-    integer*2 id2(NTMAX*12000)
+    integer*2, intent(in) :: id2(*)
     integer*1 i1SoftSymbols(207)
     common/decstats/ntry65a,ntry65b,n65a,n65b,num9,numfano
-    save ccfred,red2
 
     if(nexp_decode.eq.-99) stop     !Silence compiler warning
+    call this%initialize()
+    associate(ccfred=>this%ccfred,red2=>this%red2,ccfok=>this%ccfok,done=>this%done)
     this%callback => callback
+    if(newdat) call this%downsample%invalidate()
     if(nmode.eq.9 .and. nsubmode.ge.1) then
-       call decode9w(nfqso,ntol,nsubmode,ss,id2,sync,nsnr,xdt,freq,msg)
-       if (associated(this%callback)) then
+       call decode9w(nfqso,ntol,nsubmode,ss,nzhsym,id2,sync,nsnr,xdt,freq,msg)
+       if (associated(this%callback).and.len_trim(msg)>0) then
           ndrift=0
           call this%callback(sync,nsnr,xdt,freq,ndrift,msg)
        end if
@@ -66,13 +197,12 @@ contains
     if(nmode.eq.65+9) nf1=nfsplit
     ia=max(1,nint((nf1-nf0)/df3))
     ib=min(NSMAX,nint((nfb-nf0)/df3))
+    if(ib.le.ia) go to 999
     lag1=-int(2.5/tstep + 0.9999)
     lag2=int(5.0/tstep + 0.9999)
-    if(newdat) then
-       call timer('sync9   ',0)
-       call sync9(ss,nzhsym,lag1,lag2,ia,ib,ccfred,red2,ipk)
-       call timer('sync9   ',1)
-    endif
+    call timer('sync9   ',0)
+    call sync9(ss,nzhsym,lag1,lag2,ia,ib,ccfred,red2,ipk)
+    call timer('sync9   ',1)
 
     nsps8=nsps/8
     df8=1500.0/nsps8
@@ -130,7 +260,7 @@ contains
 
              call timer('softsym ',0)
              fpk=nf0 + df3*(i-1)
-             call softsym(id2,npts8,nsps8,newdat,fpk,syncpk,snrdb,xdt,    &
+             call softsym(this%downsample,id2,npts8,nsps8,fpk,syncpk,snrdb,xdt,    &
                   freq,drift,a3,schk,i1SoftSymbols)
              call timer('softsym ',1)
 
@@ -167,6 +297,8 @@ contains
        if(nagain) exit
     enddo
 
-999 return
+999 nullify(this%callback)
+    end associate
+    return
   end subroutine decode
 end module jt9_decode

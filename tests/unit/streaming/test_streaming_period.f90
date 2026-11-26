@@ -1,0 +1,316 @@
+program test_streaming_period
+  use, intrinsic :: iso_fortran_env, only: int64
+  use streaming_period, only: period_state, period_begin, period_room,      &
+       period_take, period_full, period_ready, period_set_stop, gui_hsym_stop, &
+       sample_due, trigger_fire_time, read_passes_busy_end, clock_start,     &
+       fast_first_try, fast_last_try
+  use streaming_control, only: MODE_WSPR
+  implicit none
+
+  integer, parameter :: NMAX = 1800 * 12000
+  integer :: nfail = 0
+
+  call sizes()
+  call frames_of_128('FT8', 8, 15.d0, 180000, 50 * 3456)
+  call frames_of_128('FT4', 5, 7.5d0,  90000, 21 * 3456)
+  call straddle()
+  call short_periods()
+  call gui_stops()
+  call stop_points()
+  call fire_times()
+  call busy_end()
+  call clock_starts()
+  call fast_tries()
+  call wspr_stop()
+
+  if (nfail .eq. 0) then
+     print '(a)', 'ALL STREAMING PERIOD CHECKS PASSED'
+  else
+     print '(a,i0,a)', 'STREAMING PERIOD: ', nfail, ' CHECK(S) FAILED'
+     call exit(1)
+  end if
+
+contains
+
+  subroutine ok(label, cond)
+    character(len=*), intent(in) :: label
+    logical,          intent(in) :: cond
+    if (cond) then
+       print '(a,a)', '  PASS  ', label
+    else
+       print '(a,a)', '  FAIL  ', label
+       nfail = nfail + 1
+    end if
+  end subroutine ok
+
+  subroutine sizes()
+    type(period_state) :: st
+    call period_begin(st, 15.d0, 8, NMAX)
+    call ok('FT8: period 180000, decoder 172800',                            &
+         st%nperiod .eq. 180000 .and. st%npts .eq. 50 * 3456)
+    call period_begin(st, 7.5d0, 5, NMAX)
+    call ok('FT4: period 90000, decoder 72576',                              &
+         st%nperiod .eq. 90000 .and. st%npts .eq. 21 * 3456)
+    call period_begin(st, 60.d0, 9, NMAX)
+    call ok('JT9: period 720000, decoder 720000',                            &
+         st%nperiod .eq. 720000 .and. st%npts .eq. 720000)
+    call period_begin(st, 30.d0, 8, NMAX)
+    call ok('FT8 at 30 s: decoder still 172800, period 360000',              &
+         st%nperiod .eq. 360000 .and. st%npts .eq. 50 * 3456)
+  end subroutine sizes
+
+  subroutine frames_of_128(name, mode, tr, nperiod, npts)
+    character(len=*), intent(in) :: name
+    integer,          intent(in) :: mode, nperiod, npts
+    real(8),          intent(in) :: tr
+    type(period_state) :: st
+    integer :: left, ntake, nacc, iperiod, consumed, fed, ready_at
+    logical :: good
+    good = .true.
+    left = 0
+    do iperiod = 1, 3
+       call period_begin(st, tr, mode, NMAX)
+       consumed = 0; fed = 0; ready_at = -1
+       do while (.not. period_full(st))
+          if (left .eq. 0) left = 128
+          ntake = period_room(st, left)
+          call period_take(st, ntake, nacc)
+          left = left - ntake
+          consumed = consumed + ntake
+          fed = fed + nacc
+          if (ready_at .lt. 0 .and. period_ready(st)) ready_at = consumed
+       end do
+       ! `left` is what the frame crossing this boundary owes the next period.
+       good = good .and. consumed .eq. nperiod .and. fed .eq. npts           &
+            .and. ready_at .ge. npts .and. ready_at .lt. npts + 128           &
+            .and. left .eq. mod(128 - mod(iperiod * nperiod, 128), 128)
+    end do
+    call ok(name // ': three periods of 128-sample frames — nperiod consumed,' &
+         // ' npts to the decoder, ready within a frame of npts, remainder carried', good)
+  end subroutine frames_of_128
+
+  subroutine straddle()
+    type(period_state) :: st
+    integer :: ntake, nacc, left
+    call period_begin(st, 7.5d0, 5, NMAX)
+    call period_take(st, 90000 - 100, nacc)
+    left = 128
+    ntake = period_room(st, left)
+    call ok('straddle: a 128-sample frame 100 short of the boundary yields 100', &
+         ntake .eq. 100)
+    call period_take(st, ntake, nacc)
+    left = left - ntake
+    call ok('straddle: the period is full and 28 samples remain',              &
+         period_full(st) .and. left .eq. 28)
+    call period_begin(st, 7.5d0, 5, NMAX)
+    ntake = period_room(st, left)
+    call period_take(st, ntake, nacc)
+    call ok('straddle: the next period opens with those 28, all to the decoder', &
+         ntake .eq. 28 .and. nacc .eq. 28 .and. st%kperiod .eq. 28 .and. st%k .eq. 28)
+    call ok('straddle: nothing past the decoder share reaches it',              &
+         period_room(st, 100000) .eq. 90000 - 28)
+  end subroutine straddle
+
+  subroutine short_periods()
+    type(period_state) :: st
+    call period_begin(st, 1.d0, 5, NMAX)
+    call ok('FT4 at 1 s: period stretched to the decoder share, 72576',       &
+         st%nperiod .eq. st%npts .and. st%npts .eq. 21 * 3456)
+    call period_begin(st, 15.d0, 8, 100000)
+    call ok('small buffer: decoder share capped at the buffer, period 180000', &
+         st%npts .eq. 100000 .and. st%nperiod .eq. 180000)
+    call period_begin(st, 0.d0, 9, NMAX)
+    call ok('zero TRperiod: one second of decoder share, period the same',     &
+         st%npts .eq. 12000 .and. st%nperiod .eq. 12000)
+  end subroutine short_periods
+
+  ! MainWindow::fixStop's table (widgets/mainwindow.cpp), mode by mode.
+  subroutine gui_stops()
+    integer :: start, i
+    integer, parameter :: fst4_tr(7) = [15, 30, 60, 120, 300, 900, 1800]
+    integer, parameter :: fst4(7)     = [39, 85, 187, 387, 1003, 3107, 6232]
+    integer, parameter :: fst4_eme(7) = [48, 95, 197, 396, 1012, 3107, 6232]
+    integer, parameter :: mtd(0:4) = [49, 50, 48, 49, 50]
+    logical :: good
+    call ok('JT4 176, 179 after EME delay',                                   &
+         gui_hsym_stop(4, 60.d0, .false., .false., 3) .eq. 176 .and.          &
+         gui_hsym_stop(4, 60.d0, .true., .false., 3) .eq. 179)
+    call ok('JT9 173, 179 after EME delay',                                   &
+         gui_hsym_stop(9, 60.d0, .false., .false., 3) .eq. 173 .and.          &
+         gui_hsym_stop(9, 60.d0, .true., .false., 3) .eq. 179)
+    call ok('JT65 174, 179 after EME delay',                                  &
+         gui_hsym_stop(65, 60.d0, .false., .false., 3) .eq. 174 .and.         &
+         gui_hsym_stop(65, 60.d0, .true., .false., 3) .eq. 179)
+    call ok('Q65 15/30/60/120/300 s: 48, 96, 196, 408, 1030',                 &
+         gui_hsym_stop(66, 15.d0, .false., .false., 3) .eq. 48 .and.          &
+         gui_hsym_stop(66, 30.d0, .false., .false., 3) .eq. 96 .and.          &
+         gui_hsym_stop(66, 60.d0, .false., .false., 3) .eq. 196 .and.         &
+         gui_hsym_stop(66, 120.d0, .false., .false., 3) .eq. 408 .and.        &
+         gui_hsym_stop(66, 300.d0, .false., .false., 3) .eq. 1030)
+    call ok('Q65 after EME delay: 100 at 30 s, the rest unchanged',           &
+         gui_hsym_stop(66, 15.d0, .true., .false., 3) .eq. 48 .and.           &
+         gui_hsym_stop(66, 30.d0, .true., .false., 3) .eq. 100 .and.          &
+         gui_hsym_stop(66, 60.d0, .true., .false., 3) .eq. 196 .and.          &
+         gui_hsym_stop(66, 300.d0, .true., .false., 3) .eq. 1030)
+    good = .true.
+    do i = 1, 7
+       good = good .and.                                                      &
+            gui_hsym_stop(240, dble(fst4_tr(i)), .false., .false., 3) .eq. fst4(i) .and. &
+            gui_hsym_stop(241, dble(fst4_tr(i)), .false., .false., 3) .eq. fst4(i) .and. &
+            gui_hsym_stop(240, dble(fst4_tr(i)), .true., .false., 3) .eq. fst4_eme(i)
+    end do
+    call ok('FST4 and FST4W: the TR table, and the EME table after EME delay', good)
+    call ok('FT4 21, FT8 50 single-threaded at any decoder start',            &
+         gui_hsym_stop(5, 7.5d0, .false., .false., 3) .eq. 21 .and.           &
+         gui_hsym_stop(8, 15.d0, .false., .false., 2) .eq. 50 .and.           &
+         gui_hsym_stop(8, 15.d0, .true., .false., 0) .eq. 50)
+    good = .true.
+    do start = 0, 4
+       good = good .and. gui_hsym_stop(8, 15.d0, .false., .true., start) .eq. mtd(start)
+    end do
+    call ok('FT8 multithreaded, decoder start 0-4: 49, 50, 48, 49, 50', good)
+    call ok('MSK144 and JT65+JT9: no stop point',                            &
+         gui_hsym_stop(144, 15.d0, .false., .false., 3) .eq. 0 .and.          &
+         gui_hsym_stop(74, 60.d0, .false., .false., 3) .eq. 0)
+  end subroutine gui_stops
+
+  subroutine stop_points()
+    type(period_state) :: st
+    integer :: nacc
+    call period_begin(st, 60.d0, 65, NMAX, 174)
+    call ok('JT65 at stop 174: decoder 174 half-symbols, period 720000',      &
+         st%npts .eq. 174 * 3456 .and. st%nperiod .eq. 720000)
+    call period_begin(st, 15.d0, 8, NMAX, 48)
+    call ok('FT8 at stop 48: decoder 48 half-symbols',                       &
+         st%npts .eq. 48 * 3456 .and. st%nperiod .eq. 180000)
+    call period_begin(st, 15.d0, 144, NMAX, 0)
+    call ok('no stop point: the whole period',                               &
+         st%npts .eq. 180000 .and. st%nperiod .eq. 180000)
+    call period_begin(st, 15.d0, 66, NMAX, 1030)
+    call ok('a stop past the period: the mode share', st%npts .eq. 180000)
+    call period_begin(st, 1.d0, 5, NMAX, 21)
+    call ok('FT4 at 1 s, stop 21 past it: the share, period stretched',       &
+         st%npts .eq. 21 * 3456 .and. st%nperiod .eq. 21 * 3456)
+    call period_begin(st, 60.d0, 65, NMAX, 174, .true.)
+    call ok('whole: the period, not the stop', st%npts .eq. 720000)
+    call period_begin(st, 15.d0, 8, NMAX, 50, .true.)
+    call ok('whole FT8: the 15 s period', st%npts .eq. 180000)
+    call period_begin(st, 60.d0, 65, NMAX, 179)
+    call period_take(st, 174 * 3456, nacc)
+    call ok('at 174 half-symbols, not ready for a stop at 179', .not. period_ready(st))
+    call period_set_stop(st, 174, NMAX)
+    call ok('the stop moved to 174: ready', period_ready(st) .and. st%npts .eq. 174 * 3456)
+    call period_set_stop(st, 0, NMAX)
+    call ok('a zero stop leaves the share alone', st%npts .eq. 174 * 3456)
+    call period_set_stop(st, 300, NMAX)
+    call ok('a stop past the period leaves the share alone', st%npts .eq. 174 * 3456)
+  end subroutine stop_points
+
+  ! Live audio's clock: a trigger fires when its last byte arrives, or when its
+  ! last sample is due if later.
+  subroutine fire_times()
+    call ok('sample 12000 is due a second after sample 0',                   &
+         sample_due(100.d0, 12000_int64) .eq. 101.d0)
+    call ok('audio sent ahead of time fires when due',                       &
+         trigger_fire_time(5.d0, 0.d0, 120000_int64) .eq. 10.d0)
+    call ok('audio arriving late fires on arrival',                          &
+         trigger_fire_time(12.d0, 0.d0, 120000_int64) .eq. 12.d0)
+    call ok('with no audio clock, a trigger fires on arrival',               &
+         trigger_fire_time(3.d0, 50.d0, -1_int64) .eq. 3.d0)
+  end subroutine fire_times
+
+  ! The decoder came free at 5 s: a read past what came in or fell due by then
+  ! runs a deferred final first.
+  subroutine busy_end()
+    call ok('every byte in before 5 s, no audio: the read stays before it',  &
+         .not. read_passes_busy_end(100_int64, 100_int64, 0.d0, -1_int64, 5.d0))
+    call ok('a byte not in before 5 s: the read passes it',                  &
+         read_passes_busy_end(99_int64, 100_int64, 0.d0, -1_int64, 5.d0))
+    call ok('audio whose last sample was due before 5 s stays before it',    &
+         .not. read_passes_busy_end(100_int64, 100_int64, 0.d0, 59999_int64, 5.d0))
+    call ok('audio whose last sample is due at 5 s passes it',               &
+         read_passes_busy_end(100_int64, 100_int64, 0.d0, 60000_int64, 5.d0))
+  end subroutine busy_end
+
+  ! The audio clock started at 10 s; sample 24000 is due at 12 s.
+  subroutine clock_starts()
+    real(8) :: t0, mid
+    integer :: j
+    integer(int64) :: k
+    call ok('audio a second early, after a 2 s wait, starts the clock a second earlier', &
+         clock_start(10.d0, 11.d0, 24000_int64, 2.d0) .eq. 9.d0)
+    call ok('after a 5 ms wait the clock moves 5 ms',                         &
+         clock_start(10.d0, 11.d0, 24000_int64, 0.005d0) .eq. 10.d0 - 0.005d0)
+    call ok('late audio leaves the clock',                                    &
+         clock_start(10.d0, 13.d0, 24000_int64, 2.d0) .eq. 10.d0)
+    call ok('buffered audio leaves the clock',                                &
+         clock_start(10.d0, 11.d0, 24000_int64, 0.d0) .eq. 10.d0)
+    ! A pipe-limited feeder: 2.73 s of audio per 64 KiB piece, 5 ms waited for each.
+    t0 = 0
+    do j = 1, 10
+       t0 = clock_start(t0, 0.005d0 * j, int(j, int64) * 32768 - 1, 0.005d0)
+    end do
+    call ok('a fast feeder moves the clock by no more than it waited', abs(t0 + 0.05d0) .lt. 1d-9)
+    ! A 3 s start-up lead, then 0.1 s frames sent in real time, each waited for.
+    t0 = 0
+    mid = 0
+    do j = 1, 30
+       k = 36000 + int(j, int64) * 1200 - 1
+       t0 = clock_start(t0, 0.1d0 * j, k, 0.1d0)
+       if (j .eq. 15) mid = t0
+    end do
+    call ok('a 3 s lead is taken up by 3 s of real-time frames, not sooner',  &
+         abs(mid + 1.5d0) .lt. 1d-9 .and. abs(t0 - (-3.d0 + 1.d0 / 12000)) .lt. 1d-9)
+    ! An hour of 0.1 s frames from a sound card 100 ppm fast.
+    t0 = 0
+    do j = 1, 36000
+       k = int(j, int64) * 1200 - 1
+       t0 = clock_start(t0, dble(k + 1) / 12000 * (1 - 1d-4), k, 0.1d0)
+    end do
+    call ok('100 ppm of drift is taken up', abs(t0 - (-0.36d0 + 1.d0 / 12000)) .lt. 1d-6)
+  end subroutine clock_starts
+
+  ! Fast JT9's decode tries, the GUI's (MainWindow::fastSink) as block ends:
+  ! live, the first 3456-sample block end with less than 0.35 s of the
+  ! period left, then each later whole block; from a file, the first block
+  ! end at or past the period's samples less 3584, and no other.
+  subroutine fast_tries()
+    integer, parameter :: tr(4) = [5, 10, 15, 30]
+    integer, parameter :: live_first(4) = [58752, 117504, 176256, 355968]
+    integer, parameter :: live_last(4)  = [58752, 117504, 179712, 359424]
+    integer, parameter :: file_first(4) = [58752, 117504, 179712, 359424]
+    integer :: i, first
+    character(len=40) :: label
+    do i = 1, 4
+       write(label, '(a,i0,a)') 'fast JT9 ', tr(i), ' s'
+       first = fast_first_try(dble(tr(i)), tr(i) * 12000, .true.)
+       call ok(trim(label) // ' live first try', first .eq. live_first(i))
+       call ok(trim(label) // ' live last try',                             &
+            fast_last_try(tr(i) * 12000, .true., first) .eq. live_last(i))
+       first = fast_first_try(dble(tr(i)), tr(i) * 12000, .false.)
+       call ok(trim(label) // ' file try', first .eq. file_first(i))
+       call ok(trim(label) // ' file has one try',                           &
+            fast_last_try(tr(i) * 12000, .false., first) .eq. first)
+    end do
+    ! The live point is 0.35 s before the period's end: 55,800 samples at
+    ! 5 s, and the block ending at 55,296 is still early.
+    call ok('fast JT9 live first try is the first past 0.35 s',               &
+         fast_first_try(5.d0, 60000, .true.) - 3456 .lt. 55800 .and.          &
+         fast_first_try(5.d0, 60000, .true.) .ge. 55800)
+  end subroutine fast_tries
+
+  ! WSPR decodes at the GUI's stop, 396 half-symbols (MainWindow::fixStop),
+  ! with or without "Decode after EME delay": live 1,368,576 of its 1,440,000
+  ! samples; from a file the whole period.
+  subroutine wspr_stop()
+    type(period_state) :: st
+    call ok('WSPR: stop 396', gui_hsym_stop(MODE_WSPR, 120.d0, .false., .false., 0) .eq. 396 .and. &
+         gui_hsym_stop(MODE_WSPR, 120.d0, .true., .false., 0) .eq. 396)
+    call period_begin(st, 120.d0, MODE_WSPR, NMAX, gui_hsym_stop(MODE_WSPR, 120.d0, .false., .false., 0))
+    call ok('WSPR live: period 1440000, decoder 1368576',                    &
+         st%nperiod .eq. 1440000 .and. st%npts .eq. 1368576)
+    call period_begin(st, 120.d0, MODE_WSPR, NMAX, 396, .true.)
+    call ok('WSPR file: decoder 1440000', st%npts .eq. 1440000)
+  end subroutine wspr_stop
+
+end program test_streaming_period

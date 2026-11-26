@@ -63,6 +63,16 @@ WavFile::LoadResult WavFile::load (QString const& name, int max_frames)
       return result;
     }
 
+  auto const origination = file.bext_origination_date_time ();
+  auto const reference = file.bext_time_reference ();
+  auto const rate = result.format.sampleRate ();
+  if (origination.isValid () && reference < quint64 (rate) * 86400) {
+    result.firstSampleUtc = QDateTime {origination.date (), QTime {0, 0}, Qt::UTC}
+      .addMSecs (qint64 (reference * 1000 / quint64 (rate)));
+    result.samplesSinceMidnight = reference;
+    result.timeReferenceRate = rate;
+  }
+
   auto max_bytes = std::min<qint64> (
       static_cast<qint64> (max_frames) * bytes_per_frame,
       (std::numeric_limits<int>::max) ());

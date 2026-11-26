@@ -1,15 +1,17 @@
 program test_jt65_xcor_silence
 
+  use jt65_mod, only: jt65_work, ensure_jt65_workspace
   implicit none
 
   integer, parameter :: lag1 = -32, lag2 = 82, nhmax = 3413, nsmax = 552
-  real :: ss(nsmax,nhmax), ccf(lag1:lag2), ccf0, flip
+  real :: ccf(lag1:lag2), ccf0, flip
   integer :: lagpk
 
-  common /sync/ ss
 
   call setup65
-  ss = 0.0
+  call ensure_jt65_workspace()
+  allocate(jt65_work%spectra(nsmax,nhmax))
+  jt65_work%spectra = 0.0
   lagpk = huge(0)
 
   call xcor(1,nsmax,126,lag1,lag2,ccf,ccf0,lagpk,flip,0.0,0)

@@ -47,11 +47,8 @@ namespace
       {1210000, Modes::FreqCal, IARURegions::R2, "","", QDateTime(), QDateTime(), false},
       
       {2500000, Modes::FreqCal, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
-      {3330000, Modes::FreqCal, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
       {5000000, Modes::FreqCal, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
-      {7850000, Modes::FreqCal, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
       {10000000, Modes::FreqCal, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
-      {14670000, Modes::FreqCal, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
       {15000000, Modes::FreqCal, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
       {20000000, Modes::FreqCal, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
       
@@ -69,9 +66,9 @@ namespace
       {1836800, Modes::FST4W, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
       {1838000, Modes::JT65, IARURegions::ALL, "","", QDateTime(), QDateTime(), false}, // squeezed allocations
       {1839000, Modes::JT9, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
+      {1839000, Modes::JTTY, IARURegions::ALL, "","", QDateTime(), QDateTime(), true}, // shares JT9's dial freq (JT9 now low-traffic)
       {1839000, Modes::FST4, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
       {1840000, Modes::FT8, IARURegions::ALL, "","", QDateTime(), QDateTime(), true},
-      {1838000, Modes::JTTY, IARURegions::ALL, "","", QDateTime(), QDateTime(), true}, // conventional RTTY frequency
 
       // Band plans (all USB dial unless stated otherwise)
       //
@@ -103,12 +100,12 @@ namespace
       {3567000, Modes::FT8, IARURegions::ALL, "","", QDateTime(), QDateTime(), false}, // DXpedition
       {3570000, Modes::JT65, IARURegions::ALL, "","", QDateTime(), QDateTime(), false}, // JA compatible
       {3572000, Modes::JT9, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
+      {3572000, Modes::JTTY, IARURegions::ALL, "","", QDateTime(), QDateTime(), true}, // shares JT9's dial freq (JT9 now low-traffic)
       {3573000, Modes::FT8, IARURegions::ALL, "","", QDateTime(), QDateTime(), true}, // above as below JT65 is out of DM allocation
       {3568600, Modes::WSPR, IARURegions::ALL, "","", QDateTime(), QDateTime(), false}, // needs guard marker and lock out
       {3568600, Modes::FST4W, IARURegions::ALL, "","", QDateTime(), QDateTime(), false}, // needs guard marker and lock out
       {3575000, Modes::FT4, IARURegions::ALL, "","", QDateTime(), QDateTime(), true},  // provisional
       {3568000, Modes::FT4, IARURegions::R3, "","", QDateTime(), QDateTime(), false},   // provisional
-      {3575000, Modes::JTTY, IARURegions::ALL, "","", QDateTime(), QDateTime(), true}, // stays under R3's narrow DM segment (documented above as ending at 3575-3580) even with the 1500 Hz audio offset added
 
       {5357000, Modes::JT65, IARURegions::ALL, "","", QDateTime(), QDateTime(), false}, // provisional
       {5357000, Modes::JT9, IARURegions::ALL, "","", QDateTime(), QDateTime(), false}, // provisional
@@ -152,10 +149,10 @@ namespace
       {7074000, Modes::FT8, IARURegions::ALL, "","", QDateTime(), QDateTime(), true},
       {7076000, Modes::JT65, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
       {7078000, Modes::JT9, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
+      {7078000, Modes::JTTY, IARURegions::ALL, "","", QDateTime(), QDateTime(), true}, // shares JT9's dial freq (JT9 now low-traffic)
       {7047500, Modes::FT4, IARURegions::ALL, "","", QDateTime(), QDateTime(), true}, // provisional - moved
                                                // up 500Hz to clear
                                                // W1AW code practice QRG
-      {7090000, Modes::JTTY, IARURegions::ALL, "","", QDateTime(), QDateTime(), true}, // conventional RTTY freq + 10 kHz
 
       // Band plans (all USB dial unless stated otherwise)
       //
@@ -190,7 +187,7 @@ namespace
       {10138700, Modes::FST4W, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
       {10140000, Modes::JT9, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
       {10140000, Modes::FT4, IARURegions::ALL, "","", QDateTime(), QDateTime(), true}, // provisional
-      {10140000, Modes::JTTY, IARURegions::ALL, "","", QDateTime(), QDateTime(), true}, // conventional RTTY frequency; band's upper edge (10150) leaves no room for the usual +10 kHz nudge
+      {10140000, Modes::JTTY, IARURegions::ALL, "","", QDateTime(), QDateTime(), true}, // conventional RTTY frequency; band's upper edge (10150) leaves no room for a +10 kHz nudge
 
       // Band plans (all USB dial unless stated otherwise)
       //
@@ -238,7 +235,6 @@ namespace
       {14080000, Modes::FT4, IARURegions::ALL, "","", QDateTime(), QDateTime(), true}, // provisional
       {14090000, Modes::JTTY, IARURegions::ALL, "","", QDateTime(), QDateTime(), true}, // conventional RTTY freq + 10 kHz
 
-
       // Band plans (all USB dial unless stated otherwise)
       //
       // R1: 18095 - 18109 DM NB(<500Hz) with 18105 - 18109 ACDS
@@ -270,10 +266,10 @@ namespace
       {18100000, Modes::FT8, IARURegions::ALL, "","", QDateTime(), QDateTime(), true},
       {18102000, Modes::JT65, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
       {18104000, Modes::JT9, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
+      {18104000, Modes::JTTY, IARURegions::ALL, "","", QDateTime(), QDateTime(), true}, // shares JT9's dial freq -- off FT8's 18100 and clear of the 18110 NCDXF beacon
       {18104000, Modes::FT4, IARURegions::ALL, "","", QDateTime(), QDateTime(), true}, // provisional
       {18104600, Modes::WSPR, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
       {18104600, Modes::FST4W, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
-      {18100000, Modes::JTTY, IARURegions::ALL, "","", QDateTime(), QDateTime(), true}, // conventional RTTY frequency; +10 kHz would put the 1500 Hz-offset signal past the US data segment's 18110 kHz edge (and onto the NCDXF beacon frequency)
 
       {21074000, Modes::FT8, IARURegions::ALL, "","", QDateTime(), QDateTime(), true},
       {21091000, Modes::FT8, IARURegions::ALL, "","", QDateTime(), QDateTime(), false}, // DXpedition
@@ -289,19 +285,20 @@ namespace
       {24917000, Modes::JT65, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
       {24919000, Modes::JT9, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
       {24919000, Modes::FT4, IARURegions::ALL, "","", QDateTime(), QDateTime(), true}, // provisional
+      {24920000, Modes::JTTY, IARURegions::ALL, "","", QDateTime(), QDateTime(), true}, // conventional RTTY frequency; US narrow data segment (24920-24925) leaves no room for a +10 kHz nudge
       {24924600, Modes::WSPR, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
       {24924600, Modes::FST4W, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
-      {24920000, Modes::JTTY, IARURegions::ALL, "","", QDateTime(), QDateTime(), true}, // conventional RTTY frequency; the US narrow data segment (24920-24925) leaves no room for the usual +10 kHz nudge once the 1500 Hz audio offset is added
 
       {28074000, Modes::FT8, IARURegions::ALL, "","", QDateTime(), QDateTime(), true},
       {28091000, Modes::FT8, IARURegions::ALL, "","", QDateTime(), QDateTime(), false}, // DXpedition
       {28076000, Modes::JT65, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
       {28078000, Modes::JT9, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
+      {28090000, Modes::JTTY, IARURegions::ALL, "","", QDateTime(), QDateTime(), true}, // conventional RTTY freq + 10 kHz
       {28124600, Modes::WSPR, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
       {28124600, Modes::FST4W, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
       {28180000, Modes::FT4, IARURegions::ALL, "","", QDateTime(), QDateTime(), true},
-      {28090000, Modes::JTTY, IARURegions::ALL, "","", QDateTime(), QDateTime(), true}, // conventional RTTY freq + 10 kHz
 
+      {50160000, Modes::JTTY, IARURegions::ALL, "","", QDateTime(), QDateTime(), true},
       {50200000, Modes::Echo, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
       {50211000, Modes::Q65, IARURegions::ALL, "EME","", QDateTime(), QDateTime(), false},
       {50275000, Modes::Q65, IARURegions::ALL, "","", QDateTime(), QDateTime(), true},
@@ -330,6 +327,7 @@ namespace
       {144116000, Modes::Q65, IARURegions::ALL, "EME","", QDateTime(), QDateTime(), false},
       {144120000, Modes::JT65, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
       {144120000, Modes::Echo, IARURegions::ALL, "","", QDateTime(), QDateTime(), false},
+      {144160000, Modes::JTTY, IARURegions::ALL, "","", QDateTime(), QDateTime(), true},
       {144170000, Modes::FT4, IARURegions::ALL, "","", QDateTime(), QDateTime(), true},
       {144174000, Modes::FT8, IARURegions::ALL, "","", QDateTime(), QDateTime(), true},
       {144180000, Modes::Q65, IARURegions::ALL, "","", QDateTime(), QDateTime(), true},
@@ -426,7 +424,7 @@ QString FrequencyList_v2_101::Item::toString () const
 }
 
 QJsonObject FrequencyList_v2_101::Item::toJson() const {
-  return {{"frequency", Radio::frequency_MHz_string (frequency_) },
+  return {{"frequency", Radio::frequency_MHz_string (frequency_, 6, QLocale::c ()) },
           {"mode", Modes::name (mode_) },
           {"region", IARURegions::name (region_)},
           {"description", description_},
@@ -522,6 +520,11 @@ auto FrequencyList_v2_101::frequency_list (FrequencyItems frequency_list) -> Fre
 auto FrequencyList_v2_101::frequency_list () const -> FrequencyItems const&
 {
   return m_->frequency_list_;
+}
+
+auto FrequencyList_v2_101::default_items () -> FrequencyItems const&
+{
+  return default_frequency_list;
 }
 
 auto FrequencyList_v2_101::frequency_list (QModelIndexList const& model_index_list) const -> FrequencyItems
@@ -782,10 +785,16 @@ QVariant FrequencyList_v2_101::impl::data (QModelIndex const& index, int role) c
           switch (role)
             {
             case SortRole:
-            case Qt::DisplayRole:
-            case Qt::EditRole:
-            case Qt::AccessibleTextRole:
               item = IARURegions::name (frequency_item.region_);
+              break;
+
+            case Qt::EditRole:
+              item = QVariant::fromValue (frequency_item.region_);
+              break;
+
+            case Qt::DisplayRole:
+            case Qt::AccessibleTextRole:
+              item = IARURegions::display_name (frequency_item.region_);
               break;
 
             case Qt::ToolTipRole:
@@ -804,9 +813,12 @@ QVariant FrequencyList_v2_101::impl::data (QModelIndex const& index, int role) c
             {
             case SortRole:
             case Qt::DisplayRole:
-            case Qt::EditRole:
             case Qt::AccessibleTextRole:
               item = Modes::name (frequency_item.mode_);
+              break;
+
+            case Qt::EditRole:
+              item = QVariant::fromValue (frequency_item.mode_);
               break;
 
             case Qt::ToolTipRole:
@@ -1085,7 +1097,9 @@ bool FrequencyList_v2_101::impl::setData (QModelIndex const& model_index, QVaria
         {
           case region_column:
             {
-              auto region = IARURegions::value(value.toString());
+              if (value.userType () != qMetaTypeId<IARURegions::Region> ()) return false;
+              auto const region = value.value<IARURegions::Region> ();
+              if (region < IARURegions::ALL || region >= IARURegions::SENTINAL) return false;
               if (region != item.region_)
                 {
                   item.region_ = region;
@@ -1097,7 +1111,9 @@ bool FrequencyList_v2_101::impl::setData (QModelIndex const& model_index, QVaria
 
           case mode_column:
             {
-              auto mode = Modes::value(value.toString());
+              if (value.userType () != qMetaTypeId<Modes::Mode> ()) return false;
+              auto const mode = value.value<Modes::Mode> ();
+              if (mode < Modes::ALL || mode >= Modes::MODES_END_SENTINAL_AND_COUNT) return false;
               if (mode != item.mode_)
                 {
                   item.mode_ = mode;
@@ -1363,9 +1379,55 @@ auto FrequencyList_v2_101::all_bands (Region region, Mode mode) const -> BandSet
   return result;
 }
 
-FrequencyList_v2_101::FrequencyItems FrequencyList_v2_101::from_json_file(QFile *input_file)
+namespace
+{
+  Radio::Frequency json_frequency (QString const& value, bool * ok)
+  {
+    auto const text = value.trimmed ();
+    bool c_locale_ok;
+    auto const c_locale_frequency = Radio::frequency (text, 6, &c_locale_ok, QLocale::c ());
+    if (c_locale_ok && Radio::frequency_MHz_string (c_locale_frequency, 6, QLocale::c ()) == text)
+      {
+        *ok = true;
+        return c_locale_frequency;
+      }
+    static auto const locales = QLocale::matchingLocales (QLocale::AnyLanguage,
+                                                           QLocale::AnyScript,
+                                                           QLocale::AnyCountry);
+    for (auto const& locale : locales)
+      {
+        auto normalized = text;
+        auto const group_separator = locale.groupSeparator ();
+        normalized.replace (QChar::Nbsp, group_separator);
+        normalized.replace (QChar {0x202f}, group_separator);
+        normalized.replace (QChar {'\''}, group_separator);
+        normalized.replace (QChar {0x2019}, group_separator);
+        bool parsed;
+        auto const frequency = Radio::frequency (normalized, 6, &parsed, locale);
+        if (parsed && Radio::frequency_MHz_string (frequency, 6, locale) == normalized)
+          {
+            *ok = true;
+            return frequency;
+          }
+      }
+    if (text.contains (',') || text.contains (QChar {'\''})
+        || text.contains (QChar {0x2019}) || text.contains (QChar::Nbsp)
+        || text.contains (QChar {0x202f}) || text.contains (QChar {0x066b})
+        || text.contains (QChar {0x066c}))
+      {
+        *ok = false;
+        return 0;
+      }
+    *ok = c_locale_ok;
+    return c_locale_frequency;
+  }
+}
+
+FrequencyList_v2_101::FrequencyItems FrequencyList_v2_101::from_json_file(QFile *input_file,
+                                                                           ImportReport * report)
 {
   FrequencyList_v2_101::FrequencyItems list;
+  ImportReport result;
   QJsonDocument doc = QJsonDocument::fromJson(input_file->readAll());
   if (doc.isNull())
     {
@@ -1381,47 +1443,64 @@ FrequencyList_v2_101::FrequencyItems FrequencyList_v2_101::from_json_file(QFile 
     {
       throw ReadFileException{tr ("No Frequencies were found")};
     }
-#ifdef DUMP_ENTRY_COUNTS
-  int valid_entry_count = 0;
-  int skipped_entry_count = 0;
-#endif
   for (auto const &item: arr)
     {
-      QString mode_s, region_s;
+      ++result.entries;
       QJsonObject obj = item.toObject();
       FrequencyList_v2_101::Item freq;
-      region_s = obj["region"].toString();
-      mode_s = obj["mode"].toString();
+      auto const region_s = obj["region"].toString().trimmed();
+      auto const mode_s = obj["mode"].toString().trimmed();
 
-      freq.frequency_ = obj["frequency"].toString().toDouble() * 1e6;
-      freq.region_ = IARURegions::value(region_s);
-      freq.mode_ = Modes::value(mode_s);
+      bool frequency_ok;
+      freq.frequency_ = json_frequency (obj["frequency"].toString(), &frequency_ok);
+      if (!frequency_ok || !freq.frequency_)
+        {
+          ++result.invalid_frequency;
+          continue;
+        }
+      freq.region_ = IARURegions::fromCanonicalName (region_s);
+      if (freq.region_ == IARURegions::SENTINAL)
+        {
+          ++result.invalid_region;
+          continue;
+        }
+      freq.mode_ = Modes::ALL;
+      bool mode_ok = mode_s.isEmpty ();
+      for (int mode = Modes::ALL; !mode_ok && mode < Modes::MODES_END_SENTINAL_AND_COUNT; ++mode)
+        {
+          auto const candidate = static_cast<Modes::Mode> (mode);
+          if (mode_s.compare (Modes::name (candidate), Qt::CaseInsensitive) == 0)
+            {
+              freq.mode_ = candidate;
+              mode_ok = true;
+            }
+        }
+      if (!mode_ok)
+        {
+          ++result.unknown_modes[mode_s];
+          continue;
+        }
       freq.description_ = obj["description"].toString();
       freq.source_ = obj["source"].toString();
-      freq.start_time_ = QDateTime::fromString(obj["start_time"].toString(), Qt::ISODate);
-      freq.end_time_ = QDateTime::fromString(obj["end_time"].toString(), Qt::ISODate);
+      auto const start_time = obj["start_time"].toString().trimmed();
+      auto const end_time = obj["end_time"].toString().trimmed();
+      freq.start_time_ = QDateTime::fromString(start_time, Qt::ISODate);
+      freq.end_time_ = QDateTime::fromString(end_time, Qt::ISODate);
       freq.preferred_ = obj["preferred"].toBool();
 
-      if ((freq.mode_ != Modes::ALL || QString::compare("ALL", mode_s)) &&
-          (freq.region_ != IARURegions::ALL || QString::compare("ALL", region_s, Qt::CaseInsensitive)) &&
-          freq.isSane())
+      if ((start_time.isEmpty () || freq.start_time_.isValid ())
+          && (end_time.isEmpty () || freq.end_time_.isValid ())
+          && freq.isSane())
         {
           list.push_back(freq);
-#ifdef DUMP_ENTRY_COUNTS          
-          valid_entry_count++;
-#endif          
-        } else {
-#ifdef DUMP_ENTRY_COUNTS            
-        skipped_entry_count++;
-#endif    
-    	}
+          ++result.imported;
+        }
+      else
+        {
+          ++result.invalid_item;
+        }
     }
-
-#ifdef DUMP_ENTRY_COUNTS
-  MessageBox::information_message(this, tr("Loaded Frequencies from %1").arg(file_name),
-                                  tr("Entries Valid/Skipped %1").arg(QString::number(valid_entry_count) + "/" +
-                                                                     QString::number(skipped_entry_count)));
-#endif
+  if (report) *report = result;
   return list;
 }
 

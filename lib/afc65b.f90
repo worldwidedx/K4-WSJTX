@@ -2,9 +2,14 @@ subroutine afc65b(cx,npts,fsample,nflip,mode65,a,ccfbest,dtbest)
 
 ! Find delta f, f1, f2 ==> a(1:3)
 
+  use jt65_mod, only: jt65_work,ensure_jt65_workspace
+
   complex cx(npts)
   real a(5),deltaa(5)
 
+  call ensure_jt65_workspace()
+  jt65_work%afc_valid=.false.
+  dtmax=0.
   a=0.
   a1=0.
   a2=0.
@@ -55,9 +60,12 @@ subroutine afc65b(cx,npts,fsample,nflip,mode65,a,ccfbest,dtbest)
         chisq1=fchisq65(cx,npts,fsample,nflip,a,ccfmax,dtmax)
         fn=0.
         delta=deltaa(j)
-10      a(j)=a(j)+delta
+        a(j)=a(j)+delta
         chisq2=fchisq65(cx,npts,fsample,nflip,a,ccfmax,dtmax)
-        if(chisq2.eq.chisq1) go to 10
+        if(chisq2.eq.chisq1) then
+           a(j)=a(j)-delta
+           cycle
+        endif
         if(chisq2.gt.chisq1) then
            delta=-delta                      !Reverse direction
            a(j)=a(j)+delta
@@ -75,13 +83,18 @@ subroutine afc65b(cx,npts,fsample,nflip,mode65,a,ccfbest,dtbest)
         endif
 
 ! Find minimum of parabola defined by last three points
-        delta=delta*(1./(1.+(chisq1-chisq2)/(chisq3-chisq2))+0.5)
+        if(chisq3.eq.chisq2) then
+           delta=0.5*delta
+        else
+           delta=delta*(1./(1.+(chisq1-chisq2)/(chisq3-chisq2))+0.5)
+        endif
         a(j)=a(j)-delta
         deltaa(j)=deltaa(j)*fn/3.
 !        write(*,4000) iter,j,a(1:2),-chisq2
 !4000    format(2i2,4f9.4)
      enddo
      chisqr=fchisq65(cx,npts,fsample,nflip,a,ccfmax,dtmax)
+     if(chisqr0==0.) exit
      fdiff=chisqr/chisqr0-1.0
 !     write(*,4000) 0,0,a(1:2),-chisqr,fdiff
      if(abs(fdiff).lt.0.0001) exit

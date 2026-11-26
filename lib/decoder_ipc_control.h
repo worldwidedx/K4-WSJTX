@@ -19,7 +19,7 @@ extern "C" {
 int decoder_ipc_atomic_load (int const * value);
 void decoder_ipc_control_initialize (int * generation, int * state, int * version,
                                      int * progress);
-void decoder_ipc_control_shutdown (int * state, int * legacy_acknowledgment);
+void decoder_ipc_control_shutdown (int * state, int * version);
 int decoder_ipc_control_publish (int * generation, int * state,
                                  int const * version, int * progress,
                                  int request_generation);

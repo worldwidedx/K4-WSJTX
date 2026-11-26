@@ -57,6 +57,7 @@ runs:
       run: |
         WORKSPACE=$(cygpath "${GITHUB_WORKSPACE}")
         {
+          echo "msystem=${MSYSTEM,,}"
           echo "boost_prefix=${WORKSPACE}/boost-prefix"
           echo "hamlib_prefix=${WORKSPACE}/hamlib-prefix"
           echo "pfunit_prefix=${WORKSPACE}/pfunit-prefix"
@@ -67,7 +68,7 @@ runs:
       uses: actions/cache/restore@v6
       with:
         path: boost-prefix
-        key: boost-windows-windows-latest-mingw64-${{ inputs.boost_version }}-${{ inputs.boost_source_sha256 }}-winapi${{ inputs.windows_api_floor }}-epoch1-${{ hashFiles('.github/scripts/build-boost-windows.sh') }}
+        key: boost-windows-windows-latest-${{ steps.paths.outputs.msystem }}-${{ inputs.boost_version }}-${{ inputs.boost_source_sha256 }}-winapi${{ inputs.windows_api_floor }}-epoch1-${{ hashFiles('.github/scripts/build-boost-windows.sh') }}
 
     - name: Build Boost
       if: steps.boost-cache.outputs.cache-hit != 'true'
@@ -111,7 +112,7 @@ runs:
       uses: actions/cache/restore@v6
       with:
         path: pfunit-prefix
-        key: pfunit-windows-windows-latest-mingw64-v4.14.0-gfortran${{ steps.fc.outputs.version }}-epoch1-${{ hashFiles('.github/scripts/build-pfunit-windows.sh') }}
+        key: pfunit-windows-windows-latest-${{ steps.paths.outputs.msystem }}-v4.14.0-gfortran${{ steps.fc.outputs.version }}-epoch1-${{ hashFiles('.github/scripts/build-pfunit-windows.sh') }}
 
     - name: Build pFUnit
       if: steps.pfunit-cache.outputs.cache-hit != 'true'
@@ -146,7 +147,7 @@ runs:
       uses: actions/cache/restore@v6
       with:
         path: hamlib-prefix
-        key: hamlib-windows-windows-latest-mingw64-${{ inputs.hamlib_branch }}-epoch2-${{ hashFiles('.github/scripts/build-hamlib-windows.sh') }}
+        key: hamlib-windows-windows-latest-${{ steps.paths.outputs.msystem }}-${{ inputs.hamlib_branch }}-epoch2-${{ hashFiles('.github/scripts/build-hamlib-windows.sh') }}
 
     - name: Build Hamlib
       if: steps.hamlib-cache.outputs.cache-hit != 'true'

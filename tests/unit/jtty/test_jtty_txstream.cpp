@@ -1,10 +1,15 @@
 #include <QtTest/QtTest>
+#include <QElapsedTimer>
 #include <QSignalSpy>
 #include <QPointer>
 #include <QThread>
 #include <QVector>
 
+#include <atomic>
+#include <thread>
+
 #include "Audio/AudioDevice.hpp"
+#include "Audio/AudioOutputSink.hpp"
 #include "Audio/TxAudioQueue.hpp"
 #include "Audio/TxIdentity.hpp"
 #include "Audio/TxPlaybackEvidence.hpp"
@@ -26,25 +31,81 @@ private slots:
   void gaplessConcatAndSilencePad ();
   void clearResetsCounters ();
   void clearThenEnqueueSkipsOldSamples ();
+  void resetMustBeAppliedBeforeReusingCapacity ();
   void clearDuringPartialPlaybackSkipsRemainder ();
   void pendingResetProgressExcludesAbortedAudio ();
   void fifoOverflowRejectsWithoutTruncating ();
   void fifoWrappedEnqueuePreservesOrder ();
+  void concurrentChainedEnqueueAndPullPreservesOrder ();
   void enqueueFitPredicate ();
   void fifoDrainStateCarriesEpochAndTotal ();
   void fifoDrainAfterResetUsesNewEpochAndTotal ();
   void fifoEpochBoundaryAfterNaturalDrainResetsTotal ();
+  void unplayedBufferBytesDefaultsToBufferSize ();
+  void drainGuardUsesUnplayedBufferBytes ();
+  void drainGuardBoundary_data ();
+  void drainGuardBoundary ();
+  void synchronousRestartCannotDrain_data ();
+  void synchronousRestartCannotDrain ();
+  void restartReplacesDrainGuard ();
   void drainedPredicate ();
   void readDoesNotEmitDrainedDirectly ();
   void timerEmitsDrainedEdge ();
+  void progressTracksConsumptionAppendAndReset ();
+  void progressPrecedesDrainAfterRefill ();
+  void stopAppliesPendingResetAndAcknowledges ();
+  void stopPreservesNewEpochSamples ();
   void drainedEmittedFromWorkerThread ();
   void sourceCommitUsesCurrentRealExtent ();
   void staleQueueEpochDoesNotStart ();
   void sourceCommitIsEmittedOncePerStart ();
+  void queuedClearAndEnqueueAcknowledgeReplacement ();
+  void queuedEnqueueReportsTypedFailures ();
+  void pendingPayloadBudgetSurvivesAbort ();
+  void pendingRequestBudgetRecoversAfterDelivery ();
 };
 
 namespace
 {
+  class BufferSizeSink : public AudioOutputSink
+  {
+  public:
+    explicit BufferSizeSink (int bufferSize)
+      : m_bufferSize {bufferSize}
+    {
+    }
+
+    int bufferSize () const override { return m_bufferSize; }
+    void setFormat (QAudioDeviceInfo const&, unsigned, int) override {}
+    void restart (QIODevice *, TxEvidence::TxPlaybackContext context, qint64 = -1) override
+    { lastContext = context; }
+    TxEvidence::TxPlaybackContext lastContext;
+    void stop () override {}
+    void reset () override {}
+    void suspend () override {}
+    void resume () override {}
+    void setAttenuation (qreal) override {}
+    void resetAttenuation () override {}
+
+  private:
+    int m_bufferSize;
+  };
+
+  class EstimatedTailSink : public BufferSizeSink
+  {
+  public:
+    EstimatedTailSink (int bufferSize, int unplayedBufferBytes)
+      : BufferSizeSink {bufferSize}
+      , m_unplayedBufferBytes {unplayedBufferBytes}
+    {
+    }
+
+    int unplayedBufferBytes () const override { return m_unplayedBufferBytes; }
+
+  private:
+    int m_unplayedBufferBytes;
+  };
+
   // Default drain guard baked into JttyTxStream when start() has not run (no
   // device buffer to measure). Mirrors DEFAULT_DRAIN_GUARD in JttyTxStream.cpp.
   constexpr int DEFAULT_GUARD = 9600;
@@ -77,11 +138,20 @@ namespace
     for (int i = 0; i < n; ++i) out.append (p[i]);
     return out;
   }
+
+  QByteArray pcmBytes (QVector<qint16> const& samples)
+  {
+    return QByteArray {reinterpret_cast<char const *> (samples.constData ()),
+                       samples.size () * int (sizeof (qint16))};
+  }
 }
 
 void TestJttyTxStream::initTestCase ()
 {
   qRegisterMetaType<TxAudioQueueDrainState> ("TxAudioQueueDrainState");
+  qRegisterMetaType<TxAudioQueueEnqueueFailure> (
+    "TxAudioQueueEnqueueFailure");
+  qRegisterMetaType<TxAudioQueueProgress> ("TxAudioQueueProgress");
 }
 
 void TestJttyTxStream::gaplessConcatAndSilencePad ()
@@ -143,6 +213,25 @@ void TestJttyTxStream::clearThenEnqueueSkipsOldSamples ()
   for (int i = 0; i < 4; ++i) got.append (fifo.pullSample (2));
   QCOMPARE (got, (QVector<qint16> {4, 5, 0, 0}));
   QCOMPARE (fifo.totalReal (), qint64 (2));
+  QCOMPARE (fifo.servedReal (), qint64 (2));
+}
+
+void TestJttyTxStream::resetMustBeAppliedBeforeReusingCapacity ()
+{
+  JttyPcmFifo fifo {8};
+  QVERIFY (fifo.enqueue (QVector<qint16> {1, 2, 3, 4, 5, 6, 7}, 1));
+  fifo.clear (2);
+  QVERIFY (!fifo.enqueue (QVector<qint16> {8, 9}, 2));
+
+  fifo.applyPendingReset ();
+  QVERIFY (fifo.enqueue (QVector<qint16> {8, 9}, 2));
+
+  QCOMPARE (fifo.totalReal (), qint64 (2));
+  QCOMPARE (fifo.queuedReal (), qint64 (2));
+
+  QCOMPARE (fifo.pullSample (2), qint16 (8));
+  QCOMPARE (fifo.pullSample (2), qint16 (9));
+  QCOMPARE (fifo.pullSample (2), qint16 (0));
   QCOMPARE (fifo.servedReal (), qint64 (2));
 }
 
@@ -211,6 +300,48 @@ void TestJttyTxStream::fifoWrappedEnqueuePreservesOrder ()
   QCOMPARE (got, (QVector<qint16> {4, 5, 6, 7, 0}));
   QCOMPARE (fifo.totalReal (), qint64 (7));
   QCOMPARE (fifo.servedReal (), qint64 (7));
+}
+
+void TestJttyTxStream::concurrentChainedEnqueueAndPullPreservesOrder ()
+{
+  constexpr int sampleCount = 5000;
+  constexpr int chunkSize = 17;
+  JttyPcmFifo fifo {64};
+  QVector<qint16> received;
+  received.reserve (sampleCount);
+  std::atomic<bool> producerDone {false};
+
+  std::thread producer {[&fifo, &producerDone] {
+    for (int first = 1; first <= sampleCount; first += chunkSize)
+      {
+        QVector<qint16> chunk;
+        int const last = qMin (first + chunkSize, sampleCount + 1);
+        chunk.reserve (last - first);
+        for (int sample = first; sample < last; ++sample)
+          {
+            chunk.append (qint16 (sample));
+          }
+        while (!fifo.enqueue (chunk, 1))
+          {
+            std::this_thread::yield ();
+          }
+      }
+    producerDone.store (true, std::memory_order_release);
+  }};
+
+  while (!producerDone.load (std::memory_order_acquire)
+         || received.size () < sampleCount)
+    {
+      qint16 const sample = fifo.pullSample (64);
+      if (sample != 0) received.append (sample);
+    }
+  producer.join ();
+
+  QCOMPARE (received.size (), sampleCount);
+  for (int i = 0; i < received.size (); ++i)
+    {
+      QCOMPARE (received.at (i), qint16 (i + 1));
+    }
 }
 
 void TestJttyTxStream::enqueueFitPredicate ()
@@ -284,6 +415,131 @@ void TestJttyTxStream::fifoEpochBoundaryAfterNaturalDrainResetsTotal ()
   QCOMPARE (drain.totalAtDrain, qint64 (2));
 }
 
+void TestJttyTxStream::unplayedBufferBytesDefaultsToBufferSize ()
+{
+  BufferSizeSink sink {123456};
+  QCOMPARE (sink.unplayedBufferBytes (), sink.bufferSize ());
+}
+
+void TestJttyTxStream::drainGuardUsesUnplayedBufferBytes ()
+{
+  TxAudioQueue queue;
+  auto const epoch = queueEpoch (23);
+  queue.clear (epoch);
+  QVERIFY (queue.enqueue (QVector<qint16> {7}, epoch).accepted);
+
+  EstimatedTailSink sink {100000, 0};
+  JttyTxStream stream {queue};
+  stream.start (jttyRequest (23, 1), &sink);
+  QCOMPARE (sink.lastContext.session_id, TxEvidence::TxSessionId {23});
+  QCOMPARE (sink.lastContext.generation, TxEvidence::TxGeneration {1});
+
+  (void) readFrames (stream, 1 + DEFAULT_GUARD + 4800);
+  QVERIFY (queue.takeDrainReady ().ready);
+  stream.stop ();
+}
+
+void TestJttyTxStream::drainGuardBoundary_data ()
+{
+  QTest::addColumn<AudioDevice::Channel> ("channel");
+  QTest::newRow ("mono") << AudioDevice::Mono;
+  QTest::newRow ("left") << AudioDevice::Left;
+  QTest::newRow ("right") << AudioDevice::Right;
+  QTest::newRow ("both") << AudioDevice::Both;
+}
+
+void TestJttyTxStream::drainGuardBoundary ()
+{
+  QFETCH (AudioDevice::Channel, channel);
+  int const channels = channel == AudioDevice::Mono ? 1 : 2;
+  TxAudioQueue queue;
+  queue.clear (queueEpoch (23));
+  QVERIFY (queue.enqueue (QVector<qint16> {7}, queueEpoch (23)).accepted);
+  EstimatedTailSink sink {1000000, 24000 * channels * 2};
+  JttyTxStream stream {queue};
+  auto request = jttyRequest (23, 1);
+  request.channel = channel;
+  stream.start (request, &sink);
+  auto const first = readFrames (stream, channels);
+  auto const expected = channel == AudioDevice::Mono ? QVector<qint16> {7}
+    : channel == AudioDevice::Left ? QVector<qint16> {7, 0}
+    : channel == AudioDevice::Right ? QVector<qint16> {0, 7}
+    : QVector<qint16> {7, 7};
+  QCOMPARE (first, expected);
+  (void) readFrames (stream, (24000 + 4800 - 1) * channels);
+  QVERIFY (!queue.takeDrainReady ().ready);
+  (void) readFrames (stream, channels);
+  QVERIFY (queue.takeDrainReady ().ready);
+  (void) readFrames (stream, 100 * channels);
+  QVERIFY (!queue.takeDrainReady ().ready);
+  stream.stop ();
+}
+
+void TestJttyTxStream::synchronousRestartCannotDrain_data ()
+{
+  QTest::addColumn<int> ("prefillFrames");
+  QTest::newRow ("old-default") << 1 + DEFAULT_GUARD;
+  QTest::newRow ("full-tail") << 1 + 24000 + 4800;
+}
+
+void TestJttyTxStream::synchronousRestartCannotDrain ()
+{
+  QFETCH (int, prefillFrames);
+  TxAudioQueue queue;
+  queue.clear (queueEpoch (23));
+  QVERIFY (queue.enqueue (QVector<qint16> {7}, queueEpoch (23)).accepted);
+  class PullingSink : public EstimatedTailSink
+  {
+  public:
+    PullingSink (TxAudioQueue& queue, int frames)
+      : EstimatedTailSink {100000, 48000}, queue {queue}, frames {frames} {}
+    void restart (QIODevice * source, TxEvidence::TxPlaybackContext context, qint64 offset = -1) override
+    {
+      EstimatedTailSink::restart (source, context, offset);
+      source->read (frames * 2);
+      drainedDuringRestart = queue.takeDrainReady ().ready;
+    }
+    TxAudioQueue& queue;
+    int frames;
+    bool drainedDuringRestart {false};
+  } sink {queue, prefillFrames};
+  JttyTxStream stream {queue};
+  stream.start (jttyRequest (23, 1), &sink);
+  QCOMPARE (sink.lastContext.session_id, TxEvidence::TxSessionId {23});
+  QCOMPARE (sink.lastContext.generation, TxEvidence::TxGeneration {1});
+  QVERIFY (!sink.drainedDuringRestart);
+  QVERIFY (!queue.takeDrainReady ().ready);
+  (void) readFrames (stream, qMax (1, 1 + 24000 + 4800 - prefillFrames));
+  QVERIFY (queue.takeDrainReady ().ready);
+  (void) readFrames (stream, 1);
+  QVERIFY (!queue.takeDrainReady ().ready);
+  stream.stop ();
+}
+
+void TestJttyTxStream::restartReplacesDrainGuard ()
+{
+  TxAudioQueue queue;
+  JttyTxStream stream {queue};
+  EstimatedTailSink large {100000, 48000};
+  EstimatedTailSink small {100000, 0};
+  QVector<AudioOutputSink *> sinks {&large, &small, nullptr};
+  QVector<int> guards {28800, 14400, DEFAULT_GUARD};
+  for (int index = 0; index != sinks.size (); ++index)
+    {
+      auto const epoch = queueEpoch (24 + index);
+      queue.clear (epoch);
+      QVERIFY (queue.enqueue (QVector<qint16> {7}, epoch).accepted);
+      stream.start (jttyRequest (epoch.value (), index + 1), sinks[index]);
+      (void) readFrames (stream, guards[index]);
+      QVERIFY (!queue.takeDrainReady ().ready);
+      (void) readFrames (stream, 1);
+      auto const drain = queue.takeDrainReady ();
+      QVERIFY (drain.ready);
+      QCOMPARE (drain.epoch, epoch);
+      stream.stop ();
+    }
+}
+
 void TestJttyTxStream::drainedPredicate ()
 {
   // Nothing queued yet => not drained.
@@ -308,10 +564,146 @@ void TestJttyTxStream::readDoesNotEmitDrainedDirectly ()
   JttyTxStream s {queue};
   QVERIFY (s.initialize (QIODevice::ReadOnly, AudioDevice::Mono));
   QSignalSpy spy (&s, &JttyTxStream::drained);
+  QSignalSpy progressSpy (&s, &JttyTxStream::progress);
 
   QVERIFY (queue.enqueue (QVector<qint16> {7, 7, 7}, epoch).accepted);
   (void) readFrames (s, 3 + DEFAULT_GUARD);
   QCOMPARE (spy.count (), 0);
+  QCOMPARE (progressSpy.count (), 0);
+}
+
+void TestJttyTxStream::progressTracksConsumptionAppendAndReset ()
+{
+  TxAudioQueue queue;
+  auto const epoch = queueEpoch (35);
+  queue.clear (epoch);
+  JttyTxStream stream {queue};
+  QSignalSpy spy (&stream, &JttyTxStream::progress);
+  QVERIFY (queue.enqueue (QVector<qint16> {1, 2, 3}, epoch).accepted);
+  stream.start (jttyRequest (35, 1), nullptr);
+
+  QTRY_COMPARE (spy.count (), 1);
+  auto current = qvariant_cast<TxAudioQueueProgress> (spy.last ().at (0));
+  QCOMPARE (current.epoch, epoch);
+  QCOMPARE (current.served_samples, qint64 (0));
+  QCOMPARE (current.total_samples, qint64 (3));
+  QVERIFY (QMetaObject::invokeMethod (&stream, "pollDrain"));
+  QCOMPARE (spy.count (), 1);
+
+  QCOMPARE (readFrames (stream, 2), (QVector<qint16> {1, 2}));
+  QCOMPARE (spy.count (), 1);
+  QVERIFY (QMetaObject::invokeMethod (&stream, "pollDrain"));
+  QCOMPARE (spy.count (), 2);
+  current = qvariant_cast<TxAudioQueueProgress> (spy.last ().at (0));
+  QCOMPARE (current.served_samples, qint64 (2));
+  QCOMPARE (current.queued_samples, qint64 (1));
+
+  QVERIFY (queue.enqueue (QVector<qint16> {4, 5}, epoch).accepted);
+  QVERIFY (QMetaObject::invokeMethod (&stream, "pollDrain"));
+  QCOMPARE (spy.count (), 3);
+  current = qvariant_cast<TxAudioQueueProgress> (spy.last ().at (0));
+  QCOMPARE (current.epoch, epoch);
+  QCOMPARE (current.served_samples, qint64 (2));
+  QCOMPARE (current.total_samples, qint64 (5));
+
+  auto const nextEpoch = queueEpoch (36);
+  queue.clear (nextEpoch);
+  QVERIFY (queue.enqueue (QVector<qint16> {6}, nextEpoch).accepted);
+  QVERIFY (QMetaObject::invokeMethod (&stream, "pollDrain"));
+  QCOMPARE (spy.count (), 4);
+  current = qvariant_cast<TxAudioQueueProgress> (spy.last ().at (0));
+  QCOMPARE (current.epoch, nextEpoch);
+  QCOMPARE (current.served_samples, qint64 (0));
+  QCOMPARE (current.total_samples, qint64 (1));
+  QCOMPARE (current.queued_samples, qint64 (1));
+
+  queue.clear (TxAudioQueueEpoch::invalid ());
+  QVERIFY (QMetaObject::invokeMethod (&stream, "pollDrain"));
+  QCOMPARE (spy.count (), 4);
+  stream.stop ();
+  queue.clear (queueEpoch (37));
+  QVERIFY (QMetaObject::invokeMethod (&stream, "pollDrain"));
+  QCOMPARE (spy.count (), 4);
+}
+
+void TestJttyTxStream::progressPrecedesDrainAfterRefill ()
+{
+  TxAudioQueue queue;
+  auto const epoch = queueEpoch (38);
+  queue.clear (epoch);
+  JttyTxStream stream {queue};
+  QSignalSpy drainedSpy (&stream, &JttyTxStream::drained);
+  QVERIFY (queue.enqueue (QVector<qint16> {1, 2, 3}, epoch).accepted);
+  stream.start (jttyRequest (38, 1), nullptr);
+  bool appended {false};
+  bool progressPrecededDrain {false};
+  connect (&stream, &JttyTxStream::drained, &stream,
+           [&appended, &progressPrecededDrain] (TxAudioQueueDrainState) {
+             progressPrecededDrain = appended;
+           });
+  connect (&stream, &JttyTxStream::progress, &stream,
+           [&queue, epoch, &appended] (TxAudioQueueProgress current) {
+             if (!appended && current.served_samples == current.total_samples)
+               {
+                 appended = queue.enqueue (QVector<qint16> {4, 5}, epoch).accepted;
+               }
+           });
+
+  (void) readFrames (stream, 3 + DEFAULT_GUARD);
+  QVERIFY (QMetaObject::invokeMethod (&stream, "pollDrain"));
+  QVERIFY (appended);
+  QVERIFY (progressPrecededDrain);
+  QCOMPARE (drainedSpy.count (), 1);
+  QCOMPARE (qvariant_cast<TxAudioQueueDrainState> (
+              drainedSpy.first ().at (0)).total_at_drain, qint64 (3));
+  QCOMPARE (readFrames (stream, 2), (QVector<qint16> {4, 5}));
+  (void) readFrames (stream, DEFAULT_GUARD);
+  QVERIFY (QMetaObject::invokeMethod (&stream, "pollDrain"));
+  QCOMPARE (drainedSpy.count (), 2);
+  QCOMPARE (qvariant_cast<TxAudioQueueDrainState> (
+              drainedSpy.last ().at (0)).total_at_drain, qint64 (5));
+  stream.stop ();
+}
+
+void TestJttyTxStream::stopAppliesPendingResetAndAcknowledges ()
+{
+  TxAudioQueue queue {8};
+  auto const epoch = queueEpoch (39);
+  auto const nextEpoch = queueEpoch (40);
+  queue.clear (epoch);
+  JttyTxStream stream {queue};
+  QSignalSpy stoppedSpy (&stream, &JttyTxStream::stopped);
+  QVERIFY (queue.enqueue (QVector<qint16> {1, 2, 3, 4, 5, 6}, epoch).accepted);
+
+  // Stop during PTT lead: no audio pull has applied either reset yet.
+  queue.clear (nextEpoch);
+  stream.stop ();
+  QCOMPARE (stoppedSpy.count (), 1);
+  QVERIFY (queue.enqueue (QVector<qint16> {7, 8, 9, 10, 11, 12}, nextEpoch).accepted);
+  stream.start (jttyRequest (40, 1), nullptr);
+  QCOMPARE (readFrames (stream, 6), (QVector<qint16> {7, 8, 9, 10, 11, 12}));
+  stream.stop ();
+  stream.stop ();
+  QCOMPARE (stoppedSpy.count (), 3);
+}
+
+void TestJttyTxStream::stopPreservesNewEpochSamples ()
+{
+  TxAudioQueue queue {8};
+  auto const epoch = queueEpoch (42);
+  auto const nextEpoch = queueEpoch (43);
+  queue.clear (epoch);
+  JttyTxStream stream {queue};
+  QVERIFY (queue.enqueue (QVector<qint16> {1, 2, 3, 4, 5, 6}, epoch).accepted);
+  stream.start (jttyRequest (42, 1), nullptr);
+  queue.clear (nextEpoch);
+  QVERIFY (queue.enqueue (QVector<qint16> {7, 8}, nextEpoch).accepted);
+
+  stream.stop ();
+  QCOMPARE (queue.progress ().queued_samples, qint64 (2));
+  stream.start (jttyRequest (43, 2), nullptr);
+  QCOMPARE (readFrames (stream, 3), (QVector<qint16> {7, 8, 0}));
+  stream.stop ();
 }
 
 void TestJttyTxStream::timerEmitsDrainedEdge ()
@@ -481,6 +873,162 @@ void TestJttyTxStream::sourceCommitIsEmittedOncePerStart ()
   QCOMPARE (commits.at (1).session_id.value (), qint64 (72));
   QCOMPARE (commits.at (1).generation.value (), qint64 (2));
   stream.stop ();
+}
+
+void TestJttyTxStream::queuedClearAndEnqueueAcknowledgeReplacement ()
+{
+  TxAudioQueue queue {8};
+  auto const first = queueEpoch (91);
+  auto const replacement = queueEpoch (92);
+  queue.clear (first);
+  queue.applyPendingReset ();
+  QVector<qint16> const aborted {1, 2, 3, 4, 5, 6, 7, 8};
+  QVector<qint16> const replacementSamples {11, 12, 13, 14, 15, 16, 17, 18};
+  QVERIFY (queue.enqueue (aborted, first).accepted);
+  QCOMPARE (queue.enqueue (QVector<qint16> {9}, first).failure,
+            TxAudioQueueEnqueueFailure::Capacity);
+
+  auto * stream = new JttyTxStream {queue};
+  QPointer<JttyTxStream> streamWitness {stream};
+  QObject receiver;
+  int acceptedCount {0};
+  int failedCount {0};
+  qint64 acceptedId {-1};
+  qint64 acceptedSamples {-1};
+  TxAudioQueueProgress signaledProgress;
+  TxAudioQueueProgress callbackProgress;
+  connect (stream, &JttyTxStream::enqueueAccepted, &receiver,
+           [&] (qint64 enqueueId, qint64 sampleCount,
+                TxAudioQueueProgress progress) {
+             ++acceptedCount;
+             acceptedId = enqueueId;
+             acceptedSamples = sampleCount;
+             signaledProgress = progress;
+             callbackProgress = queue.progress ();
+           }, Qt::QueuedConnection);
+  connect (stream, &JttyTxStream::enqueueFailed, &receiver,
+           [&] {++failedCount;}, Qt::QueuedConnection);
+
+  QThread audioThread;
+  stream->moveToThread (&audioThread);
+  connect (&audioThread, &QThread::finished, stream, &QObject::deleteLater);
+
+  QMetaObject::invokeMethod (stream, [stream, replacement] {
+    stream->clearQueue (replacement);
+  }, Qt::QueuedConnection);
+  QMetaObject::invokeMethod (
+    stream, [stream, replacement, replacementSamples] {
+      stream->enqueuePcm (pcmBytes (replacementSamples), replacement, 101);
+    }, Qt::QueuedConnection);
+  audioThread.start ();
+
+  QElapsedTimer callbackWait;
+  callbackWait.start ();
+  while (!acceptedCount && !failedCount && callbackWait.elapsed () < 2000)
+    {
+      QCoreApplication::processEvents (QEventLoop::AllEvents, 10);
+      QThread::msleep (1);
+    }
+
+  bool const stopped = QMetaObject::invokeMethod (
+    stream, "stop", Qt::BlockingQueuedConnection);
+  audioThread.quit ();
+  bool const threadStopped = audioThread.wait (2000);
+
+  QVERIFY (stopped);
+  QVERIFY (threadStopped);
+  QVERIFY (streamWitness.isNull ());
+  QCOMPARE (failedCount, 0);
+  QCOMPARE (acceptedCount, 1);
+  QCOMPARE (acceptedId, qint64 (101));
+  QCOMPARE (acceptedSamples, qint64 (replacementSamples.size ()));
+  QCOMPARE (signaledProgress.epoch, replacement);
+  QCOMPARE (signaledProgress.queued_samples,
+            qint64 (replacementSamples.size ()));
+  QCOMPARE (signaledProgress.total_samples,
+            qint64 (replacementSamples.size ()));
+  QCOMPARE (callbackProgress.epoch, replacement);
+  QCOMPARE (callbackProgress.total_samples,
+            qint64 (replacementSamples.size ()));
+  for (auto sample : replacementSamples)
+    {
+      QCOMPARE (queue.pullSample (0), sample);
+    }
+  QCOMPARE (queue.pullSample (0), qint16 (0));
+}
+
+void TestJttyTxStream::queuedEnqueueReportsTypedFailures ()
+{
+  TxAudioQueue queue {2};
+  auto const current = queueEpoch (101);
+  queue.clear (current);
+  queue.applyPendingReset ();
+  JttyTxStream stream {queue};
+  QSignalSpy accepted (&stream, &JttyTxStream::enqueueAccepted);
+  QSignalSpy failed (&stream, &JttyTxStream::enqueueFailed);
+
+  stream.enqueuePcm (pcmBytes (QVector<qint16> {1, 2}), current, 201);
+  stream.enqueuePcm (pcmBytes (QVector<qint16> {3}), current, 202);
+  stream.enqueuePcm (pcmBytes (QVector<qint16> {4}), queueEpoch (102), 203);
+
+  QCOMPARE (accepted.count (), 1);
+  QCOMPARE (failed.count (), 2);
+  QCOMPARE (failed.at (0).at (0).value<TxAudioQueueEpoch> (), current);
+  QCOMPARE (failed.at (0).at (1).toLongLong (), qint64 (202));
+  QCOMPARE (failed.at (0).at (2).value<TxAudioQueueEnqueueFailure> (),
+            TxAudioQueueEnqueueFailure::Capacity);
+  QCOMPARE (failed.at (1).at (1).toLongLong (), qint64 (203));
+  QCOMPARE (failed.at (1).at (2).value<TxAudioQueueEnqueueFailure> (),
+            TxAudioQueueEnqueueFailure::StaleEpoch);
+}
+
+void TestJttyTxStream::pendingPayloadBudgetSurvivesAbort ()
+{
+  TxAudioQueue queue;
+  JttyTxStream stream {queue};
+  auto const first = queueEpoch (1);
+  auto const replacement = queueEpoch (2);
+  stream.clearQueue (first);
+  QSignalSpy accepted (&stream, &JttyTxStream::enqueueAccepted);
+  QSignalSpy failed (&stream, &JttyTxStream::enqueueFailed);
+  QByteArray const full (int (TxAudioQueue::defaultCapacity () * sizeof (qint16)), '\0');
+
+  stream.queuePcm (full, first, 1);
+  stream.clearQueue (replacement);
+  stream.queuePcm (pcmBytes ({7}), replacement, 2);
+  QCOMPARE (failed.count (), 1);
+  QCOMPARE (failed.at (0).at (2).value<TxAudioQueueEnqueueFailure> (),
+            TxAudioQueueEnqueueFailure::Capacity);
+
+  QCoreApplication::sendPostedEvents (&stream, QEvent::MetaCall);
+  QCOMPARE (accepted.count (), 0);
+  QCOMPARE (failed.count (), 2);
+  QCOMPARE (failed.at (1).at (2).value<TxAudioQueueEnqueueFailure> (),
+            TxAudioQueueEnqueueFailure::StaleEpoch);
+
+  stream.queuePcm (full, replacement, 3);
+  QCoreApplication::sendPostedEvents (&stream, QEvent::MetaCall);
+  QCOMPARE (accepted.count (), 1);
+}
+
+void TestJttyTxStream::pendingRequestBudgetRecoversAfterDelivery ()
+{
+  TxAudioQueue queue;
+  JttyTxStream stream {queue};
+  auto const epoch = queueEpoch (1);
+  stream.clearQueue (epoch);
+  QSignalSpy accepted (&stream, &JttyTxStream::enqueueAccepted);
+  QSignalSpy failed (&stream, &JttyTxStream::enqueueFailed);
+  for (int id = 1; id <= 65; ++id) stream.queuePcm (pcmBytes ({7}), epoch, id);
+  QCOMPARE (failed.count (), 1);
+  QCOMPARE (failed.at (0).at (1).toLongLong (), qint64 (65));
+
+  QCoreApplication::sendPostedEvents (&stream, QEvent::MetaCall);
+  QCOMPARE (accepted.count (), 64);
+  stream.queuePcm (pcmBytes ({8}), epoch, 66);
+  QCoreApplication::sendPostedEvents (&stream, QEvent::MetaCall);
+  QCOMPARE (accepted.count (), 65);
+  QCOMPARE (failed.count (), 1);
 }
 
 QTEST_MAIN (TestJttyTxStream)

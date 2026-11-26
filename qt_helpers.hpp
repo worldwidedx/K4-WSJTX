@@ -125,10 +125,17 @@ void throw_qstring (QString const& qs)
 
 QString font_as_stylesheet (QFont const&);
 
+// Compare port-name prefixes lexically and trailing decimal numbers numerically.
+bool serial_port_name_less (QString const& lhs, QString const& rhs);
+
 QString application_style_sheet (QString const& base_style_sheet,
                                  QString const& dark_style_sheet,
                                  bool dark_style,
                                  QFont const& font);
+
+QString main_window_style_sheet (QString const& base_style_sheet,
+                                QString const& dark_style_sheet,
+                                bool dark_style, QFont const& font);
 
 // do what is necessary to change a dynamic property and trigger any
 // conditional style sheet updates

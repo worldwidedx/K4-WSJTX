@@ -23,6 +23,7 @@
 #define _q65_h
 
 #include "qracodes.h"
+#include "q65_limits.h"
 
 // Error codes returned by q65_decode(...) 
 #define Q65_DECODE_INVPARAMS	 -1
@@ -34,9 +35,7 @@
 // Verify loglikelihood after successful decoding
 #define Q65_CHECKLLH
 // Max codeword list size in q65_decode_fullaplist
-// See MAX_NCW in q65_set_list2.f90 (not required to be a power of 2 --
-// this value is only ever used in a plain bounds check).
-#define Q65_FULLAPLIST_SIZE	411
+#define Q65_FULLAPLIST_SIZE Q65_AP_LIST_CAPACITY
 
 // maximum number of weights for the fast-fading metric evaluation
 #define Q65_FASTFADING_MAXWEIGTHS 65

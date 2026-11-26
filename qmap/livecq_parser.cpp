@@ -92,4 +92,32 @@ namespace QMapLiveCQ
     record = parsed;
     return true;
   }
+
+  QDateTime spotTime(QString const& decodeTime, QDateTime const& nowUtc)
+  {
+    if ((decodeTime.size() != 4 && decodeTime.size() != 6) || !nowUtc.isValid()) {
+      return {};
+    }
+    for (auto const character : decodeTime) {
+      if (!character.isDigit()) {
+        return {};
+      }
+    }
+    QTime const time {decodeTime.mid(0, 2).toInt(), decodeTime.mid(2, 2).toInt(),
+                      decodeTime.size() == 6 ? decodeTime.mid(4, 2).toInt() : 0};
+    if (!time.isValid()) {
+      return {};
+    }
+
+    auto const now = nowUtc.toUTC();
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    QDateTime result {now.date(), time, QTimeZone::UTC};
+#else
+    QDateTime result {now.date(), time, Qt::UTC};
+#endif
+    if (result > now.addSecs(60)) {
+      result = result.addDays(-1);
+    }
+    return result;
+  }
 }

@@ -1,11 +1,34 @@
 module jt65_decode
 
+  use jt65_mod, only: jt65_workspace,jt65_average_entry,jt65_work, &
+       clear_jt65_averages,destroy_jt65_plans,jt65_ap_epoch
+  use, intrinsic :: iso_c_binding, only: c_int16_t,c_int64_t
+
   integer, parameter :: NSZ=3413, NZMAX=60*12000
 
+  type jt65_options
+    integer :: utc=0,low_frequency=200,high_frequency=4000,receive_frequency=1500,tolerance=1000
+    integer :: submode=0,min_sync=0,passes=2,trials=1000,aggressiveness=0,effort=1,qso_progress=0
+    logical :: repeat=.false.,single_decode=.false.,vhf=.false.,average=.false.
+    logical :: auto_clear=.false.,deep_search=.false.,ap=.false.
+    character(len=12) :: mycall='',hiscall=''
+    character(len=6) :: hisgrid=''
+  end type
+
   type :: jt65_decoder
+     type(jt65_workspace), pointer :: workspace=>null()
      procedure(jt65_decode_callback), pointer :: callback => null()
    contains
      procedure :: decode
+     procedure :: decode_pcm
+     procedure :: initialize
+     procedure :: release_input
+     procedure :: clear_averages
+     procedure :: reset
+     procedure :: destroy
+     procedure :: set_calls
+     procedure :: get_averages
+     final :: finalize
   end type jt65_decoder
 
 ! Callback function to be called with each decode
@@ -35,10 +58,116 @@ module jt65_decode
 
 contains
 
+  subroutine initialize(this)
+    class(jt65_decoder), intent(inout) :: this
+    if(.not.associated(this%workspace)) allocate(this%workspace)
+  end subroutine
+
+  subroutine release_input(this)
+    class(jt65_decoder), intent(inout) :: this
+    if(.not.associated(this%workspace)) return
+    this%workspace%afc_valid=.false.
+    this%workspace%input_id=0
+    this%workspace%last_average_input=0
+    if(allocated(this%workspace%reception_ids)) this%workspace%reception_ids=0
+  end subroutine
+
+  subroutine clear_averages(this)
+    class(jt65_decoder), intent(inout) :: this
+    if(associated(this%workspace)) call clear_jt65_averages(this%workspace)
+  end subroutine
+
+  subroutine reset(this)
+    class(jt65_decoder), intent(inout) :: this
+    call this%release_input()
+    call this%clear_averages()
+    jt65_ap_epoch=jt65_ap_epoch+1
+    if(.not.associated(this%workspace)) return
+    this%workspace%submode=-1
+    this%workspace%profile=-1
+    if(allocated(this%workspace%calls)) deallocate(this%workspace%calls,this%workspace%grids)
+    this%workspace%call_revision=this%workspace%call_revision+1
+    this%workspace%hint_revision=-1
+  end subroutine
+
+  subroutine destroy(this)
+    class(jt65_decoder), intent(inout) :: this
+    if(.not.associated(this%workspace)) return
+    if(associated(jt65_work,this%workspace)) nullify(jt65_work)
+    call destroy_jt65_plans(this%workspace)
+    deallocate(this%workspace)
+    nullify(this%workspace,this%callback)
+  end subroutine
+
+  subroutine finalize(this)
+    type(jt65_decoder), intent(inout) :: this
+    call this%destroy()
+  end subroutine
+
+  subroutine set_calls(this,calls,grids)
+    class(jt65_decoder), intent(inout) :: this
+    character(len=12), intent(in) :: calls(:)
+    character(len=4), intent(in) :: grids(:)
+    integer :: n
+    call this%initialize()
+    n=min(size(calls),size(grids),10000)
+    if(allocated(this%workspace%calls)) then
+      if(size(this%workspace%calls)==n) then
+        if(all(this%workspace%calls==calls(:n)).and.all(this%workspace%grids==grids(:n))) return
+      endif
+      deallocate(this%workspace%calls,this%workspace%grids)
+    endif
+    allocate(this%workspace%calls(n),this%workspace%grids(n))
+    this%workspace%calls=calls(:n)
+    this%workspace%grids=grids(:n)
+    this%workspace%call_revision=this%workspace%call_revision+1
+  end subroutine
+
+  subroutine get_averages(this,entries,count)
+    class(jt65_decoder), intent(in) :: this
+    type(jt65_average_entry), intent(out) :: entries(:)
+    integer, intent(out) :: count
+    count=0
+    if(.not.associated(this%workspace)) return
+    if(.not.allocated(this%workspace%averages)) return
+    count=min(size(entries),this%workspace%average_count)
+    entries(:count)=this%workspace%averages(:count)
+    entries(:count)%dt=entries(:count)%dt-1.
+  end subroutine
+
+  subroutine decode_pcm(this,callback,samples,sample_count,options,input_id)
+    class(jt65_decoder), intent(inout) :: this
+    procedure(jt65_decode_callback) :: callback
+    integer(c_int16_t), intent(in) :: samples(:)
+    integer, intent(in) :: sample_count
+    type(jt65_options), intent(in) :: options
+    integer(c_int64_t), intent(in) :: input_id
+    integer :: n,depth,flags
+    call this%initialize()
+    if(.not.allocated(this%workspace%audio)) allocate(this%workspace%audio(NZMAX))
+    n=min(sample_count,size(samples),NZMAX)
+    if(n<=0) return
+    this%workspace%audio(:n)=samples(:n)
+    this%workspace%audio(n+1:)=0.
+    this%workspace%input_id=input_id
+    depth=options%effort
+    if(options%average) depth=ior(depth,16)
+    if(options%deep_search) depth=ior(depth,32)
+    if(options%auto_clear) depth=ior(depth,128)
+    flags=0
+    if(options%single_decode) flags=ior(flags,32)
+    if(options%vhf) flags=ior(flags,64)
+    call decode(this,callback,this%workspace%audio,min(n,52*12000),.true.,options%utc, &
+         options%low_frequency,options%high_frequency,options%receive_frequency,options%tolerance, &
+         options%submode,options%min_sync,options%repeat,options%passes,.false.,options%trials, &
+         options%aggressiveness,depth,0.,.false.,options%mycall,options%hiscall,options%hisgrid, &
+         flags,options%qso_progress,options%ap,prepared=.true.)
+  end subroutine
+
   subroutine decode(this,callback,dd0,npts,newdat,nutc,nf1,nf2,nfqso,     &
        ntol,nsubmode,minsync,nagain,n2pass,nrobust,ntrials,naggressive,   &
        ndepth,emedelay,clearave,mycall,hiscall,hisgrid,nexp_decode,       &
-       nQSOProgress,ljt65apon)
+       nQSOProgress,ljt65apon,prepared)
 
 !  Process dd0() data to find and decode JT65 signals.
 
@@ -57,8 +186,8 @@ contains
     character(len=12), intent(in) :: mycall, hiscall
     character(len=6), intent(in) :: hisgrid
 
-    real dd(NZMAX)
-    real ss(552,NSZ)
+    logical, optional, intent(in) :: prepared
+    type(jt65_workspace), pointer :: previous_work
     real savg(NSZ)
     real a(5)
     character*22 decoded,decoded0,avemsg,deepave
@@ -76,13 +205,12 @@ contains
        character*22 decoded
     end type accepted_decode
     type(accepted_decode) dec(50)
-    logical :: first_time,prtavg,single_decode,bVHF,clear_avg65
+    logical :: first_time,prtavg,single_decode,bVHF
 
     integer h0(0:11),d0(0:11)
     real r0(0:11)
     common/decstats/ntry65a,ntry65b,n65a,n65b,num9,numfano
     common/steve/thresh0
-    common/sync/ss
 
 !            0  1  2  3  4  5  6  7  8  9 10 11
     data h0/41,42,43,43,44,45,46,47,48,48,49,49/
@@ -90,17 +218,36 @@ contains
 
 !             0    1    2    3    4    5    6    7    8    9   10   11
     data r0/0.70,0.72,0.74,0.76,0.78,0.80,0.82,0.84,0.86,0.88,0.90,0.90/
-    data nutc0/-999/,nfreq0/-999/,nsave/0/,clear_avg65/.true./
-    save
 
+
+    call this%initialize()
+    if(.not.allocated(this%workspace%audio)) allocate(this%workspace%audio(NZMAX))
+    if(.not.allocated(this%workspace%spectra)) allocate(this%workspace%spectra(552,NSZ))
+    previous_work=>jt65_work
+    jt65_work=>this%workspace
+    associate(dd=>jt65_work%audio,ss=>jt65_work%spectra,nutc0=>jt65_work%utc0, &
+         nfreq0=>jt65_work%frequency0,nsave=>jt65_work%saved,nsum=>jt65_work%nsum, &
+         clear_avg65=>jt65_work%clear_average)
     this%callback => callback
     first_time=nrobust .and. (emedelay.eq.-999.9)    !Silence compiler warning
     first_time=newdat
-    dd=dd0
+    if(present(prepared)) then
+      if(.not.prepared) dd=dd0
+    else
+      dd=dd0
+      jt65_work%input_id=0
+    endif
+    neme=0
+    ndeepave=0
     ndecoded=0
     ndecoded0=0
     single_decode=iand(nexp_decode,32).ne.0 .or. nagain
     bVHF=iand(nexp_decode,64).ne.0
+    width=0.
+    if(jt65_work%submode/=nsubmode.or.jt65_work%profile/=merge(1,0,bVHF)) call this%clear_averages()
+    jt65_work%submode=nsubmode
+    jt65_work%profile=merge(1,0,bVHF)
+    if(clearave) call this%clear_averages()
 
     if(bVHF) then
       nvec=ntrials
@@ -108,10 +255,10 @@ contains
       if(n2pass.gt.1) npass=2
     else
       nvec=1000
-      if(ndepth.eq.1) then
+      if(iand(ndepth,3).eq.1) then
          npass=2
          nvec=100
-      elseif(ndepth.eq.2) then
+      elseif(iand(ndepth,3).eq.2) then
          npass=2
          nvec=1000
       else 
@@ -147,6 +294,7 @@ contains
        ss=0.
        call symspec65(dd,npts,nqsym,savg)    !Get normalized symbol spectra
        call timer('symsp65 ',1)
+       if(nqsym==0) exit
        nfa=nf1
        nfb=nf2
 
@@ -184,11 +332,7 @@ contains
        freq0=0.
        prtavg=.false.
        if(.not.nagain) nsum=0
-       if(clearave) then
-          nsum=0
-          nsave=0
-          clear_avg65=.true.
-       endif
+
 
        if(bVHF) then
 ! Be sure to search for shorthand message at nfqso +/- ntol
@@ -250,7 +394,7 @@ contains
 !             s2db=sync1 - 30.0 + db(width/3.3)       !### VHF/UHF/microwave
              if(nspecial.gt.0) s2db=sync2
           else
-             s2db=10.0*log10(sync2) - 35             !### Empirical (HF) 
+             s2db=10.0*log10(max(sync2,tiny(1.0))) - 35             !### Empirical (HF)
           endif
           nsnr=nint(s2db)
           if(nsnr.lt.-30) nsnr=-30
@@ -260,8 +404,11 @@ contains
           if(nft.ne.1 .and. iand(ndepth,16).eq.16 .and.                    &
                sync1.ge.float(minsync) .and. (.not.prtavg)) then
 ! Single-sequence FT decode failed, so try for an average FT decode.
-             if(nutc.ne.nutc0 .or. abs(nfreq-nfreq0).gt.ntol) then
+             if(clear_avg65.or.abs(nfreq-nfreq0).gt.ntol.or. &
+                  (jt65_work%input_id/=0.and.jt65_work%input_id/=jt65_work%last_average_input).or. &
+                  (jt65_work%input_id==0.and.nutc/=nutc0)) then
 ! This is a new minute or a new frequency, so call avg65.
+                jt65_work%last_average_input=jt65_work%input_id
                 nutc0=nutc
                 nfreq0=nfreq
                 nsave=nsave+1
@@ -342,7 +489,9 @@ contains
        if(ipass.gt.1 .and. ndecoded.eq.ndecoded0) exit
        ndecoded0=ndecoded
     enddo   ! ipass
-900 return
+900 continue
+    end associate
+    jt65_work=>previous_work
   end subroutine decode
 
   subroutine avg65(nutc,nsave,snrsync,dtxx,nflip,nfreq,mode65,ntol,ndepth,    &
@@ -355,24 +504,24 @@ contains
     parameter (MAXAVE=64)
     character*22 avemsg,deepave,deepbest
     character mycall*12,hiscall*12,hisgrid*6
-    character*1 csync,cused(64)
+    character*1 cused(64)
     logical nagain
     integer iused(64)
 ! Accumulated data for message averaging
-    integer iutc(MAXAVE)
-    integer nfsave(MAXAVE)
-    integer nflipsave(MAXAVE)
     real s1b(-255:256,126)
-    real s1save(-255:256,126,MAXAVE)
     real s2(66,126)
-    real s3save(64,63,MAXAVE)
     real s3b(64,63)
     real s3c(64,63)
-    real dtsave(MAXAVE)
-    real syncsave(MAXAVE)
-    logical first,clear_avg65,ljt65apon
-    data first/.true./
-    save
+    logical clear_avg65,ljt65apon
+    call ensure_jt65_workspace()
+    if(.not.allocated(jt65_work%history1)) then
+      allocate(jt65_work%history1(-255:256,126,MAXAVE),jt65_work%history3(64,63,MAXAVE))
+      allocate(jt65_work%averages(MAXAVE),jt65_work%reception_ids(MAXAVE))
+      clear_avg65=.true.
+    endif
+    associate(iutc=>jt65_work%averages%utc,nfsave=>jt65_work%averages%frequency, &
+         nflipsave=>jt65_work%averages%polarity,dtsave=>jt65_work%averages%dt, &
+         syncsave=>jt65_work%averages%sync,s1save=>jt65_work%history1,s3save=>jt65_work%history3)
 
     nftt=0
     avemsg='                      '
@@ -381,28 +530,32 @@ contains
     deepbest='                      '
     nfttbest=0
 
-    if(first .or. clear_avg65) then
+    if(clear_avg65) then
        iutc=-1
        nfsave=0
-       dtdiff=0.2
+       jt65_work%reception_ids=0
+       jt65_work%average_count=0
        s3save=0.
        s1save=0.
        nsave=1           !### ???
 ! Silence compiler warnings
        if(nagain .and. ndeepave.eq.-99 .and. neme.eq.-99) stop
-       first=.false.
        clear_avg65=.false.
     endif
 
     do i=1,64
        if(iutc(i).lt.0) exit
-       if(nutc.eq.iutc(i) .and. abs(nfreq-nfsave(i)).le.ntol) then
+       if(abs(nfreq-nfsave(i)).le.ntol.and. &
+            ((jt65_work%input_id/=0.and.jt65_work%reception_ids(i)==jt65_work%input_id).or. &
+            (jt65_work%input_id==0.and.nutc==iutc(i)))) then
           nsave=mod(nsave-2+MAXAVE,MAXAVE)+1
           go to 10
        endif
     enddo
 
 ! Save data for message averaging
+    jt65_work%reception_ids(nsave)=jt65_work%input_id
+    jt65_work%average_count=max(jt65_work%average_count,nsave)
     iutc(nsave)=nutc
     syncsave(nsave)=snrsync
     dtsave(nsave)=dtxx
@@ -421,9 +574,10 @@ contains
 
     do i=1,MAXAVE                               !Consider all saved spectra
        cused(i)='.'
+       jt65_work%averages(i)%used=.false.
        if(iutc(i).lt.0) exit
        if(mod(iutc(i),2).ne.mod(nutc,2)) cycle  !Use only same (odd/even) seq
-       if(abs(dtxx-dtsave(i)).gt.dtdiff) cycle  !DT must match
+       if(abs(dtxx-dtsave(i)).gt.0.2) cycle  !DT must match
        if(abs(nfreq-nfsave(i)).gt.ntol) cycle   !Freq must match
        if(nflipsave(i).eq.0) cycle              !No sync
        if(nflip.ne.nflipsave(i)) cycle          !Sync type (*/#) must match
@@ -434,6 +588,7 @@ contains
        dtsum=dtsum + dtsave(i)
        nfsum=nfsum + nfsave(i)
        cused(i)='$'
+       jt65_work%averages(i)%used=.true.
        nsum=nsum+1
        iused(nsum)=i
     enddo
@@ -448,13 +603,6 @@ contains
        fave=float(nfsum)/nsum
     endif
 
-    do i=1,nsave
-       csync=' '
-       if(nflipsave(i).lt.0.0) csync='#'
-       if(nflipsave(i).gt.0.0) csync='*'
-       write(14,1000) cused(i),iutc(i),syncsave(i),dtsave(i)-1.0,nfsave(i),csync
-1000   format(a1,i5.4,f6.1,f6.2,i6,1x,a1)
-    enddo
     if(nsum.lt.2) go to 900
 
     df=1378.125/512.0
@@ -526,7 +674,7 @@ contains
        nftt=nfttbest
     endif
 900 continue
-    
+    end associate
     return
   end subroutine avg65
 

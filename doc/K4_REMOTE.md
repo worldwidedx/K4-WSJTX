@@ -9,9 +9,9 @@ logging, reporting, and user workflow. It replaces the radio and local
 sound-card boundary with the Elecraft K4 Remote protocol learned and exercised
 in QK4 Mobile.
 
-The upstream baseline for this fork is commit
-`ccdfaf3c1c109010d15399674ce278167cfde848` from the official
-`https://github.com/WSJTX/wsjtx` repository.
+The upstream baseline for this fork is
+[WSJT-X 3.3.0-beta8](https://github.com/WSJTX/wsjtx/releases/tag/v3.3.0-beta8),
+commit `253133ec0fb52f5c97f013c60baf291981302587`.
 
 ## Connection settings
 

@@ -1,11 +1,14 @@
 subroutine ft8b(dd0,newdat,nQSOProgress,nfqso,nftx,ndepth,nzhsym,lapon,     &
      lapcqonly,napwid,lsubtract,nagain,ncontest,imetric,iaptype,mycall12,hiscall12, &
      f1,xdt,xbase,apsym,aph10,nharderrors,dmin,nbadcrc,ipass,               &
-     msg37,xsnr,itone)
+     msg37,xsnr,itone,knowledge,evidence)
 
   use crc
   use timer_module, only: timer
   use packjt77
+  use packjt77_schema, only: PACK77_TYPE1_RR73_TAIL
+  use ft8_codec_context, only: get_ft8_codec_state
+  use decoder_engine_types, only: ft8_signal_evidence,engine_payload_decoded
   include 'ft8_params.f90'
   parameter(NP2=2812)
   character*37 msg37
@@ -22,8 +25,12 @@ subroutine ft8b(dd0,newdat,nQSOProgress,nfqso,nftx,ndepth,nzhsym,lapon,     &
   integer*1 message77(77),message91(91),apmask(174),cw(174)
   integer apsym(58),aph10(10)
   integer mcq(29),mcqru(29),mcqfd(29),mcqtest(29),mcqww(29)
-  integer mrrr(19),m73(19),mrr73(19)
+  integer mrrr(19),m73(19)
+  integer, parameter :: mrr73(19)=2*PACK77_TYPE1_RR73_TAIL-1
   integer itone(NN)
+  type(pack77_state), target, optional, intent(inout) :: knowledge
+  type(pack77_state), pointer :: codec
+  type(ft8_signal_evidence), optional, intent(out) :: evidence
   integer icos7(0:6),ip(1)
   integer nappasses(0:5)  !Number of decoding passes to use for each QSO state
   integer naptypes(0:5,4) ! (nQSOProgress, decoding pass)  maximum of 4 passes for now
@@ -44,20 +51,25 @@ subroutine ft8b(dd0,newdat,nQSOProgress,nfqso,nftx,ndepth,nzhsym,lapon,     &
   data   mcqww/0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,0,0,1,1,0,1,1,1,1,0/
   data    mrrr/0,1,1,1,1,1,1,0,1,0,0,1,0,0,1,0,0,0,1/
   data     m73/0,1,1,1,1,1,1,0,1,0,0,1,0,1,0,0,0,0,1/
-  data   mrr73/0,1,1,1,1,1,1,0,0,1,1,1,0,1,0,1,0,0,1/
   data first/.true./
+  data ncontest0/-1/
   data graymap/0,1,3,2,5,6,4,7/
   save nappasses,naptypes,ncontest0,one
 
+  codec => get_ft8_codec_state()
+  if(present(knowledge)) codec => knowledge
+  if(present(evidence)) evidence=ft8_signal_evidence()
+
   if(first.or.(ncontest.ne.ncontest0)) then
-     mcq=2*mcq-1
-     mcqfd=2*mcqfd-1
-     mcqru=2*mcqru-1
-     mcqtest=2*mcqtest-1
-     mcqww=2*mcqww-1
-     mrrr=2*mrrr-1
-     m73=2*m73-1
-     mrr73=2*mrr73-1
+     if(first) then
+        mcq=2*mcq-1
+        mcqfd=2*mcqfd-1
+        mcqru=2*mcqru-1
+        mcqtest=2*mcqtest-1
+        mcqww=2*mcqww-1
+        mrrr=2*mrrr-1
+        m73=2*m73-1
+     endif
      nappasses(0)=2
      nappasses(1)=2
      nappasses(2)=2
@@ -91,8 +103,8 @@ subroutine ft8b(dd0,newdat,nQSOProgress,nfqso,nftx,ndepth,nzhsym,lapon,     &
      ncontest0=ncontest
   endif
 
-  dxcall13=hiscall12  ! initialize for use in packjt77
-  mycall13=mycall12
+  codec%dxcall13=hiscall12
+  codec%mycall13=mycall12
 
   max_iterations=30
   nharderrors=-1
@@ -451,7 +463,7 @@ subroutine ft8b(dd0,newdat,nQSOProgress,nfqso,nftx,ndepth,nzhsym,lapon,     &
      read(c77(75:77),'(b3)') i3
      if(i3.gt.5 .or. (i3.eq.0.and.n3.gt.6)) cycle
      if(i3.eq.0 .and. n3.eq.2) cycle
-     call unpack77(c77,1,msg37,unpk77_success)
+     call unpack77_for_state(codec,c77,1,msg37,unpk77_success)
      if(.not.unpk77_success .or. index(msg37,'/R').gt.0 .or.     &
           msg37(1:4).eq.'TU; ') then
         if(i3.ge.1 .and. i3.le.3 .and. ncontest.eq.0) cycle
@@ -488,6 +500,15 @@ subroutine ft8b(dd0,newdat,nQSOProgress,nfqso,nftx,ndepth,nzhsym,lapon,     &
        return
     endif
     if(xsnr .lt. -25.0) xsnr=-25.0
+    if(present(evidence)) then
+       evidence%payload77=message77
+       evidence%tones=int(itone,kind(evidence%tones))
+       evidence%payload_origin=engine_payload_decoded
+       evidence%has_tones=1
+       evidence%has_waveform_start=1
+       evidence%waveform_start_seconds=xdt
+       evidence%method=iaptype
+    endif
     return
   enddo
   return

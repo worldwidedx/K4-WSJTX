@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <cmath>
 #include <functional>
 #include <memory>
 
@@ -5,8 +7,11 @@
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
+#include <QScopedValueRollback>
 #include <QTest>
+#include <QSignalSpy>
 #include <QTimer>
+#include <QPointer>
 #include <QVector>
 
 #include "commons.h"
@@ -30,13 +35,13 @@ namespace
   using RigFactory = std::function<std::unique_ptr<Transceiver> (
     Transceiver::logger_type *, QString const&)>;
 
-  RigFactory legacy_rig_factory ()
+  RigFactory legacy_rig_factory (int poll_interval = 0)
   {
-    return [] (Transceiver::logger_type * logger, QString const& address)
+    return [poll_interval] (Transceiver::logger_type * logger, QString const& address)
       {
         return std::unique_ptr<Transceiver> {
           new TCITransceiver {logger, {}, QStringLiteral ("0"), address,
-                              true, 0}};
+                              true, poll_interval}};
       };
   }
 
@@ -75,7 +80,8 @@ namespace
       QObject::connect (&server_, &TciSimServer::client_arrived, &server_,
                         [this] (int)
                         {
-                          server_.send_text (startup_greeting ());
+                          if (startup_handler_) startup_handler_ (server_);
+                          else server_.send_text (startup_greeting ());
                         });
       QObject::connect (&server_, &TciSimServer::text_received, &server_,
                         [this] (QString const& text, int generation)
@@ -102,6 +108,7 @@ namespace
     bool start (unsigned sequence_number = 1)
     {
       auto const update_cursor = observations_.size ();
+      auto const failure_cursor = failures_.size ();
       auto const previous_generation = server_.connection_generation ();
       auto * rig = rig_.get ();
       QTimer::singleShot (0, rig,
@@ -110,15 +117,17 @@ namespace
                             rig->start (sequence_number);
                           });
       auto const completed = server_.wait_for (
-        [this, update_cursor, previous_generation, sequence_number]
+        [this, update_cursor, failure_cursor, previous_generation, sequence_number]
         {
-          return server_.client_connected ()
+          return failures_.size () > failure_cursor
+            || (server_.client_connected ()
             && server_.connection_generation () > previous_generation
             && observed_state_since (
               update_cursor, sequence_number,
-              [] (State const& state) {return state.online ();});
+              [] (State const& state) {return state.online ();}));
         }, 7000);
-      return completed && server_.client_connected ()
+      return completed && failures_.size () == failure_cursor
+        && server_.client_connected ()
         && server_.connection_generation () > previous_generation
         && observed_state_since (
           update_cursor, sequence_number,
@@ -179,6 +188,11 @@ namespace
     void set_command_handler (CommandHandler handler)
     {
       command_handler_ = std::move (handler);
+    }
+
+    void set_startup_handler (std::function<void (TciSimServer&)> handler)
+    {
+      startup_handler_ = std::move (handler);
     }
 
     TciSimServer& server () {return server_;}
@@ -361,6 +375,7 @@ namespace
     RigFactory factory_;
     std::unique_ptr<Transceiver> rig_;
     CommandHandler command_handler_;
+    std::function<void (TciSimServer&)> startup_handler_;
     QVector<StateObservation> observations_;
     QStringList failures_;
     State state_;
@@ -373,6 +388,189 @@ namespace
     state.online (true);
     return state;
   }
+
+  RigFactory clocked_rig_factory (qint64& now)
+  {
+    return [&now] (Transceiver::logger_type * logger, QString const& address)
+      {
+        return std::unique_ptr<Transceiver> {
+          new TCITransceiver {logger, {}, QStringLiteral ("0"), address,
+                              true, 0, nullptr, [&now] {return now;}}};
+      };
+  }
+
+  TxEvidence::TxRequest tune_request ()
+  {
+    TxEvidence::TxRequest request;
+    request.mode = "JTTY";
+    request.frames_per_symbol = 384;
+    request.tone_spacing = 0;
+    request.synchronize = false;
+    request.tuning = true;
+    return request;
+  }
+
+  class AudioProbe : public QObject
+  {
+  public:
+    explicit AudioProbe (RigHarness& harness)
+      : harness_ {harness}, requested {state_from (harness)}
+    {
+      connect (&harness.rig (), &Transceiver::tci_mod_active, this,
+               [this] (bool value) {active = value;});
+      connect (&harness.rig (), &Transceiver::txSourceCommitted, this,
+               [this] (TxEvidence::TxStartSnapshot const& value) {commitment = value;});
+      connect (&harness.rig (), &Transceiver::rawTxPlayoutSnapshot, this,
+               [this] (TxEvidence::TxRawPlayoutSnapshot const& value) {playout = value;});
+      connect (qobject_cast<TCITransceiver *> (&harness.rig ()),
+               &TCITransceiver::txChronoDiagnostic, this,
+               [this] (QString const& stage, qint64 bytes, qint64 expected)
+               {
+                 record_trace (stage, bytes, expected);
+               });
+      connect (&harness.server (), &TciSimServer::binary_received, this,
+               [this] (QByteArray const& data, int generation)
+               {
+                 if (tracing_)
+                   record_trace (QStringLiteral ("simulator received reply on generation %1")
+                                 .arg (generation), data.size ());
+                 if (generation != harness_.server ().connection_generation ()) return;
+                 packet = data;
+                 ++packets;
+               });
+      harness.server ().send_text (QStringLiteral ("protocol:Thetis,1.9"));
+    }
+
+    void apply () {harness_.set_now (requested, ++sequence_);}
+
+    void start (TxEvidence::TxRequest const& request, double period = 120)
+    {
+      requested.period (period);
+      requested.audio (true);
+      requested.tx_request (request);
+      apply ();
+      requested.ptt (true);
+      apply ();
+      requested.tune (request.tuning);
+      apply ();
+      requested.tx_audio (true);
+      apply ();
+    }
+
+    void stop ()
+    {
+      requested.tune (false);
+      apply ();
+      requested.tx_audio (false);
+      apply ();
+    }
+
+    bool pull (quint32 frames = 4096, quint32 channels = 2)
+    {
+      ++pulls_;
+      diagnostics_.clear ();
+      trace_.clear ();
+      QScopedValueRollback<bool> const tracing {tracing_, true};
+      elapsed_.start ();
+      auto const previous = packets;
+      auto const failure_cursor = harness_.failure_count ();
+      auto const scalar_count = quint64 (frames) * channels;
+      bool accepted {false};
+      auto const fail = [&] (QString const& stage) {
+        auto const * response = packets > previous ? TciStream::header (packet) : nullptr;
+        auto const framing = response
+          ? QString {"type=%1 receiver=%2 rate=%3 format=%4 codec=%5 channels=%6 length=%7 bytes=%8"}
+              .arg (response->type).arg (response->receiver).arg (response->sampleRate).arg (response->format)
+              .arg (response->codec).arg (response->channels).arg (response->length).arg (packet.size ())
+          : QString {"no response header; bytes=%1"}.arg (packets > previous ? packet.size () : 0);
+        diagnostics_ = QString {"%1: pull=%2 frames=%3 channels=%4 sendAccepted=%5 elapsedMs=%6 "
+                                "responses=%7 active=%8 writtenFrames=%9 servedFrames=%10 "
+                                "totalFrames=%11 playoutState=%12 playoutElapsedUs=%13\n%14\n"
+                                "Audio pull trace: %15\n%16"}
+          .arg (stage).arg (pulls_).arg (frames).arg (channels).arg (accepted).arg (elapsed_.elapsed ())
+          .arg (packets - previous).arg (active).arg (playout.successfully_written_frames)
+          .arg (playout.source_served_frames).arg (playout.source_total_frames)
+          .arg (int (playout.state)).arg (playout.elapsed_usecs)
+          .arg (framing, trace_.isEmpty () ? QStringLiteral ("none") : trace_.join (QStringLiteral ("; ")),
+                harness_.diagnostics ());
+        return false;
+      };
+      if ((channels != 1u && channels != 2u) || scalar_count > TciStream::MaxFloatSamples)
+        return fail (QStringLiteral ("invalid audio request"));
+      QByteArray chrono (int (TciStream::HeaderSize), '\0');
+      auto * header = TciStream::header (&chrono);
+      header->sampleRate = 48000;
+      header->format = TciStream::Float32Format;
+      header->type = TciStream::TxChrono;
+      header->length = frames * channels;
+      header->channels = channels;
+      auto const generation = harness_.server ().connection_generation ();
+      qint64 sent;
+      accepted = harness_.server ().send_binary (chrono, &sent);
+      record_trace (QStringLiteral ("simulator request send on generation %1").arg (generation),
+                    sent, chrono.size ());
+      if (!accepted) return fail (QStringLiteral ("request send rejected"));
+      if (!harness_.server ().wait_for ([&] {
+            return packets > previous || harness_.failure_count () > failure_cursor
+              || !harness_.server ().client_connected ();
+          }, 10000)) return fail (QStringLiteral ("response watchdog expired"));
+      if (harness_.failure_count () != failure_cursor)
+        return fail (QStringLiteral ("transceiver failed while awaiting response"));
+      if (!harness_.server ().client_connected ())
+        return fail (QStringLiteral ("connection lost while awaiting response"));
+      if (packets != previous + 1) return fail (QStringLiteral ("unexpected response count"));
+      auto const * response = TciStream::header (packet);
+      if (!response) return fail (QStringLiteral ("short response header"));
+      if (response->type != TciStream::TxAudioStream || response->receiver != header->receiver
+          || response->sampleRate != header->sampleRate || response->format != TciStream::Float32Format
+          || response->codec != TciStream::UncompressedCodec
+          || response->channels != channels || response->length != scalar_count
+          || packet.size () != int (TciStream::HeaderSize + scalar_count * sizeof (float)))
+        return fail (QStringLiteral ("invalid response framing"));
+      return true;
+    }
+
+    QString diagnostics () const {return diagnostics_;}
+
+    float sample (int frame, int channel = 0) const
+    {
+      return TciStream::float_payload (packet)[frame * TciStream::header (packet)->channels + channel];
+    }
+
+    double rms (int first = 0, int count = -1) const
+    {
+      auto const * header = TciStream::header (packet);
+      if (count < 0) count = int (header->length / header->channels) - first;
+      double energy {0};
+      for (int i = first; i < first + count; ++i) energy += sample (i) * sample (i);
+      return std::sqrt (energy / count);
+    }
+
+  private:
+    void record_trace (QString const& stage, qint64 bytes, qint64 expected = -1)
+    {
+      if (!tracing_ || trace_.size () >= 8) return;
+      auto entry = QStringLiteral ("%1 ms %2 bytes=%3").arg (elapsed_.elapsed ()).arg (stage).arg (bytes);
+      if (expected >= 0) entry += QStringLiteral ("/%1").arg (expected);
+      trace_.append (entry);
+    }
+
+    RigHarness& harness_;
+    unsigned sequence_ {100};
+    int pulls_ {0};
+    QString diagnostics_;
+    QStringList trace_;
+    QElapsedTimer elapsed_;
+    bool tracing_ {false};
+
+  public:
+    State requested;
+    bool active {false};
+    TxEvidence::TxStartSnapshot commitment;
+    TxEvidence::TxRawPlayoutSnapshot playout;
+    QByteArray packet;
+    int packets {0};
+  };
 }
 
 // The TCI object references application-owned DSP globals through wsjt_qt.
@@ -395,6 +593,436 @@ private slots:
   {
     Logger::disable ();
     qRegisterMetaType<Transceiver::TransceiverState> ();
+  }
+
+  void init ()
+  {
+    std::fill_n (itone, MAX_NUM_SYMBOLS, 0);
+  }
+
+  void tune_starts_independently_of_period_data ()
+  {
+    QTest::addColumn<qint64> ("now");
+    QTest::addColumn<double> ("period");
+    QTest::newRow ("cold-jtty-late") << qint64 (90000) << 120.0;
+    QTest::newRow ("cold-jtty-early") << qint64 (100) << 120.0;
+    QTest::newRow ("inherited-ft8-period") << qint64 (90000) << 15.0;
+  }
+
+  void tune_starts_independently_of_period ()
+  {
+    QFETCH (qint64, now);
+    QFETCH (double, period);
+    RigHarness harness {clocked_rig_factory (now)};
+    QVERIFY (harness.listen ());
+    QVERIFY2 (harness.start (), qPrintable (harness.diagnostics ()));
+    AudioProbe audio {harness};
+    audio.start (tune_request (), period);
+    QVERIFY2 (harness.state ().ptt (), qPrintable (harness.diagnostics ()));
+    QVERIFY (audio.active);
+    QCOMPARE (audio.commitment.committed_end_sample, qint64 (-1));
+    QVERIFY (!audio.commitment.target_known);
+    QVERIFY2 (audio.pull (), qPrintable (audio.diagnostics ()));
+    QVERIFY2 (audio.rms (256) > 0.6, "Tune must produce audio even late in a 120-second cycle");
+    QVERIFY (audio.rms (0, 32) < 0.03);
+    QVERIFY (audio.active);
+  }
+
+  void tune_continues_beyond_message_limit ()
+  {
+    qint64 now {100};
+    RigHarness harness {clocked_rig_factory (now)};
+    QVERIFY (harness.listen ());
+    QVERIFY (harness.start ());
+    AudioProbe audio {harness};
+    audio.start (tune_request ());
+    qint64 frames {0};
+    while (frames < 9999 * 384 + 48000)
+      {
+        now += 1000;
+        QVERIFY2 (audio.pull (), qPrintable (audio.diagnostics ()));
+        frames += 4096;
+        QVERIFY (audio.rms (256) > 0.69);
+        QVERIFY (audio.rms (256) < 0.72);
+        QVERIFY (audio.active);
+        QCOMPARE (audio.playout.successfully_written_frames, frames);
+        QCOMPARE (audio.playout.elapsed_usecs, (now - 100) * 1000);
+        QCOMPARE (audio.playout.source_total_frames, qint64 (-1));
+      }
+    QCOMPARE (audio.commitment.committed_end_sample, qint64 (-1));
+  }
+
+  void tune_metadata_and_channels_data ()
+  {
+    QTest::addColumn<int> ("channels");
+    QTest::addColumn<bool> ("synchronize");
+    QTest::addColumn<bool> ("fast");
+    QTest::addColumn<double> ("spacing");
+    QTest::newRow ("mono-unsynchronized") << 1 << false << false << 0.0;
+    QTest::newRow ("stereo-synchronized") << 2 << true << false << 0.0;
+    QTest::newRow ("mono-fast-negative-spacing") << 1 << true << true << -3.0;
+    QTest::newRow ("stereo-fast-negative-spacing") << 2 << false << true << -3.0;
+  }
+
+  void tune_metadata_and_channels ()
+  {
+    QFETCH (int, channels);
+    QFETCH (bool, synchronize);
+    QFETCH (bool, fast);
+    QFETCH (double, spacing);
+    qint64 now {90000};
+    RigHarness harness {clocked_rig_factory (now)};
+    QVERIFY (harness.listen ());
+    QVERIFY (harness.start ());
+    AudioProbe audio {harness};
+    auto request = tune_request ();
+    request.symbols_length = 0;
+    request.cw_id = {1, 0, 1};
+    request.fast_mode = fast;
+    request.synchronize = synchronize;
+    request.tone_spacing = spacing;
+    itone[0] = 2;
+    std::fill_n (foxcom_.wave, 4096, 0.0f);
+    audio.start (request);
+    QVERIFY2 (audio.pull (1024, channels), qPrintable (audio.diagnostics ()));
+    QVERIFY (audio.rms (0, 32) < 0.03);
+    double constexpr two_pi = 6.2831853071795864769;
+    double const frequency = request.frequency_hz
+      + 2 * (spacing == 0 ? 12000.0 / request.frames_per_symbol : spacing);
+    for (int i = 256; i < 1024; ++i)
+      {
+        auto const expected = 0.999 * std::sin (two_pi * frequency * (i + 1) / 48000);
+        QVERIFY (std::abs (audio.sample (i) - expected) < 0.0001);
+        if (channels == 2) QCOMPARE (audio.sample (i, 1), audio.sample (i));
+      }
+    audio.requested.trfrequency (1800);
+    audio.requested.txvolume (9);
+    audio.apply ();
+    QVERIFY2 (audio.pull (1024, channels), qPrintable (audio.diagnostics ()));
+    for (int i = 0; i < 1024; ++i)
+      {
+        auto const phase = two_pi * (frequency * 1024 + (frequency + 300) * (i + 1)) / 48000;
+        QVERIFY (std::abs (audio.sample (i) - 0.999 * 0.64 * std::sin (phase)) < 0.0001);
+      }
+    QVERIFY (audio.active);
+    QCOMPARE (audio.commitment.committed_end_sample, qint64 (-1));
+  }
+
+  void tune_stop_restart_preserves_jtty_queue ()
+  {
+    qint64 now {90000};
+    RigHarness harness {clocked_rig_factory (now)};
+    QVERIFY (harness.listen ());
+    QVERIFY (harness.start ());
+    AudioProbe audio {harness};
+    int progress_count {0};
+    int drain_count {0};
+    TxAudioQueueProgress progress;
+    connect (&harness.rig (), &Transceiver::jtty_progress, &audio,
+             [&] (TxAudioQueueProgress const& value) {progress = value; ++progress_count;});
+    connect (&harness.rig (), &Transceiver::jtty_drained, &audio,
+             [&] (TxAudioQueueDrainState const&) {++drain_count;});
+    QVector<qint16> pcm {12000, -12000, 6000, -6000};
+    TxAudioQueueEpoch const epoch {1};
+    harness.rig ().clear_jtty_pcm (epoch);
+    harness.rig ().enqueue_jtty_pcm (
+      QByteArray (reinterpret_cast<char const *> (pcm.constData ()), pcm.size () * sizeof (qint16)), epoch, 1);
+    audio.start (tune_request ());
+    for (int i = 0; i < 8; ++i)
+      {
+        now += 1000;
+        QVERIFY2 (audio.pull (), qPrintable (audio.diagnostics ()));
+        QVERIFY (audio.rms (256) > 0.6);
+        QVERIFY (QMetaObject::invokeMethod (&harness.rig (), "poll_jtty_drain", Qt::DirectConnection));
+        QCOMPARE (audio.playout.source_total_frames, qint64 (-1));
+      }
+    QCOMPARE (progress_count, 0);
+    QCOMPARE (drain_count, 0);
+    audio.requested.tune (false);
+    audio.apply ();
+    QVERIFY (!audio.active);
+    QCOMPARE (audio.playout.state, TxEvidence::TxBackendState::Idle);
+    QCOMPARE (audio.playout.source_total_frames, qint64 (-1));
+    QVERIFY2 (audio.pull (), qPrintable (audio.diagnostics ()));
+    QCOMPARE (audio.rms (), 0.0);
+    audio.requested.tx_audio (false);
+    audio.apply ();
+    audio.start (tune_request ());
+    QVERIFY2 (audio.pull (), qPrintable (audio.diagnostics ()));
+    QVERIFY (audio.rms (256) > 0.6);
+    audio.requested.tx_audio (false);
+    audio.apply ();
+    QVERIFY (!audio.active);
+    QVERIFY2 (audio.pull (), qPrintable (audio.diagnostics ()));
+    QCOMPARE (audio.rms (), 0.0);
+    audio.stop ();
+
+    auto request = tune_request ();
+    request.tuning = false;
+    audio.start (request);
+    now += 1000;
+    QVERIFY2 (audio.pull (), qPrintable (audio.diagnostics ()));
+    for (int i = 0; i < pcm.size (); ++i)
+      QVERIFY (std::abs (audio.sample (i) - 0.999 * pcm[i] / 32767) < 0.00004);
+    QCOMPARE (audio.rms (pcm.size ()), 0.0);
+    QCOMPARE (audio.playout.source_served_frames, qint64 (pcm.size ()));
+    QCOMPARE (audio.playout.source_total_frames, qint64 (pcm.size ()));
+    for (int i = 0; i < 6; ++i) QVERIFY2 (audio.pull (), qPrintable (audio.diagnostics ()));
+    QVERIFY (QMetaObject::invokeMethod (&harness.rig (), "poll_jtty_drain", Qt::DirectConnection));
+    QCOMPARE (drain_count, 1);
+    QVERIFY (progress_count > 0);
+    QCOMPARE (progress.served_samples, qint64 (pcm.size ()));
+    audio.stop ();
+    audio.start (tune_request ());
+    QVERIFY (audio.active);
+    harness.server ().send_text (QStringLiteral ("stop"));
+    QVERIFY (harness.server ().wait_for ([&] {return !audio.active;}, 1000));
+    QVERIFY (!audio.active);
+  }
+
+  void tune_preserves_pending_jtty_drain ()
+  {
+    qint64 now {100};
+    RigHarness harness {clocked_rig_factory (now)};
+    QVERIFY (harness.listen ());
+    QVERIFY (harness.start ());
+    AudioProbe audio {harness};
+    int drain_count {0};
+    TxAudioQueueDrainState drain;
+    connect (&harness.rig (), &Transceiver::jtty_drained, &audio,
+             [&] (TxAudioQueueDrainState const& value) {drain = value; ++drain_count;});
+    TxAudioQueueEpoch const epoch {7};
+    qint16 const pcm {12000};
+    harness.rig ().clear_jtty_pcm (epoch);
+    harness.rig ().enqueue_jtty_pcm (
+      QByteArray (reinterpret_cast<char const *> (&pcm), sizeof (pcm)), epoch, 1);
+    auto request = tune_request ();
+    request.tuning = false;
+    audio.start (request);
+
+    QByteArray chrono (int (TciStream::HeaderSize), '\0');
+    auto * header = TciStream::header (&chrono);
+    header->sampleRate = 48000;
+    header->format = TciStream::Float32Format;
+    header->type = TciStream::TxChrono;
+    header->length = 8192;
+    header->channels = 2;
+    // Keep the drain ready without dispatching the timer that delivers it.
+    for (int i = 0; i < 6; ++i)
+      QVERIFY (QMetaObject::invokeMethod (&harness.rig (), "onBinaryReceived",
+                                          Qt::DirectConnection, Q_ARG (QByteArray, chrono)));
+    audio.stop ();
+    audio.start (tune_request ());
+    QVERIFY (QMetaObject::invokeMethod (&harness.rig (), "poll_jtty_drain", Qt::DirectConnection));
+    QCOMPARE (drain_count, 0);
+    audio.stop ();
+    audio.start (request);
+    QVERIFY (QMetaObject::invokeMethod (&harness.rig (), "poll_jtty_drain", Qt::DirectConnection));
+    QCOMPARE (drain_count, 1);
+    QCOMPARE (drain.epoch.value (), epoch.value ());
+    QCOMPARE (drain.total_at_drain, qint64 (1));
+    QVERIFY (QMetaObject::invokeMethod (&harness.rig (), "poll_jtty_drain", Qt::DirectConnection));
+    QCOMPARE (drain_count, 1);
+  }
+
+  void timed_ft8_retains_start_offset_and_finite_waveform_data ()
+  {
+    QTest::addColumn<qint64> ("now");
+    QTest::addColumn<bool> ("synchronize");
+    QTest::addColumn<int> ("silent");
+    QTest::addColumn<int> ("offset");
+    QTest::newRow ("early-synchronized") << qint64 (100) << true << 19200 << 0;
+    QTest::newRow ("late-synchronized") << qint64 (1000) << true << 0 << 24000;
+    QTest::newRow ("late-unsynchronized") << qint64 (1000) << false << 0 << 24000;
+    QTest::newRow ("early-unsynchronized") << qint64 (100) << false << 0 << 0;
+  }
+
+  void timed_ft8_retains_start_offset_and_finite_waveform ()
+  {
+    QFETCH (qint64, now);
+    QFETCH (bool, synchronize);
+    QFETCH (int, silent);
+    QFETCH (int, offset);
+    qint64 constexpr endpoint = 79 * 4 * 1920;
+    for (int i = 0; i <= endpoint; ++i) foxcom_.wave[i] = 0.2f + 0.1f * (i % 17) / 16;
+    RigHarness harness {clocked_rig_factory (now)};
+    QVERIFY (harness.listen ());
+    QVERIFY (harness.start ());
+    AudioProbe audio {harness};
+    TxEvidence::TxRequest request;
+    request.synchronize = synchronize;
+    audio.start (request, 15);
+    QCOMPARE (audio.commitment.committed_end_sample, silent + endpoint - offset);
+    QVERIFY (audio.commitment.target_known);
+    qint64 position {0};
+    while (position < silent + endpoint - offset + 8192)
+      {
+        QVERIFY2 (audio.pull (), qPrintable (audio.diagnostics ()));
+        for (int i = 0; i < 4096; ++i)
+          {
+            qint64 const source = position + i - silent + offset;
+            double const expected = position + i < silent || source > endpoint
+              ? 0 : 0.999 * foxcom_.wave[source];
+            QVERIFY (std::abs (audio.sample (i) - expected) < 0.00004);
+          }
+        position += 4096;
+      }
+    QCOMPARE (audio.rms (), 0.0);
+    audio.stop ();
+    QVERIFY (!audio.active);
+  }
+
+  void fast_message_retains_fade_and_finite_ending ()
+  {
+    qint64 now {0};
+    RigHarness harness {clocked_rig_factory (now)};
+    QVERIFY (harness.listen ());
+    QVERIFY (harness.start ());
+    AudioProbe audio {harness};
+    TxEvidence::TxRequest request;
+    request.mode = "MSK144";
+    request.frames_per_symbol = 6;
+    request.symbols_length = 144;
+    request.tone_spacing = 0;
+    request.fast_mode = true;
+    request.tr_period_s = 3;
+    request.synchronize = false;
+    audio.start (request, 15);
+    QCOMPARE (audio.commitment.committed_end_sample, qint64 (120000));
+    for (int i = 0; i < 29; ++i) QVERIFY2 (audio.pull (), qPrintable (audio.diagnostics ()));
+    QVERIFY (audio.rms () > 0.69);
+    QVERIFY2 (audio.pull (), qPrintable (audio.diagnostics ()));
+    QVERIFY (audio.rms (0, 256) > 0.69);
+    QVERIFY (audio.rms (960, 256) < 0.01);
+    QCOMPARE (audio.rms (1217), 0.0);
+    QVERIFY2 (audio.pull (), qPrintable (audio.diagnostics ()));
+    QCOMPARE (audio.rms (), 0.0);
+  }
+
+  void message_cw_continuation_finishes ()
+  {
+    qint64 now {999};
+    RigHarness harness {clocked_rig_factory (now)};
+    QVERIFY (harness.listen ());
+    QVERIFY (harness.start ());
+    AudioProbe audio {harness};
+    TxEvidence::TxRequest request;
+    request.mode = "JT9";
+    request.frames_per_symbol = 384;
+    request.symbols_length = 1;
+    request.tone_spacing = 0;
+    request.cw_id = {1, 1};
+    audio.start (request);
+    QCOMPARE (audio.commitment.committed_end_sample, qint64 (-1));
+    QVERIFY2 (audio.pull (48), qPrintable (audio.diagnostics ()));
+    QCOMPARE (audio.rms (), 0.0);
+    QVERIFY2 (audio.pull (1537), qPrintable (audio.diagnostics ()));
+    QVERIFY (audio.rms (256) > 0.6);
+    QVERIFY2 (audio.pull (4096), qPrintable (audio.diagnostics ()));
+    QVERIFY (audio.rms (2048) > 0.6);
+    QVERIFY (audio.active);
+    QVERIFY2 (audio.pull (2048), qPrintable (audio.diagnostics ()));
+    QVERIFY (!audio.active);
+    QCOMPARE (audio.playout.state, TxEvidence::TxBackendState::Idle);
+    QCOMPARE (audio.rms (1023), 0.0);
+  }
+
+  void startup_waits_for_power_after_ready_data ()
+  {
+    QTest::addColumn<QString> ("greeting_end");
+    QTest::addColumn<int> ("start_delay_ms");
+    QTest::addColumn<QString> ("interim_message");
+    QTest::newRow ("start-before-ready") << QStringLiteral ("start;ready;") << -1 << QString {};
+    QTest::newRow ("ready-before-start-same-frame") << QStringLiteral ("ready;start;") << -1 << QString {};
+    QTest::newRow ("ready-before-start-separate-frames") << QStringLiteral ("ready;") << 50 << QString {};
+    QTest::newRow ("repeated-ready-before-start") << QStringLiteral ("ready;") << 50 << QStringLiteral ("ready;");
+    QTest::newRow ("stop-before-start") << QStringLiteral ("ready;") << 50 << QStringLiteral ("stop;");
+    QTest::newRow ("start-without-ready") << QStringLiteral ("start;") << -1 << QString {};
+  }
+
+  void startup_waits_for_power_after_ready ()
+  {
+    QFETCH (QString, greeting_end);
+    QFETCH (int, start_delay_ms);
+    QFETCH (QString, interim_message);
+    auto greeting = TciSimScript::greeting_messages (TciSimGreeting::Thetis);
+    greeting.removeAll (QStringLiteral ("start"));
+    greeting.removeAll (QStringLiteral ("ready"));
+    auto const initial_frame = greeting.join (';') + ';' + greeting_end;
+    RigHarness harness;
+    harness.set_startup_handler (
+      [initial_frame, start_delay_ms, interim_message] (TciSimServer& server)
+      {
+        server.send_text (initial_frame);
+        if (!interim_message.isEmpty ())
+          server.send_text_later (interim_message, 10);
+        if (start_delay_ms >= 0)
+          server.send_text_later (QStringLiteral ("start;"), start_delay_ms);
+      });
+    QVERIFY (harness.listen ());
+    QVERIFY2 (harness.start (), qPrintable (harness.diagnostics ()));
+    QVERIFY (harness.state ().online ());
+    QCOMPARE (harness.failure_count (), 0);
+  }
+
+  void startup_without_power_remains_offline ()
+  {
+    RigHarness harness;
+    harness.set_startup_handler ([] (TciSimServer& server)
+      {
+        server.send_text (QStringLiteral ("protocol:Thetis,1.6;ready;"));
+        server.send_text_later (QStringLiteral ("ready;"), 20);
+      });
+    QVERIFY (harness.listen ());
+    QElapsedTimer elapsed;
+    elapsed.start ();
+    QVERIFY (!harness.start ());
+    QVERIFY2 (harness.diagnostics ().contains ("failure=TCI SDR is not switched on"),
+              qPrintable (harness.diagnostics ()));
+    QVERIFY (!harness.state ().online ());
+    QCOMPARE (harness.server ().count (Direction::ClientToServer, "start"), 0);
+    QVERIFY (elapsed.elapsed () < 4000);
+  }
+
+  void startup_can_request_power_after_ready ()
+  {
+    RigHarness harness {legacy_rig_factory (rig__power)};
+    harness.set_startup_handler ([] (TciSimServer& server)
+      {
+        auto greeting = TciSimScript::greeting_messages (TciSimGreeting::Thetis);
+        greeting.removeAll (QStringLiteral ("start"));
+        server.send_text (greeting.join (';') + ';');
+      });
+    harness.set_command_handler ([&harness] (QString const& verb, QStringList const&, int)
+      {
+        if (verb != "start") return false;
+        harness.server ().send_text (QStringLiteral ("ready;"));
+        harness.server ().send_text_later (QStringLiteral ("start;"), 50);
+        return true;
+      });
+    QVERIFY (harness.listen ());
+    QVERIFY2 (harness.start (), qPrintable (harness.diagnostics ()));
+    QVERIFY (harness.state ().online ());
+    QCOMPARE (harness.failure_count (), 0);
+    QCOMPARE (harness.server ().count (Direction::ClientToServer, "start"), 1);
+  }
+
+  void startup_disconnect_before_power_remains_offline ()
+  {
+    RigHarness harness;
+    harness.set_startup_handler ([] (TciSimServer& server)
+      {
+        server.send_text (QStringLiteral ("protocol:Thetis,1.6;ready;"));
+        QTimer::singleShot (20, &server, [&server] {server.close_client ();});
+      });
+    QVERIFY (harness.listen ());
+    QVERIFY (!harness.start ());
+    QVERIFY (!harness.state ().online ());
+    QCOMPARE (harness.failure_count (), 1);
+    auto const diagnostics = harness.diagnostics ();
+    QVERIFY2 (diagnostics.contains ("failure=TCI connection closed during startup")
+              || diagnostics.contains ("failure=TCI websocket error: RemoteHostClosed"),
+              qPrintable (diagnostics));
   }
 
   void startup_adopts_greeting_and_preserves_framing ()
@@ -427,6 +1055,65 @@ private slots:
     QVERIFY2 (device >= 0 && rx_vfo > device && mode > rx_vfo
               && ready > mode,
               qPrintable (harness.diagnostics ()));
+  }
+
+  void queued_playout_snapshots_preserve_source_identity_across_restarts ()
+  {
+    RigHarness harness;
+    QVERIFY (harness.listen ());
+    QVERIFY2 (harness.start (), qPrintable (harness.diagnostics ()));
+
+    QVector<TxEvidence::TxStartSnapshot> commitments;
+    QVector<TxEvidence::TxRawPlayoutSnapshot> snapshots;
+    QObject receiver;
+    qRegisterMetaType<TxEvidence::TxRawPlayoutSnapshot> ();
+    connect (&harness.rig (), &Transceiver::txSourceCommitted, &receiver,
+             [&] (TxEvidence::TxStartSnapshot const& snapshot) {
+               commitments.append (snapshot);
+             });
+    connect (&harness.rig (), &Transceiver::rawTxPlayoutSnapshot, &receiver,
+             [&] (TxEvidence::TxRawPlayoutSnapshot const& snapshot) {
+               snapshots.append (snapshot);
+             }, Qt::QueuedConnection);
+
+    auto requested = state_from (harness);
+    requested.period (15.0);
+    requested.synchronize (false);
+    requested.tx_session_id (TxEvidence::TxSessionId {101});
+    requested.tx_generation (TxEvidence::TxGeneration {201});
+    requested.tx_audio (true);
+    harness.set_now (requested, 80);
+    requested.tx_audio (false);
+    requested.quick (true);
+    harness.set_now (requested, 81);
+    requested.tx_session_id (TxEvidence::TxSessionId {102});
+    requested.tx_generation (TxEvidence::TxGeneration {202});
+    requested.tx_audio (true);
+    harness.set_now (requested, 82);
+    requested.tx_audio (false);
+    harness.set_now (requested, 83);
+
+    QCOMPARE (commitments.size (), 2);
+    QVERIFY (harness.server ().wait_for ([&] {return snapshots.size () >= 4;}, 1000));
+    QCOMPARE (snapshots.size (), 4);
+    for (int index = 0; index != 4; ++index)
+      {
+        auto const& snapshot = snapshots.at (index);
+        auto const& commitment = commitments.at (index / 2);
+        QCOMPARE (snapshot.context.session_id, commitment.session_id);
+        QCOMPARE (snapshot.context.generation, commitment.generation);
+        QVERIFY (snapshot.context.isValid ());
+        QCOMPARE (snapshot.start_event, index % 2 == 0);
+        QCOMPARE (snapshot.state, index % 2 == 0
+                  ? TxEvidence::TxBackendState::Active : TxEvidence::TxBackendState::Idle);
+        QCOMPARE (snapshot.tier, TxEvidence::TxPlayoutTier::DeadReckoning);
+      }
+    QCOMPARE (snapshots.at (0).context.session_id, TxEvidence::TxSessionId {101});
+    QCOMPARE (snapshots.at (2).context.session_id, TxEvidence::TxSessionId {102});
+    QCOMPARE (snapshots.at (0).backend_start_sequence, snapshots.at (1).backend_start_sequence);
+    QCOMPARE (snapshots.at (2).backend_start_sequence, snapshots.at (3).backend_start_sequence);
+    QVERIFY (snapshots.at (2).backend_start_sequence > snapshots.at (0).backend_start_sequence);
+    QCOMPARE (harness.failure_count (), 0);
   }
 
   void rx_vfo_acknowledgement_precedes_dependent_mode ()
@@ -485,6 +1172,93 @@ private slots:
               vfo_count);
     QCOMPARE (server.count (Direction::ClientToServer,
                             QStringLiteral ("modulation")), mode_count);
+  }
+
+  void unsolicited_mode_survives_frequency_maintenance_until_explicit_restore ()
+  {
+    RigHarness harness;
+    QVERIFY (harness.listen ());
+    QVERIFY2 (harness.start (), qPrintable (harness.diagnostics ()));
+    auto digital = state_from (harness);
+    digital.mode (Transceiver::DIG_U);
+    auto cursor = harness.set (digital, 10);
+    QVERIFY2 (harness.wait_for_state (cursor, 10, [] (State const& state) {
+      return state.mode () == Transceiver::DIG_U;
+    }), qPrintable (harness.diagnostics ()));
+    QTest::qWait (1600);
+    auto& server = harness.server ();
+    auto const mode_commands = server.count (Direction::ClientToServer, "modulation");
+    QSignalSpy statuses {&harness.rig (), &Transceiver::mode_status};
+    server.send_text ("modulation:0,cw");
+    QVERIFY2 (harness.wait_for_current_state ([] (State const& state) {
+      return state.mode () == Transceiver::CW;
+    }, 2000), qPrintable (harness.diagnostics ()));
+    QCOMPARE (server.count (Direction::ClientToServer, "modulation"), mode_commands);
+    QVERIFY (!statuses.isEmpty ());
+    auto const observed = qvariant_cast<Transceiver::ModeStatus> (statuses.last ().at (0));
+    QCOMPARE (observed.kind, Transceiver::ModeStatusKind::Observed);
+    QCOMPARE (observed.mode, Transceiver::CW);
+
+    auto correction = state_from (harness);
+    correction.frequency (correction.frequency () + 1);
+    correction.mode (Transceiver::UNK);
+    cursor = harness.set (correction, 11);
+    QVERIFY2 (harness.wait_for_state (cursor, 11, [&] (State const& state) {
+      return state.frequency () == correction.frequency () && state.mode () == Transceiver::CW;
+    }), qPrintable (harness.diagnostics ()));
+    QCOMPARE (server.count (Direction::ClientToServer, "modulation"), mode_commands);
+
+    digital = state_from (harness);
+    digital.mode (Transceiver::DIG_U);
+    cursor = harness.set (digital, 12);
+    QVERIFY2 (harness.wait_for_state (cursor, 12, [] (State const& state) {
+      return state.mode () == Transceiver::DIG_U;
+    }), qPrintable (harness.diagnostics ()));
+    QCOMPARE (server.count (Direction::ClientToServer, "modulation"), mode_commands + 1);
+    QCOMPARE (harness.failure_count (), 0);
+  }
+
+  void mode_preparation_conflict_keeps_connection_available_for_recovery ()
+  {
+    RigHarness harness;
+    QVERIFY (harness.listen ());
+    QVERIFY2 (harness.start (), qPrintable (harness.diagnostics ()));
+    auto& server = harness.server ();
+    server.send_text ("modulation:0,cw");
+    QVERIFY2 (harness.wait_for_current_state ([] (State const& state) {
+      return state.mode () == Transceiver::CW;
+    }, 2000), qPrintable (harness.diagnostics ()));
+    QSignalSpy statuses {&harness.rig (), &Transceiver::mode_status};
+    harness.set_command_handler ([&server] (QString const& verb, QStringList const&, int) {
+      if (verb != "modulation") return false;
+      server.send_text_later ("modulation:0,cw", 10);
+      return true;
+    });
+    auto digital = state_from (harness);
+    digital.mode (Transceiver::DIG_U);
+    auto const command_start = server.count (Direction::ClientToServer, "modulation");
+    harness.set (digital, 10);
+    QVERIFY2 (server.wait_for ([&statuses] {
+      if (statuses.isEmpty ()) return false;
+      auto const status = qvariant_cast<Transceiver::ModeStatus> (statuses.last ().at (0));
+      return status.kind == Transceiver::ModeStatusKind::Observed && status.mode == Transceiver::CW;
+    }, 3000), qPrintable (harness.diagnostics ()));
+    QCOMPARE (harness.failure_count (), 0);
+    QVERIFY (harness.state ().online ());
+    QCOMPARE (server.count (Direction::ClientToServer, "modulation"), command_start + 1);
+    QTest::qWait (600);
+    QCOMPARE (server.count (Direction::ClientToServer, "modulation"), command_start + 1);
+    QCOMPARE (harness.failure_count (), 0);
+
+    harness.set_command_handler ({});
+    digital = state_from (harness);
+    digital.mode (Transceiver::DIG_U);
+    auto const cursor = harness.set (digital, 11);
+    QVERIFY2 (harness.wait_for_state (cursor, 11, [] (State const& state) {
+      return state.mode () == Transceiver::DIG_U;
+    }), qPrintable (harness.diagnostics ()));
+    QCOMPARE (harness.failure_count (), 0);
+    QVERIFY (harness.state ().online ());
   }
 
   void unacknowledged_rx_vfo_fails_boundedly_without_dependent_commands ()
@@ -904,6 +1678,147 @@ private slots:
     QCOMPARE (harness.failure_count (), failure_cursor);
     QCOMPARE (harness.state ().frequency (), latest_target);
     QVERIFY (reentered);
+  }
+
+  void frequency_contract_requires_matching_vfo_evidence ()
+  {
+    using namespace RigFrequency;
+    RigHarness harness;
+    QVERIFY (harness.listen ());
+    QVERIFY2 (harness.start (), qPrintable (harness.diagnostics ()));
+    QSignalSpy results {&harness.rig (), &Transceiver::frequency_result};
+    QSignalSpy evidence {&harness.rig (), &Transceiver::frequency_observation};
+    harness.set_command_handler (
+      [&harness] (QString const& verb, QStringList const& args, int)
+      {
+        if (verb != QStringLiteral ("vfo")
+            || args != QStringList {"0", "0", "14074400"}) return false;
+        harness.server ().send_text (QStringLiteral ("vfo:0,0,14074399"));
+        harness.server ().send_text_later (QStringLiteral ("vfo:0,0,14074400"), 10);
+        return true;
+      });
+    auto state = state_from (harness);
+    state.frequency (14074400);
+    state.frequency_request ({7, 500, Path::Rx, 14074400});
+    harness.set_now (state, 25);
+    QVERIFY (results.size () >= 2);
+    auto result = qvariant_cast<Result> (results.last ().at (0));
+    QCOMPARE (result.request.generation, quint64 {7});
+    QCOMPARE (result.request.id, quint64 {500});
+    QCOMPARE (result.outcome, Outcome::Established);
+    QCOMPARE (result.basis, Basis::Readback);
+    QCOMPARE (result.applied, Frequency {14074400});
+    QVERIFY (evidence.size () >= 2);
+    for (auto const& arguments : results)
+      {
+        result = qvariant_cast<Result> (arguments.at (0));
+        if (result.outcome == Outcome::Established)
+          QCOMPARE (result.applied, Frequency {14074400});
+      }
+  }
+
+  void nearby_unacknowledged_frequency_is_a_failed_operation ()
+  {
+    using namespace RigFrequency;
+    RigHarness harness;
+    QVERIFY (harness.listen ());
+    QVERIFY2 (harness.start (), qPrintable (harness.diagnostics ()));
+    QSignalSpy results {&harness.rig (), &Transceiver::frequency_result};
+    harness.set_command_handler (
+      [&harness] (QString const& verb, QStringList const& args, int)
+      {
+        if (verb != QStringLiteral ("vfo")
+            || args != QStringList {"0", "0", "14074450"}) return false;
+        harness.server ().send_text (QStringLiteral ("vfo:0,0,14074449"));
+        return true;
+      });
+    auto state = state_from (harness);
+    state.frequency (14074450);
+    state.frequency_request ({8, 501, Path::Rx, 14074450});
+    harness.set_now (state, 26);
+    QVERIFY (results.size () >= 2);
+    auto const result = qvariant_cast<Result> (results.last ().at (0));
+    QCOMPARE (result.request.id, quint64 {501});
+    QCOMPARE (result.outcome, Outcome::Failed);
+    for (auto const& arguments : results)
+      QVERIFY (qvariant_cast<Result> (arguments.at (0)).outcome != Outcome::Established);
+  }
+
+  void repeated_mismatched_tx_reports_cannot_extend_the_deadline ()
+  {
+    using namespace RigFrequency;
+    RigHarness harness;
+    QVERIFY (harness.listen ());
+    QVERIFY2 (harness.start (), qPrintable (harness.diagnostics ()));
+    QSignalSpy results {&harness.rig (), &Transceiver::frequency_result};
+    struct WaitObservation
+    {
+      bool first_timeout {false};
+      bool completed {false};
+      bool observed {false};
+      bool within_remaining_budget {false};
+    };
+    auto const wait = std::make_shared<WaitObservation> ();
+    connect (&harness.rig (), &Transceiver::frequency_result, &harness.server (),
+      [wait] (Result const& result)
+      {
+        if (result.request.id == 502 && result.outcome == Outcome::Failed)
+          wait->completed = true;
+      });
+    int mismatches_processed = 0;
+    bool initial_wait_within_budget = false;
+    harness.set_command_handler (
+      [&harness, &mismatches_processed, &initial_wait_within_budget, wait] (QString const& verb, QStringList const& args, int)
+      {
+        if (verb != QStringLiteral ("vfo")
+            || args != QStringList {"0", "1", "14074500"}) return false;
+        auto& rig = static_cast<TCITransceiver&> (harness.rig ());
+        auto * timer = rig.tci_timer2_;
+        initial_wait_within_budget = timer->isActive ()
+          && timer->interval () > 0 && timer->interval () <= 1000;
+        if (!initial_wait_within_budget) return true;
+        // An early wakeup must retain the operation's absolute deadline.
+        timer->setInterval (250);
+        auto * context = &harness.server ();
+        connect (timer, &QTimer::timeout, context,
+          [wait, context, timer = QPointer<QTimer> {timer}]
+          {
+            if (wait->first_timeout) return;
+            wait->first_timeout = true;
+            QTimer::singleShot (0, context, [wait, timer]
+              {
+                // Observe after the nested wait has either rearmed or completed.
+                wait->within_remaining_budget = wait->completed
+                  || (timer && timer->isActive () && timer->interval () > 0
+                      && timer->interval () <= 900);
+                wait->observed = true;
+              });
+          });
+        auto const timer_id = timer->timerId ();
+        auto const interval = timer->interval ();
+        for (int i = 0; i < 30; ++i)
+          {
+            if (!QMetaObject::invokeMethod (&rig, "onMessageReceived", Qt::DirectConnection,
+                  Q_ARG (QString, QStringLiteral ("vfo:0,1,14074499")))) return true;
+            if (!timer->isActive () || timer->timerId () != timer_id
+                || timer->interval () != interval) return true;
+            ++mismatches_processed;
+          }
+        return true;
+      });
+    auto state = state_from (harness);
+    state.tx_frequency (14074500);
+    state.split (true);
+    state.frequency_request ({9, 502, Path::Tx, 14074500});
+    harness.set_now (state, 27);
+    QVERIFY (initial_wait_within_budget);
+    QCOMPARE (mismatches_processed, 30);
+    QTRY_VERIFY_WITH_TIMEOUT (wait->observed, 10000);
+    QVERIFY (wait->within_remaining_budget);
+    QVERIFY (results.size () >= 2);
+    auto const result = qvariant_cast<Result> (results.last ().at (0));
+    QCOMPARE (result.request.id, quint64 {502});
+    QCOMPARE (result.outcome, Outcome::Failed);
   }
 };
 

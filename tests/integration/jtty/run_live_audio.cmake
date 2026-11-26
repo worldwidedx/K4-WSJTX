@@ -4,8 +4,24 @@ foreach (required_variable SJTTY WSJTX WORK_DIR EXPECTED)
   endif ()
 endforeach ()
 
+if (NOT DEFINED AUDIO_SPEED)
+  set (AUDIO_SPEED 4)
+endif ()
+if (NOT AUDIO_SPEED MATCHES "^[1-4]$")
+  message (FATAL_ERROR "AUDIO_SPEED must be an integer from 1 through 4")
+endif ()
+if (NOT DEFINED TEST_ID)
+  set (TEST_ID "test_wsjtx_live_audio_jtty")
+endif ()
+if (NOT TEST_ID MATCHES "^[A-Za-z0-9_-]+$")
+  message (FATAL_ERROR "TEST_ID must contain only letters, digits, underscores, or hyphens")
+endif ()
+
+string (RANDOM LENGTH 12 ALPHABET 0123456789abcdef run_id)
+set (rig_name "CTEST-JTTY-${run_id}-LIVE")
+
 set (ipc_dir "${WORK_DIR}-ipc")
-file (REMOVE_RECURSE "${WORK_DIR}")
+file (REMOVE_RECURSE "${WORK_DIR}" "${ipc_dir}")
 file (MAKE_DIRECTORY
   "${WORK_DIR}/config"
   "${WORK_DIR}/data"
@@ -17,9 +33,12 @@ execute_process (
     "CQ TEST DE KA1ABC LIVE AUDIO SMOKE TEST"
     1500 0.25 AW 0 384 1 99
   WORKING_DIRECTORY "${WORK_DIR}"
+  TIMEOUT 20
   RESULT_VARIABLE generator_result
   OUTPUT_VARIABLE generator_stdout
   ERROR_VARIABLE generator_stderr)
+file (WRITE "${WORK_DIR}/generator.stdout.log" "${generator_stdout}")
+file (WRITE "${WORK_DIR}/generator.stderr.log" "${generator_stderr}")
 if (NOT generator_result STREQUAL "0")
   message (FATAL_ERROR
     "sjtty failed with exit code ${generator_result}\n"
@@ -40,9 +59,22 @@ set (wsjtx_environment
   "XDG_CONFIG_HOME=${WORK_DIR}/config"
   "XDG_DATA_HOME=${WORK_DIR}/data"
   "XDG_CACHE_HOME=${WORK_DIR}/cache"
-  "WSJT_QMAP_SHARED_MEMORY_KEY=mem_qmap-test_wsjtx_live_audio_jtty")
+  "WSJT_QMAP_SHARED_MEMORY_KEY=mem_qmap-${TEST_ID}")
 if (NOT APPLE)
   list (APPEND wsjtx_environment "TMPDIR=${ipc_dir}")
+endif ()
+if (WIN32)
+  list (APPEND wsjtx_environment
+    "APPDATA=${WORK_DIR}/config"
+    "LOCALAPPDATA=${WORK_DIR}/data"
+    "TEMP=${ipc_dir}"
+    "TMP=${ipc_dir}")
+endif ()
+
+if (WIN32)
+  set (wsjtx_timeout 180)
+else ()
+  set (wsjtx_timeout 110)
 endif ()
 
 execute_process (
@@ -51,11 +83,15 @@ execute_process (
     "${WSJTX}"
     --jtty-live-audio-test "${fixture}"
     --jtty-live-audio-expected "${EXPECTED}"
-    --rig-name CTEST-LIVE-AUDIO-JTTY
+    --test-audio-speed "${AUDIO_SPEED}"
+    --rig-name "${rig_name}"
   WORKING_DIRECTORY "${WORK_DIR}"
+  TIMEOUT ${wsjtx_timeout}
   RESULT_VARIABLE wsjtx_result
   OUTPUT_VARIABLE wsjtx_stdout
   ERROR_VARIABLE wsjtx_stderr)
+file (WRITE "${WORK_DIR}/receive.stdout.log" "${wsjtx_stdout}")
+file (WRITE "${WORK_DIR}/receive.stderr.log" "${wsjtx_stderr}")
 if (NOT wsjtx_result STREQUAL "0")
   message (FATAL_ERROR
     "WSJT-X JTTY live-audio smoke test failed with exit code ${wsjtx_result}\n"

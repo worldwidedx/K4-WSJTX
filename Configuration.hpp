@@ -2,6 +2,7 @@
 #define CONFIGURATION_HPP_
 
 #include <QObject>
+#include <functional>
 #include <QByteArray>
 #include <QFont>
 #include <QString>
@@ -16,6 +17,7 @@
 #include "Audio/AudioDevice.hpp"
 #include "Transceiver/Transceiver.hpp"
 #include "Network/CloudlogConfiguration.hpp"
+#include "logbook/HistoryFolder.hpp"
 
 // Qt 5 moc generates unqualified argument names for these value types.
 using TxSessionId = TxEvidence::TxSessionId;
@@ -90,6 +92,9 @@ public:
                           LogBook * logbook, QWidget * parent = nullptr);
   ~Configuration ();
 
+  void set_ui_language_preference (QString const&);
+  Q_SIGNAL void ui_language_preference_changed (QString const&) const;
+
   void select_tab (int);
   int exec ();
   bool is_active () const;
@@ -114,6 +119,9 @@ public:
 
   QString my_callsign () const;
   QString my_grid () const;
+  bool has_precise_home_coordinates () const;
+  double home_latitude () const;
+  double home_longitude () const;
   QString Field_Day_Exchange() const;
   QString RTTY_Exchange() const;
   QString Contest_Name() const;
@@ -197,6 +205,8 @@ public:
   QString cloudlog_api_url () const override;
   QString cloudlog_api_key () const override;
   qint32 cloudlog_api_station_id () const override;
+  bool cloudlog_radio_enabled () const override;
+  QString cloudlog_radio_name () const override;
   bool prompt_to_log () const;
   bool autoLog() const;
   bool contestingOnly() const;
@@ -217,6 +227,12 @@ public:
   int watchdog () const;
   int tune_watchdog_time () const;
   bool tune_watchdog () const;
+
+  // Footswitch manual TX input on a serial port status line
+  bool footswitch_enabled () const;
+  QString footswitch_port () const;
+  int footswitch_pin () const;  // 0=CTS 1=DSR 2=DCD 3=RI
+  bool footswitch_port_clash () const; // footswitch port is also the CAT or PTT port
   bool TX_messages () const;
   bool split_mode () const;
   bool enable_VHF_features () const;
@@ -278,6 +294,14 @@ public:
   Cloudlog const& cloudlog () const;
   DecodeHighlightingModel const& decode_highlighting () const;
   bool highlight_by_mode () const;
+  bool best_sp_new_dxcc () const;
+  bool best_sp_new_call_on_band () const;
+  // Full path of the ADIF log that receives new QSOs: wsjtx_log.adi in the
+  // data directory unless the user chose another (e.g. shared) location.
+  QString adif_log_file_path () const;
+  QStringList const& supplemental_history_files () const;
+  HistoryFolders const& supplemental_history_folders () const;
+  void set_worked_before_status (QString const& status, QString const& errors);
   bool highlight_only_fields () const;
   bool include_WAE_entities () const;
   bool highlight_73 () const;
@@ -387,10 +411,33 @@ public:
 
   // Set transceiver frequency in Hertz.
   Q_SLOT bool transceiver_frequency (Frequency, RigFrequencyChangePolicy::ChangeKind);
+  bool request_frequency (RigFrequency::Request const&, RigFrequencyChangePolicy::ChangeKind);
+  quint64 frequency_generation () const;
+  // True only when the open rig's reported ranges exclude this dial frequency
+  // (after station offset and calibration); false when no ranges are known or
+  // the user checked FreqCal's "Ignore range" box.
+  bool rig_cannot_tune (Frequency) const;
+  // True while a rig is configured but has not yet reported its ranges
+  // (opening, or restarting after Settings).
+  bool rig_ranges_pending () const;
+  bool rig_range_override () const;
+  void set_rig_range_override (bool);
+  // Tests only: the in-process "None" rig reports no ranges of its own.
+  void set_rig_tuning_ranges_for_test (RigFrequency::Ranges const&);
+  void set_frequency_activity_provider (std::function<RigFrequencyChangePolicy::Activity ()>);
+  Q_SIGNAL void frequency_result (RigFrequency::Result const&);
+  Q_SIGNAL void frequency_observation (RigFrequency::Evidence const&);
+  Q_SIGNAL void frequency_failure (QString const&);
 
   // Setting a non zero TX frequency means split operation
   // rationalise_mode means ensure TX uses same mode as RX.
   Q_SLOT bool transceiver_tx_frequency (Frequency, RigFrequencyChangePolicy::ChangeKind);
+
+  // Request configured mode at the observed dial; readiness is asynchronous.
+  bool prepare_radio_mode ();
+  bool radio_mode_ready () const;
+  bool radio_mode_yielded () const;
+  Q_SIGNAL void radio_mode_control_changed (bool yielded, bool ready) const;
 
   // Set transceiver mode.
   Q_SLOT void transceiver_mode (MODE);
@@ -414,6 +461,11 @@ public:
   // Set period for TCI audio
   //
   Q_SLOT void transceiver_period (double = 15.0);
+  Q_SLOT void transceiver_receive_policy (ReceivePolicy);
+  Q_SLOT void transceiver_receive_context (quint64);
+  Q_SLOT void transceiver_receive_stop_reason (JttyReceiveReason);
+  Q_SLOT void requestContinuousReceiveDrain (quint64 requestId);
+  Q_SLOT void transceiver_receive_discontinuity (JttyReceiveReason);
 
   // Set blocksize for TCI audio.
   //
@@ -472,6 +524,9 @@ public:
 
   // signal updates to decode highlighting
   Q_SIGNAL void decode_highlighting_changed (DecodeHighlightingModel const&) const;
+  Q_SIGNAL void decodes_from_top_changed (bool enabled) const;
+  Q_SIGNAL void supplemental_history_sources_changed () const;
+  Q_SIGNAL void worked_before_status_changed () const;
 
   //
   // These signals are emitted and reflect transceiver state changes
@@ -481,20 +536,27 @@ public:
   Q_SIGNAL void transceiver_update (Transceiver::TransceiverState const&) const;
   Q_SIGNAL void transceiver_TCIframesWritten (qint64) const;
   Q_SIGNAL void transceiverReceiveAudio (ReceiveAudio) const;
+  Q_SIGNAL void continuousAudioAvailable (JttyReceiveMailboxPtr) const;
+  Q_SIGNAL void continuousReceptionStopped (JttyReceiveMailboxPtr) const;
+  Q_SIGNAL void continuousReceiveDrained (quint64 requestId, JttyReceiveMailboxPtr) const;
   Q_SIGNAL void transceiver_TCImodActive (bool) const;
   Q_SIGNAL void txSourceCommitted (TxEvidence::TxStartSnapshot) const;
   Q_SIGNAL void rawTxPlayoutSnapshot (TxEvidence::TxRawPlayoutSnapshot) const;
   Q_SIGNAL void transceiver_jtty_drained (TxAudioQueueDrainState drain) const;
+  Q_SIGNAL void transceiver_jtty_progress (TxAudioQueueProgress progress) const;
   Q_SIGNAL void transceiver_jtty_enqueue_accepted (qint64 enqueueId, qint64 sampleCount,
                                                    TxAudioQueueProgress progress) const;
   Q_SIGNAL void transceiver_jtty_enqueue_failed (TxAudioQueueEpoch epoch,
-                                                 qint64 enqueueId) const;
+                                                  qint64 enqueueId,
+                                                  TxAudioQueueEnqueueFailure failure) const;
   Q_SIGNAL void tx_inhibit_status_changed (
     bool supported, bool inhibited, QString const& holder,
     quint32 hold_rx, quint32 release_rx, quint32 expiries, quint32 invalid) const;
   Q_SIGNAL void tx_inhibit_command (QString const& controller, quint32 ttl_ms,
                                     QString const& station) const;
   Q_SIGNAL void tx_inhibit_invalid (quint64 count) const;
+  // CAT or PTT is about to be opened on the port the live footswitch uses
+  Q_SIGNAL void footswitch_port_needed () const;
   Q_SIGNAL void transceiver_closing (bool failed) const;
   Q_SIGNAL void transceiver_rf_power_setting (double value, bool milliwatts) const;
   Q_SIGNAL void leavingSettings (bool) const;
@@ -522,6 +584,7 @@ public slots:
   Q_SLOT void transceiver_txvolume (double = 0, bool force = false);
 
 private:
+  friend class TestConfigurationRadio;
   class impl;
   pimpl<impl> m_;
 };

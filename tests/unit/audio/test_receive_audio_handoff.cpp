@@ -283,6 +283,255 @@ class TestReceiveAudioHandoff : public QObject
   }
 
 private Q_SLOTS:
+  void block_size_changes_preserve_captured_partial_audio ()
+  {
+    Detector detector {12000, 180.0, 1};
+    detector.setBlockSize (block);
+    QVERIFY (detector.initialize (QIODevice::WriteOnly, AudioDevice::Mono));
+    detector.setReceivePolicy (ReceivePolicy::ContinuousJtty);
+    JttyReceiveMailboxPtr mailbox;
+    connect (&detector, &Detector::continuousAudioAvailable, this,
+             [&] (JttyReceiveMailboxPtr value) { mailbox = value; });
+    QVERIFY (writeSamples (detector, 100, patternA));
+    detector.setBlockSize (0);
+    detector.setBlockSize (block + 1);
+    detector.setBlockSize (block);
+    JttyReceiveEvent event;
+    QVERIFY (mailbox->take (event));
+    QCOMPARE (event.kind, JttyReceiveEvent::Kind::Begin);
+    auto const firstSession = event.session;
+    QVERIFY (!mailbox->take (event));
+
+    detector.setBlockSize (256);
+    QVERIFY (mailbox->take (event));
+    QCOMPARE (event.kind, JttyReceiveEvent::Kind::Samples);
+    QCOMPARE (event.session, firstSession);
+    QCOMPARE (event.samples, std::vector<short> (100, patternA));
+    QVERIFY (mailbox->take (event));
+    QCOMPARE (event.kind, JttyReceiveEvent::Kind::End);
+    QCOMPARE (event.firstSample, qint64 {100});
+    QVERIFY (!mailbox->take (event));
+    QVERIFY (writeSamples (detector, 256, patternB));
+    QVERIFY (mailbox->take (event));
+    QCOMPARE (event.kind, JttyReceiveEvent::Kind::Begin);
+    QVERIFY (event.session != firstSession);
+    QVERIFY (mailbox->take (event));
+    QCOMPARE (event.kind, JttyReceiveEvent::Kind::Samples);
+    QCOMPARE (event.firstSample, qint64 {0});
+    QCOMPARE (event.samples, std::vector<short> (256, patternB));
+    QVERIFY (!mailbox->take (event));
+  }
+
+  void continuous_receive_preserves_partial_block_across_clock_wrap ()
+  {
+    Detector detector {12000, 1.0, 1};
+    detector.setBlockSize (block);
+    QVERIFY (detector.initialize (QIODevice::WriteOnly, AudioDevice::Mono));
+    detector.setStreamDescriptor (descriptor (true));
+    detector.setReceiveContext (91);
+    detector.setReceivePolicy (ReceivePolicy::ContinuousJtty);
+    JttyReceiveMailboxPtr mailbox;
+    int notifications = 0;
+    connect (&detector, &Detector::continuousAudioAvailable, this,
+             [&] (JttyReceiveMailboxPtr value) { mailbox = value; ++notifications; });
+
+    QVERIFY (writeSamples (detector, committed + 100, patternA));
+    QVERIFY (writeSamples (detector, block, patternB));
+    detector.finishInput ();
+    QVERIFY (mailbox);
+    QCOMPARE (notifications, 1);
+    JttyReceiveEvent event;
+    std::vector<short> observed;
+    quint64 session = 0;
+    bool ended = false;
+    while (mailbox->take (event))
+      {
+        if (event.kind == JttyReceiveEvent::Kind::Begin)
+          {
+            QCOMPARE (session, quint64 {0});
+            session = event.session;
+          }
+        QCOMPARE (event.session, session);
+        QCOMPARE (event.context, quint64 {91});
+        if (event.kind == JttyReceiveEvent::Kind::Samples)
+          {
+            QCOMPARE (event.firstSample, qint64 (observed.size ()));
+            observed.insert (observed.end (), event.samples.begin (), event.samples.end ());
+          }
+        if (event.kind == JttyReceiveEvent::Kind::End)
+          {
+            QCOMPARE (event.firstSample, qint64 (observed.size ()));
+            ended = true;
+          }
+      }
+    QVERIFY (ended);
+    QCOMPARE (observed.size (), std::size_t (committed + 100 + block));
+    QVERIFY (std::all_of (observed.begin (), observed.begin () + committed + 100,
+                         [] (short sample) { return sample == patternA; }));
+    QVERIFY (std::all_of (observed.begin () + committed + 100, observed.end (),
+                         [] (short sample) { return sample == patternB; }));
+    detector.setReceiveContext (92);
+    QVERIFY (writeSamples (detector, block, patternB));
+    detector.finishInput ();
+    QVERIFY (mailbox->take (event));
+    QCOMPARE (event.kind, JttyReceiveEvent::Kind::Begin);
+    QCOMPARE (event.context, quint64 {92});
+    QVERIFY (event.session != session);
+  }
+
+  void continuous_stop_flushes_only_captured_downsampled_audio ()
+  {
+    Detector detector {48000, 180.0, 4};
+    detector.setBlockSize (block);
+    QVERIFY (detector.initialize (QIODevice::WriteOnly, AudioDevice::Mono));
+    detector.setReceivePolicy (ReceivePolicy::ContinuousJtty);
+    JttyReceiveMailboxPtr mailbox;
+    connect (&detector, &Detector::continuousAudioAvailable, this,
+             [&] (JttyReceiveMailboxPtr value) { mailbox = value; });
+    std::vector<short> input (4 * block + 103, patternA);
+    QCOMPARE (detector.write (reinterpret_cast<char const *> (input.data ()),
+                              qint64 (input.size () * sizeof (short))),
+              qint64 (input.size () * sizeof (short)));
+    detector.setInputStopReason (JttyReceiveReason::Transmission);
+    detector.finishInput ();
+    std::vector<short> actual;
+    JttyReceiveEvent event;
+    bool ended = false;
+    while (mailbox->take (event))
+      {
+        if (event.kind == JttyReceiveEvent::Kind::Samples)
+          actual.insert (actual.end (), event.samples.begin (), event.samples.end ());
+        if (event.kind == JttyReceiveEvent::Kind::End)
+          {
+            QCOMPARE (event.reason, JttyReceiveReason::Transmission);
+            ended = true;
+          }
+      }
+    QVERIFY (ended);
+    std::vector<short> expected (input.size () / 4);
+    std::array<float, 49> filter {};
+    qint32 inputFrames = int (expected.size () * 4), outputFrames = 0;
+    fil4_state_ (input.data (), &inputFrames, expected.data (), &outputFrames, filter.data ());
+    QVERIFY (actual == expected);
+    detector.finishInput ();
+    QVERIFY (!mailbox->take (event));
+    QVERIFY (writeSamples (detector, 103, patternA));
+    detector.inputInterrupted ();
+    QVERIFY (mailbox->take (event));
+    QCOMPARE (event.kind, JttyReceiveEvent::Kind::Begin);
+    auto const interruptedSession = event.session;
+    QVERIFY (mailbox->take (event));
+    QCOMPARE (event.kind, JttyReceiveEvent::Kind::Samples);
+    QCOMPARE (event.samples.size (), std::size_t {25});
+    QVERIFY (mailbox->take (event));
+    QCOMPARE (event.kind, JttyReceiveEvent::Kind::End);
+    QCOMPARE (event.reason, JttyReceiveReason::InputError);
+    QVERIFY (!mailbox->take (event));
+    QVERIFY (writeSamples (detector, 4 * block, patternB));
+    QVERIFY (mailbox->take (event));
+    QCOMPARE (event.kind, JttyReceiveEvent::Kind::Begin);
+    QVERIFY (event.session != interruptedSession);
+    QCOMPARE (event.firstSample, qint64 {0});
+    detector.setReceivePolicy (ReceivePolicy::Timed);
+    quint64 drainedRequest = 0;
+    JttyReceiveMailboxPtr drainedMailbox;
+    connect (&detector, &Detector::continuousReceiveDrained, this,
+             [&] (quint64 request, JttyReceiveMailboxPtr value) {
+               drainedRequest = request;
+               drainedMailbox = std::move (value);
+             });
+    detector.requestContinuousReceiveDrain (55);
+    QCOMPARE (drainedRequest, quint64 {55});
+    QVERIFY (drainedMailbox == mailbox);
+  }
+
+  void continuous_mailbox_overrun_is_explicit_and_rearms_notification ()
+  {
+    JttyReceivePublisher publisher;
+    QVERIFY (publisher.begin (100000));
+    std::vector<short> samples (3456, patternA);
+    for (int i = 0; i < 630; ++i)
+      QVERIFY (!publisher.append (samples.data (), int (samples.size ())));
+    auto mailbox = publisher.mailbox ();
+    JttyReceiveEvent event;
+    QVERIFY (mailbox->take (event));
+    QCOMPARE (event.kind, JttyReceiveEvent::Kind::Gap);
+    QCOMPARE (event.reason, JttyReceiveReason::Overrun);
+    auto const oldSession = event.session;
+    QVERIFY (mailbox->take (event));
+    QCOMPARE (event.kind, JttyReceiveEvent::Kind::Begin);
+    QVERIFY (event.session > oldSession);
+    qint64 total = 0;
+    while (mailbox->take (event))
+      {
+        QCOMPARE (event.kind, JttyReceiveEvent::Kind::Samples);
+        QCOMPARE (event.firstSample, total);
+        total += qint64 (event.samples.size ());
+      }
+    QVERIFY (total <= JttyReceiveMailbox::capacitySamples);
+    QVERIFY (publisher.append (samples.data (), int (samples.size ())));
+  }
+
+  void continuous_detached_batch_excludes_later_publications ()
+  {
+    JttyReceivePublisher publisher;
+    publisher.setContext (42);
+    QVERIFY (publisher.begin (100000));
+    short const first[] {patternA, patternB};
+    QVERIFY (!publisher.append (first, 2));
+    auto pending = publisher.mailbox ()->detachPending ();
+    short const later = patternB;
+    QVERIFY (publisher.append (&later, 1));
+    publisher.end (JttyReceiveReason::MonitorStopped);
+    JttyReceiveEvent event;
+    QVERIFY (pending->take (event));
+    QCOMPARE (event.kind, JttyReceiveEvent::Kind::Begin);
+    QCOMPARE (event.context, quint64 {42});
+    auto const session = event.session;
+    QVERIFY (pending->take (event));
+    QCOMPARE (event.session, session);
+    QCOMPARE (event.firstSample, qint64 {0});
+    QVERIFY (event.samples == std::vector<short> (first, first + 2));
+    QVERIFY (!pending->take (event));
+    QVERIFY (publisher.mailbox ()->take (event));
+    QCOMPARE (event.session, session);
+    QCOMPARE (event.firstSample, qint64 {2});
+    QVERIFY (event.samples == std::vector<short> {later});
+    QVERIFY (publisher.mailbox ()->take (event));
+    QCOMPARE (event.kind, JttyReceiveEvent::Kind::End);
+    QCOMPARE (event.endSample (), qint64 {3});
+    QVERIFY (!publisher.mailbox ()->take (event));
+  }
+
+  void continuous_end_overflow_keeps_original_session ()
+  {
+    JttyReceivePublisher publisher;
+    QVERIFY (publisher.begin (100000));
+    JttyReceiveEvent event;
+    auto mailbox = publisher.mailbox ();
+    QVERIFY (mailbox->take (event));
+    auto const session = event.session;
+    short const sample = patternA;
+    for (int i = 0; i < 1024; ++i) QVERIFY (!publisher.append (&sample, 1));
+    QVERIFY (!publisher.end (JttyReceiveReason::MonitorStopped));
+    QVERIFY (!publisher.active ());
+    QVERIFY (mailbox->take (event));
+    QCOMPARE (event.kind, JttyReceiveEvent::Kind::Gap);
+    QCOMPARE (event.session, session);
+    QCOMPARE (event.firstSample, qint64 {1024});
+    QCOMPARE (event.reason, JttyReceiveReason::Overrun);
+    QVERIFY (mailbox->take (event));
+    QCOMPARE (event.kind, JttyReceiveEvent::Kind::End);
+    QCOMPARE (event.session, session);
+    QCOMPARE (event.firstSample, qint64 {1024});
+    QCOMPARE (event.reason, JttyReceiveReason::MonitorStopped);
+    QVERIFY (!mailbox->take (event));
+    QVERIFY (publisher.begin (101000));
+    QVERIFY (mailbox->take (event));
+    QCOMPARE (event.kind, JttyReceiveEvent::Kind::Begin);
+    QVERIFY (event.session != session);
+  }
+
   void downsamplersRetainIndependentHistory ()
   {
     std::array<float, 49> firstState {}, secondState {}, referenceState {};
@@ -526,6 +775,17 @@ private Q_SLOTS:
     QCOMPARE (runReferenceSpectrum (original, 3584, true, path), original);
     QVERIFY (file.open (QIODevice::ReadOnly));
     QCOMPARE (file.readAll (), measured);
+  }
+  // A reference file that cannot be written leaves the measurement running.
+  void reference_measurement_survives_unwritable_file ()
+  {
+    QTemporaryDir directory;
+    QVERIFY (directory.isValid ());
+    auto path = (directory.path () + "/missing/refspec.dat").toLocal8Bit ();
+    auto const original = noiseSamples (8 * 3456);
+
+    QCOMPARE (runReferenceSpectrum (original, 3456, true, path), original);
+    QVERIFY (!QFile::exists (QString::fromLocal8Bit (path)));
   }
   void echo_metadata_vs_append () { consumerRace (false, true); }
   void echo_metadata_vs_reset () { consumerRace (true, true); }

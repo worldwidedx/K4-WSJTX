@@ -1,8 +1,16 @@
-subroutine sfox_pack(line,ckey,bMoreCQs,bSendMsg,freeTextMsg,xin,pack_error)
+module sfox_pack_module
+  implicit none
+  private
+  public :: sfox_pack_for_state
+contains
+subroutine sfox_pack_for_state(knowledge,line,ckey,bMoreCQs,bSendMsg,freeTextMsg,xin,pack_error)
 
   use qpc_mod
   use packjt
   use packjt77
+  implicit real(a-h,o-z)
+  implicit integer(i-n)
+  type(pack77_state), intent(inout) :: knowledge
   parameter (NQU1RKS=203514677)
   integer*8 n47,n58
   integer*1 xin(0:49)                    !Packed message as 7-bit symbols
@@ -86,7 +94,7 @@ subroutine sfox_pack(line,ckey,bMoreCQs,bSendMsg,freeTextMsg,xin,pack_error)
      pack_error=SFOX_PACK_BAD_CALL
      return
   endif
-  call pack28(w1,n28)                      !Fox call
+  call pack28_for_state(knowledge,w1,n28)                      !Fox call
   write(msgbits(1:28),'(b28.28)') n28
 
   nrr73_total=0
@@ -141,7 +149,7 @@ subroutine sfox_pack(line,ckey,bMoreCQs,bSendMsg,freeTextMsg,xin,pack_error)
         pack_error=SFOX_PACK_BAD_CALL
         return
      endif
-     call pack28(w(i),n28)
+     call pack28_for_state(knowledge,w(i),n28)
      write(msgbits(j:j+27),1002) n28         !Insert this call for RR73 message
 1002 format(b28.28)
      j=j+28
@@ -165,7 +173,7 @@ subroutine sfox_pack(line,ckey,bMoreCQs,bSendMsg,freeTextMsg,xin,pack_error)
            pack_error=SFOX_PACK_BAD_CALL
            return
         endif
-        call pack28(w(i),n28)
+        call pack28_for_state(knowledge,w(i),n28)
         write(msgbits(j:j+27),1002) n28       !Insert this call 
         if(.not.valid_sfox_report(w(i1),n)) then
            pack_error=SFOX_PACK_BAD_REPORT
@@ -292,8 +300,8 @@ contains
     integer n28
 
     valid_sfox_call=.false.
-    call pack28(call,n28)
-    call unpack28(n28,decoded,success)
+    call pack28_for_state(knowledge,call,n28)
+    call unpack28_for_state(knowledge,n28,decoded,success)
     if(.not.success) return
     valid_sfox_call=trim(decoded).eq.trim(call)
     return
@@ -352,4 +360,22 @@ contains
     enddo
     return
   end function valid_sfox_free_text
+end subroutine sfox_pack_for_state
+end module sfox_pack_module
+
+subroutine sfox_pack(line,ckey,bMoreCQs,bSendMsg,freeTextMsg,xin,pack_error)
+  use sfox_pack_module, only: sfox_pack_for_state
+  use ft8_codec_context, only: get_ft8_codec_state
+  use packjt77, only: pack77_state
+  implicit none
+  character*120 line
+  character*10 ckey
+  character*26 freeTextMsg
+  logical*1 bMoreCQs,bSendMsg
+  integer*1 xin(0:49)
+  integer pack_error
+  type(pack77_state), pointer :: knowledge
+
+  knowledge => get_ft8_codec_state()
+  call sfox_pack_for_state(knowledge,line,ckey,bMoreCQs,bSendMsg,freeTextMsg,xin,pack_error)
 end subroutine sfox_pack

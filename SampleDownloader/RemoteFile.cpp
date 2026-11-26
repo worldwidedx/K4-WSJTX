@@ -10,12 +10,11 @@
 #include "moc_RemoteFile.cpp"
 
 RemoteFile::RemoteFile (ListenerInterface * listener, QNetworkAccessManager * network_manager
-                        , QString const& local_file_path, bool http_only, QObject * parent)
+                        , QString const& local_file_path, QObject * parent)
   : QObject {parent}
   , listener_ {listener}
   , network_manager_ {network_manager}
   , local_file_ {local_file_path}
-  , http_only_ {http_only}
   , is_valid_ {false}
   , redirect_count_ {0}
   , file_ {local_file_path}
@@ -128,9 +127,17 @@ void RemoteFile::download (QUrl url)
   }
 #endif
 
-  if (url.isValid () && (!QSslSocket::supportsSsl () || http_only_))
+  if ("https" == url.scheme () && !network_manager_->supportedSchemes ().contains ("https"))
     {
-      url.setScheme ("http");
+      if (listener_)
+        {
+          listener_->download_finished (false);
+          listener_->error (tr ("Network Error")
+                            , tr ("SSL/TLS support not installed, cannot fetch:\n\"%1\"")
+                            .arg (url.toDisplayString ()));
+        }
+      is_valid_ = false;
+      return;
     }
   QNetworkRequest request {url};
   request.setRawHeader ("User-Agent", "WSJT Sample Downloader");

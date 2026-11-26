@@ -1,5 +1,6 @@
 real function fchisq65(cx,npts,fsample,nflip,a,ccfmax,dtmax)
 
+  use jt65_mod, only: jt65_work,ensure_jt65_workspace
   use timer_module, only: timer
 
   parameter (NMAX=60*12000)          !Samples per 60 s
@@ -7,10 +8,12 @@ real function fchisq65(cx,npts,fsample,nflip,a,ccfmax,dtmax)
   real a(5)
   complex w,wstep,z
   real ss(3000)
-  complex csx(0:NMAX/8)
-  data twopi/6.283185307/a1,a2,a3/99.,99.,99./
+  data twopi/6.283185307/
   save
 
+  call ensure_jt65_workspace()
+  if(.not.allocated(jt65_work%integral)) allocate(jt65_work%integral(0:NMAX/8))
+  associate(csx=>jt65_work%integral)
   call timer('fchisq65',0)
   baud=11025.0/4096.0
   nsps=nint(fsample/baud)                  !Samples per symbol
@@ -19,10 +22,9 @@ real function fchisq65(cx,npts,fsample,nflip,a,ccfmax,dtmax)
   nout=ndiv*npts/nsps
   dtstep=1.0/(ndiv*baud)                   !Time per output step
 
- if(a(1).ne.a1 .or. a(2).ne.a2 .or. a(3).ne.a3) then
-     a1=a(1)
-     a2=a(2)
-     a3=a(3)
+ if(.not.jt65_work%afc_valid.or.any(a(1:3)/=jt65_work%afc_parameters)) then
+     jt65_work%afc_parameters=a(1:3)
+     jt65_work%afc_valid=.true.
 
 ! Mix and integrate the complex signal
      csx(0)=0.
@@ -54,6 +56,7 @@ real function fchisq65(cx,npts,fsample,nflip,a,ccfmax,dtmax)
   enddo
 
   ccfmax=0.
+  dtmax=0.
   call timer('ccf2    ',0)
   call ccf2(ss,nout,nflip,ccf,xlagpk)
   call timer('ccf2    ',1)
@@ -64,5 +67,6 @@ real function fchisq65(cx,npts,fsample,nflip,a,ccfmax,dtmax)
   fchisq65=-ccfmax
   call timer('fchisq65',1)
 
+  end associate
   return
 end function fchisq65

@@ -2,6 +2,7 @@
 #define DECODEDMESSAGEREACTION_HPP
 
 #include "QsoProgress.hpp"
+#include "QsoCompletionPhase.hpp"
 #include "Radio.hpp"
 #include "SpecialOperatingActivity.hpp"
 #include "AutoRespondPolicy.hpp"
@@ -46,6 +47,7 @@ namespace DecodedMessageReaction
     ManualLeftPane,
     ManualRightPane,
     Synthetic,
+    AutomaticSelection,
     Udp
   };
 
@@ -54,6 +56,14 @@ namespace DecodedMessageReaction
     bool shift {false};
     bool ctrl {false};
     bool alt {false};
+  };
+
+  struct QsoCompletionSnapshot
+  {
+    QsoCompletionPhase phase {QsoCompletionPhase::Ordinary};
+    bool logRequested {false};
+    QString call {};
+    bool confirmed {false};
   };
 
   struct QsoReactionSnapshot
@@ -78,6 +88,7 @@ namespace DecodedMessageReaction
     bool shortMessages {false};
     bool sendRr73 {false};
     bool transmitting {false};
+    bool tuning {false};
     bool transmittingSignoff {false};
 
     bool doubleClicked {false};
@@ -107,8 +118,10 @@ namespace DecodedMessageReaction
     bool contestHintShown {false};
     bool ncccSprint {false};
     int tx73Count {0};
+    QsoCompletionSnapshot completion;
 
     bool waitFeaturesEnabled {false};
+    bool waitStationIgnored {false};
     bool waitAndCall {false};
     bool noWaitAndCall {false};
     bool waitAndCallControlChecked {false};
@@ -123,6 +136,7 @@ namespace DecodedMessageReaction
     {
       SetRxFrequency,
       SetTxFrequency,
+      DisarmAutoRespondSelection,
       ApplyFastCqQsy,
       RejectNominalQsy,
       SetTxFirst,
@@ -150,14 +164,18 @@ namespace DecodedMessageReaction
       SetBlockRightDisplay,
       SetAutoEnabled,
       RefreshQsoPaneIfChanged,
+      LookupDecodedGrid,
       Lookup,
       CaptureHisGrid,
       ExtractReceivedReport,
       GenerateStandardMessages,
       RecordRr73Received,
+      RecordFinalConfirmation,
       RequestLogQso,
       RequestLogQsoUnlessSuppressed,
       CeaseAutoTx,
+      ScheduleRepeatFinish,
+      FinishRepeat,
       StopTx,
       ClickStopTx,
       LogStopped,
@@ -172,7 +190,8 @@ namespace DecodedMessageReaction
       ScheduleNoLoggingReset,
       ScheduleAutoFlagOff,
       QueueContestHint,
-      ProcessSyntheticMessageNow
+      ProcessSyntheticMessageNow,
+      ProcessAutomaticSelectionNow
     };
 
     Kind kind;

@@ -28,8 +28,7 @@ public:
   explicit FileNode (QTreeWidgetItem * parent
                      , QNetworkAccessManager * network_manager
                      , QString const& local_path
-                     , QUrl const& url
-                     , bool http_only);
+                     , QUrl const& url);
 
   bool local () const {return remote_file_.local ();}
   bool sync (bool local);

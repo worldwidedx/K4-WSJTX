@@ -14,7 +14,8 @@ module npar_ptrs_mod
     integer(c_int) :: mousedf = 0
     integer(c_int) :: mousefqso = 0
     integer(c_int) :: nagain = 0
-    integer(c_int) :: ndepth = 0
+    integer(c_int) :: ndepth = 0       ! JT65 search level (0-2)
+    integer(c_int) :: ndepthq65 = 1    ! Q65 search level (1-3)
     integer(c_int) :: ndiskdat = 0
     integer(c_int) :: neme = 0
     integer(c_int) :: newdat = 0
@@ -40,21 +41,103 @@ module npar_ptrs_mod
     character(len=20) :: datetime = ''
   end type
 
-  ! GUI setters prepare draft; only the decoder changes active after claiming a request.
+  ! ---------------------------------------------------------------------------
+  ! Decode parameters: draft vs. active
+  !
+  ! Two copies of decode_parameters exist, and which one you touch matters.
+  !
+  !   draft   Owned by the GUI thread. Every set_xxx()/get_xxx() bind(C)
+  !           routine in this module reads or writes draft, under
+  !           lock_decode_requests(). It holds the *pending* GUI state, not
+  !           necessarily what the decoder is using right now.
+  !
+  !   active  Owned by the decode thread. The module pointers below (nkeep,
+  !           ntimeout, mycall, ...) alias fields of active, so Fortran decode
+  !           code that says "ntimeout" is reading active%ntimeout.
+  !
+  ! Flow:
+  !   MainWindow::decode() -> set_xxx() writes draft
+  !   publish_decode_request() copies draft into a queued request (forcing
+  !                            newdat = 1 in that copy) and clears
+  !                            draft%manualDecodeFlag
+  !   claim_decode_request()   copies the oldest request into active; an
+  !                            automatic request is marked expired, and run_m65
+  !                            skips it (<DecodeSkipped>), when the data
+  !                            snapshot it was published with has been
+  !                            overwritten or never filled (or, for requests
+  !                            without a snapshot, when its input generation
+  !                            is out of date). A request whose snapshot is
+  !                            intact still runs after the minute rolls over.
+  !   initialize_decode_parameters() copies draft into active once, at startup
+  !   The decoder then sees a consistent snapshot for the whole pass, even if
+  !   the GUI changes draft meanwhile.
+  !
+  ! Why a lock alone is not enough: a decode pass runs for many seconds and
+  ! reads its parameters throughout. The lock only protects the instant of a
+  ! write, so if setters wrote the decoder's own variables directly, a GUI
+  ! change mid-pass would still alter values partway through the decode. The
+  ! draft/active copy is what freezes the parameters for a pass and lets
+  ! requests queue; the lock keeps publish_decode_request from copying a
+  ! half-written draft.
+  !
+  ! Rules:
+  !   * C++ callers: a get_xxx() returns draft, i.e. the pending GUI value,
+  !     not the value the running decode is using.
+  !   * A parameter only reaches the decoder if the GUI writes it to draft
+  !     before a request is published. Setting it once and never re-pushing
+  !     works only if nothing else overwrites it (decode() currently re-pushes
+  !     most values every cycle).
+  !   * Fortran code may write active fields only for state it owns (e.g.
+  !     manualDecodeFlag = 0, nkeep = ...). Such writes do NOT flow back to
+  !     draft, so the next published request will carry draft's old value.
+  !     If a value must persist across requests, change it in draft too.
+  !   * Never add a second variable for the same setting (cf. the old
+  !     map65RxLog vs. nrxlog bug, where the setter wrote one variable and the
+  !     decoder read the other).
+  ! ---------------------------------------------------------------------------
   type(decode_parameters), target, save :: active
   type(decode_parameters), save :: draft
   type :: decode_request
     type(decode_parameters) :: parameters
     integer(c_int64_t) :: id
     integer(c_int64_t) :: input_generation
+    integer(c_int) :: snap_idx = 0            ! snapshot slot (1 = nhsym1, 2 = nhsym2); 0 = none
+    integer(c_int64_t) :: snap_seq = 0        ! fill number of that slot when published
+    logical :: lag_counted = .false.          ! its fill was refused and counted as kind 1
     type(decode_request), pointer :: next => null()
   end type
   type(decode_request), pointer, save :: pending_head => null(), pending_tail => null()
   integer(c_int64_t), save :: published_request_id = 0
+  ! Decoder-behind events, for the status-bar indicator: a decode pass dropped
+  ! or cut short because the decoder could not keep up with the minute.
+  !   1 = snapshot refill refused (previous pass still reading it)
+  !   2 = queued request skipped (its snapshot was overwritten)
+  !   3 = pass aborted at the 40 s budget
+  ! A pass lost to a refused refill is counted once, as kind 1: the request
+  ! published for that fill is marked so claiming it does not add a kind 2 event.
+  integer(c_int), save :: lag_event_count = 0
+  integer(c_int), save :: lag_last_kind = 0
   integer(c_int64_t), save :: active_request_id = 0
   integer(c_int64_t), save :: live_input_generation = 0
   integer(c_int64_t), save :: active_input_generation = 0
   logical, save :: active_request_expired = .false.
+  ! The expired request's snapshot was overwritten before it ran (the decoder
+  ! fell behind), as opposed to a request invalidated by monitoring stopping.
+  logical, save :: active_request_lagged = .false.
+
+  ! Decoder data snapshots (see datcom_ptrs_mod). All of this state is
+  ! protected by lock_decode_requests().
+  !   snap_seq(i)       fill number, bumped each time slot i is (re)filled
+  !   snap_valid_seq(i) fill number whose contents are intact; 0 while a fill
+  !                     is in progress or after a fill was skipped
+  !   snap_busy(i)      slot i is being read by the running decode pass; a fill
+  !                     is skipped rather than overwrite it
+  integer(c_int64_t), save :: snap_seq(2) = 0
+  integer(c_int64_t), save :: snap_valid_seq(2) = 0
+  logical, save :: snap_busy(2) = .false.
+  integer(c_int64_t), save :: snap_refused_seq(2) = 0   ! fill refused and already counted
+  integer(c_int), save :: snap_latest_idx = 0   ! most recently completed fill
+  integer(c_int), save :: active_snap_idx = 0   ! slot read by the active pass
 
   real(c_double), pointer :: fcenter => active%fcenter
   real(c_double), pointer :: ftol_nb => active%ftol_nb
@@ -68,6 +151,7 @@ module npar_ptrs_mod
   integer(c_int), pointer :: mousefqso => active%mousefqso
   integer(c_int), pointer :: nagain => active%nagain
   integer(c_int), pointer :: ndepth => active%ndepth
+  integer(c_int), pointer :: ndepthq65 => active%ndepthq65
   integer(c_int), pointer :: ndiskdat => active%ndiskdat
   integer(c_int), pointer :: neme => active%neme
   integer(c_int), pointer :: newdat => active%newdat
@@ -132,6 +216,23 @@ contains
     draft%ftol_nb = val
     call unlock_decode_requests()
   end subroutine
+
+  ! symspec FFT size: the next power of 2 at or above 32768 * rate / 96000.
+  ! That gives 2.93 Hz bins at 96 and 192 kHz and 1.95 Hz bins at 128 and
+  ! 256 kHz. At 128 kHz a 49152-point FFT (2.93 Hz bins, as at 96 kHz) was
+  ! measured less sensitive for Q65 candidates than 65536.
+  integer(c_int) function symspec_fft_size(rate_hz) bind(C, name="symspec_fft_size_")
+    use iso_c_binding
+    implicit none
+    integer(c_int), value :: rate_hz
+    integer(c_int64_t) :: want
+
+    want = (32768_c_int64_t * rate_hz) / 96000_c_int64_t
+    symspec_fft_size = 1
+    do while (symspec_fft_size < want)
+      symspec_fft_size = 2 * symspec_fft_size
+    end do
+  end function symspec_fft_size
 
   subroutine set_runtime_params(rate_hz, nfft, nfft_big) bind(C, name="set_runtime_params_")
     use iso_c_binding
@@ -329,6 +430,13 @@ contains
     call unlock_decode_requests()
   end function
 
+  function get_ndepthq65() bind(C, name="get_ndepthq65")
+    integer(c_int) :: get_ndepthq65
+    call lock_decode_requests()
+    get_ndepthq65 = draft%ndepthq65
+    call unlock_decode_requests()
+  end function
+
   function get_ndiskdat() bind(C, name="get_ndiskdat")
     integer(c_int) :: get_ndiskdat
     call lock_decode_requests()
@@ -475,14 +583,6 @@ contains
   subroutine set_map65RxLog(val) bind(C, name="set_map65RxLog")
     use iso_c_binding
     integer(c_int), value :: val
-    ! map65RxLog is read back by get_map65RxLog() for debug logging only.
-    ! nrxlog is the variable m65c()/decode0.f90 actually check (iand bits
-    ! 1/2/4/8) to write the date header, erase map65_rx.log, clear the
-    ! decode-history file on Erase, and force manual dPhi. Before this fix
-    ! nrxlog was never assigned anywhere, so all four of those flag bits
-    ! were permanently dead -- e.g. Erase Band Map and Messages never
-    ! actually cleared unit 26, so the next display() cycle just replayed
-    ! the full decode history back into the Messages window.
     call lock_decode_requests()
     draft%map65RxLog = val
     draft%nrxlog = val
@@ -534,6 +634,14 @@ contains
     integer(c_int), value :: val
     call lock_decode_requests()
     draft%ndepth = val
+    call unlock_decode_requests()
+  end subroutine
+
+  subroutine set_ndepthq65(val) bind(C, name="set_ndepthq65")
+    use iso_c_binding
+    integer(c_int), value :: val
+    call lock_decode_requests()
+    draft%ndepthq65 = val
     call unlock_decode_requests()
   end subroutine
 
@@ -740,6 +848,17 @@ end subroutine
     request%input_generation = live_input_generation
     request%parameters = draft
     request%parameters%newdat = 1
+    ! Automatic passes (nhsym1/nhsym2) were just snapshotted by dataSink();
+    ! remember which slot and fill they own. Manual repeats use the latest.
+    if (draft%manualDecodeFlag == 0 .and. draft%nagain == 0 .and. &
+        (draft%nhsym == 280 .or. draft%nhsym == 302)) then
+      request%snap_idx = merge(1, 2, draft%nhsym == 280)
+      request%snap_seq = snap_seq(request%snap_idx)
+      request%lag_counted = snap_refused_seq(request%snap_idx) == request%snap_seq
+      ! No fill has ever happened for this slot (no snapshot support in the
+      ! caller): fall back to the input-generation rule.
+      if (request%snap_seq == 0) request%snap_idx = 0
+    endif
     if (associated(pending_tail)) then
       pending_tail%next => request
     else
@@ -763,8 +882,36 @@ end subroutine
       active = request%parameters
       active_request_id = request%id
       active_input_generation = request%input_generation
-      active_request_expired = active%ndiskdat == 0 .and. active%nagain == 0 .and. &
-        active%manualDecodeFlag == 0 .and. request%input_generation /= live_input_generation
+      active_snap_idx = 0
+      active_request_lagged = .false.
+      if (request%snap_idx > 0) then
+        ! Automatic pass: valid while its snapshot is intact, even if the
+        ! minute has rolled over. A live request more than one generation old
+        ! (monitoring stopped, period changed) is still dropped.
+        active_request_expired = snap_valid_seq(request%snap_idx) /= request%snap_seq
+        ! Counted before the generation rule below, so a request that is both
+        ! overwritten and from before a monitoring stop still counts: its
+        ! snapshot was lost because the decoder did not get to the pass in time,
+        ! whether or not a stop also happened.
+        active_request_lagged = active_request_expired
+        if (active_request_lagged .and. (.not. request%lag_counted)) then
+          lag_event_count = lag_event_count + 1
+          lag_last_kind = 2
+        endif
+        if (active%ndiskdat == 0 .and. &
+            live_input_generation - request%input_generation >= 2) active_request_expired = .true.
+        if (.not. active_request_expired) then
+          active_snap_idx = request%snap_idx
+          snap_busy(active_snap_idx) = .true.
+        endif
+      else
+        active_request_expired = active%ndiskdat == 0 .and. active%nagain == 0 .and. &
+          active%manualDecodeFlag == 0 .and. request%input_generation /= live_input_generation
+        if (.not. active_request_expired .and. snap_latest_idx > 0) then
+          active_snap_idx = snap_latest_idx            ! manual repeat: latest snapshot
+          snap_busy(active_snap_idx) = .true.
+        endif
+      endif
       deallocate(request)
     endif
     call unlock_decode_requests()
@@ -773,6 +920,59 @@ end subroutine
   subroutine initialize_decode_parameters()
     call lock_decode_requests()
     active = draft
+    call unlock_decode_requests()
+  end subroutine
+
+  ! A snapshot fill starts: invalidate the slot's contents and say whether the
+  ! copy may proceed (ok = .false. when the running pass is still reading it).
+  subroutine snapshot_fill_begin(idx, ok)
+    integer, intent(in) :: idx
+    logical, intent(out) :: ok
+    call lock_decode_requests()
+    snap_seq(idx) = snap_seq(idx) + 1
+    snap_valid_seq(idx) = 0
+    ok = .not. snap_busy(idx)
+    if (.not. ok) then
+      snap_refused_seq(idx) = snap_seq(idx)
+      lag_event_count = lag_event_count + 1
+      lag_last_kind = 1
+    endif
+    call unlock_decode_requests()
+  end subroutine
+
+  subroutine note_decoder_lag(kind)
+    integer, intent(in) :: kind
+    call lock_decode_requests()
+    lag_event_count = lag_event_count + 1
+    lag_last_kind = kind
+    call unlock_decode_requests()
+  end subroutine
+
+  integer(c_int) function get_decoder_lag_count() bind(C, name="get_decoder_lag_count")
+    call lock_decode_requests()
+    get_decoder_lag_count = lag_event_count
+    call unlock_decode_requests()
+  end function
+
+  integer(c_int) function get_decoder_lag_kind() bind(C, name="get_decoder_lag_kind")
+    call lock_decode_requests()
+    get_decoder_lag_kind = lag_last_kind
+    call unlock_decode_requests()
+  end function
+
+  subroutine snapshot_fill_end(idx)
+    integer, intent(in) :: idx
+    call lock_decode_requests()
+    snap_valid_seq(idx) = snap_seq(idx)
+    snap_latest_idx = idx
+    call unlock_decode_requests()
+  end subroutine
+
+  ! The active pass is finished with its snapshot slot.
+  subroutine snapshot_release()
+    call lock_decode_requests()
+    if (active_snap_idx > 0) snap_busy(active_snap_idx) = .false.
+    active_snap_idx = 0
     call unlock_decode_requests()
   end subroutine
 

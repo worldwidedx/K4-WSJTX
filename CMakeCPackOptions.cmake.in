@@ -19,6 +19,20 @@ set (CPACK_STRIP_FILES TRUE)
 
 if (CPACK_GENERATOR MATCHES "NSIS")
   set (CPACK_STRIP_FILES FALSE)	# breaks Qt packaging on Windows
+  set (CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL OFF)
+  set (WSJTX_NSIS_PREFLIGHT_SCRIPT "@PROJECT_SOURCE_DIR@/CMake/NSIS/GeneratePreflight.cmake")
+  set (CMAKE_COMMAND "@CMAKE_COMMAND@")
+
+  set (wsjtx_nsis_config "@CMAKE_BUILD_TYPE@")
+  if (NOT "@CMAKE_CONFIGURATION_TYPES@" STREQUAL "")
+    set (wsjtx_nsis_config "${CPACK_BUILD_CONFIG}")
+    if (NOT wsjtx_nsis_config)
+      set (wsjtx_nsis_config Release)
+    endif ()
+  endif ()
+  include ("@PROJECT_BINARY_DIR@/NSIS-launcher-${wsjtx_nsis_config}.cmake")
+  # NSIS File requires backslashes in absolute Windows paths.
+  string (REPLACE "/" "\\" WSJTX_NSIS_LAUNCHER "${WSJTX_NSIS_LAUNCHER}")
 
   set (CPACK_NSIS_INSTALL_ROOT "C:\\WSJT")
 
@@ -43,9 +57,9 @@ if (CPACK_GENERATOR MATCHES "NSIS")
   set (CPACK_NSIS_MUI_FINISHPAGE_RUN "wsjtx.exe")
   set (CPACK_NSIS_MODIFY_PATH ON)
 
-  # Setup the installer and uninstall VersionInfo resource
-  set (CPACK_NSIS_EXTRA_DEFINES
-    "VIProductVersion @PROJECT_VERSION_MAJOR@.@PROJECT_VERSION_MINOR@.@PROJECT_VERSION_PATCH@.@PROJECT_VERSION_TWEAK@
+  # Preserve caller-supplied definitions alongside installer version metadata.
+  string (APPEND CPACK_NSIS_EXTRA_DEFINES
+    "\nVIProductVersion @PROJECT_VERSION_MAJOR@.@PROJECT_VERSION_MINOR@.@PROJECT_VERSION_PATCH@.@PROJECT_VERSION_TWEAK@
 VIFileVersion @PROJECT_VERSION_MAJOR@.@PROJECT_VERSION_MINOR@.@PROJECT_VERSION_PATCH@.@PROJECT_VERSION_TWEAK@
 VIAddVersionKey /LANG=0 \"ProductName\" \"@PROJECT_NAME@\"
 VIAddVersionKey /LANG=0 \"ProductVersion\" \"v@PROJECT_VERSION_MAJOR@.@PROJECT_VERSION_MINOR@.@PROJECT_VERSION_PATCH@@BUILD_TYPE_REVISION@\"

@@ -84,7 +84,11 @@ subroutine lorentzian(y,npts,a)
         endif
 
 ! Find minimum of parabola defined by last three points
-        delta=delta*(1./(1.+(chisq1-chisq2)/(chisq3-chisq2))+0.5)
+        if(chisq3.eq.chisq2) then
+           delta=0.5*delta
+        else
+           delta=delta*(1./(1.+(chisq1-chisq2)/(chisq3-chisq2))+0.5)
+        endif
         a(j)=a(j)-delta
         deltaa(j)=deltaa(j)*fn/3.
 !          write(*,4000) iter,j,a,chisq2
@@ -99,4 +103,3 @@ subroutine lorentzian(y,npts,a)
 
   return
 end subroutine lorentzian
-

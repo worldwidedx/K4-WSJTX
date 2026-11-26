@@ -2,6 +2,7 @@ program test_jtty_pack
 
   use jtty_mod
   use packjt77, only: pack28
+  use packjt77_grammar, only: pack77_arrl_section_index
   character*80 msg0,msg,expected
   character*34 c32(MAX_FRAMES)
   character*17 cparms
@@ -71,6 +72,10 @@ program test_jtty_pack
   call expect_pack('FN42',1,2,-1,-1,-1)
   call expect_pack('1D EMA',1,2,-1,-1,-1)
   call expect_pack('32F EMA',1,2,-1,-1,-1)
+  call expect_pack('1F DX',1,2,-1,-1,-1)
+  call expect_pack('2A CT',1,2,-1,-1,-1)
+  call expect_pack('10A CT',1,2,-1,-1,-1)
+  call expect_pack('32F DX',1,2,-1,-1,-1)
   call expect_pack('0',1,2,-1,-1,-1)
   call expect_pack('131071',1,2,-1,-1,-1)
   call expect_pack('599 131071',1,2,-1,-1,-1)
@@ -83,6 +88,9 @@ program test_jtty_pack
   call expect_pack('33D EMA',2,3,-1,3,-1)
   call expect_pack('1G EMA',2,3,-1,3,-1)
   call expect_pack('1D ZZZ',2,3,-1,3,-1)
+  call expect_pack('1D EMAX',2,3,-1,3,-1)
+  call expect_pack('K1ABC 1D EMAX QSL TU',4,0,1,3,-1)
+  call expect_pack('K1ABC 1D EMAX X QSL TU',4,0,1,3,-1)
   call expect_pack('599 SA00',2,-1,-1,-1,-1)
   call expect_pack('599 A!',2,-1,-1,-1,-1)
   call expect_pack('599 XYZ',1,2,-1,-1,-1)
@@ -107,6 +115,8 @@ program test_jtty_pack
   call expect_pack('PSE AGN NR',2,-1,-1,-1,-1)
   call expect_pack('AGN NR PSE',2,2,-1,3,-1)
   call expect_control_phrase_literals()
+  call expect_atom('1F DX',jtty_class_section_atom(1,'F',pack77_arrl_section_index('DX ')))
+  call expect_atom('2A CT',jtty_class_section_atom(2,'A',pack77_arrl_section_index('CT ')))
   call expect_atom('599 123',jtty_exch_num_atom(JTTY_ROLE_FULL,JTTY_NUM_GENERIC,123))
   call expect_atom('123',jtty_exch_num_atom(JTTY_ROLE_FIELD_ONLY,JTTY_NUM_GENERIC,123))
   call expect_atom('599 MA',jtty_exch_loc_atom(JTTY_ROLE_FULL,JTTY_LOC_QTH,'MA'))
@@ -150,7 +160,7 @@ contains
   subroutine expect_exchange_profiles()
     character(len=80), parameter :: examples(*)=[character(len=80) :: &
          '599 001','K1ABC 599 001','599 05','599 0123','001','599 123', &
-         '599 MA','599 131071','599 0AB','1D EMA','CQ K1ABC CQ','K1A A']
+         '599 MA','599 131071','599 0AB','1D EMA','1F DX','10A CT','32F DX','CQ K1ABC CQ','K1A A']
     character(len=80) :: input,decoded
     character(len=34) :: baseline(MAX_FRAMES),frames(MAX_FRAMES)
     integer :: i,profile,baseline_nf,nframes

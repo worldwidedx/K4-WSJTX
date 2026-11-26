@@ -12,6 +12,10 @@ prefix="$2"
 git clone --depth 1 --branch "$branch" \
   https://github.com/Hamlib/Hamlib.git hamlib-src
 cd hamlib-src
+# Hamlib 4.7.2 uses assert() in the Windows timing code without its header.
+if [ "$branch" = "4.7.2" ]; then
+  sed -i '1i#include <assert.h>' lib/precise_time.c
+fi
 ./bootstrap
 ./configure \
   --prefix="$prefix" \

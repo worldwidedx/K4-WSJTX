@@ -25,6 +25,8 @@ public:
   }
 
   bool initialize (OpenMode mode, Channel channel);
+  virtual void finishInput () {}
+  virtual void inputInterrupted () {}
 
   bool isSequential () const override {return true;}
 

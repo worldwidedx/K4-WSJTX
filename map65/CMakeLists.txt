@@ -12,7 +12,7 @@ set (map65_CXXSRCS
   fortran_mutex.cpp
   getdev.cpp
 #  getfile.cpp
-  liveCQSender.cpp
+  livecq_decode.cpp
 # map65_paths.cpp
   main.cpp
   mainwindow.cpp
@@ -24,6 +24,7 @@ set (map65_CXXSRCS
   pskreporter_settings.cpp
   Radio.cpp
   runtime_paths.cpp
+  ../Network/LiveCQUpload.cpp
   ../Network/PSKReporter.cpp
   ../Network/PSKReporterIPFIX.cpp
   set570.cpp

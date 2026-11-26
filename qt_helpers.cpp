@@ -18,6 +18,33 @@
 #include "wsjtx_config.h"
 #endif
 
+bool serial_port_name_less (QString const& lhs, QString const& rhs)
+{
+  auto suffix_start = [] (QString const& name) {
+    auto pos = name.size ();
+    while (pos && name.at (pos - 1) >= QLatin1Char {'0'}
+           && name.at (pos - 1) <= QLatin1Char {'9'}) --pos;
+    return pos;
+  };
+  auto const lhs_start = suffix_start (lhs);
+  auto const rhs_start = suffix_start (rhs);
+  auto const prefix_order = lhs.leftRef (lhs_start).compare (rhs.leftRef (rhs_start));
+  if (prefix_order) return prefix_order < 0;
+  if (lhs_start == lhs.size () || rhs_start == rhs.size ()) return lhs < rhs;
+
+  auto significant_digits = [] (QString const& name, int pos) {
+    while (pos < name.size () && name.at (pos) == QLatin1Char {'0'}) ++pos;
+    return name.midRef (pos);
+  };
+  auto const lhs_number = significant_digits (lhs, lhs_start);
+  auto const rhs_number = significant_digits (rhs, rhs_start);
+  // Comparing digits avoids overflow for long device identifiers.
+  if (lhs_number.size () != rhs_number.size ()) return lhs_number.size () < rhs_number.size ();
+  auto const number_order = lhs_number.compare (rhs_number);
+  if (number_order) return number_order < 0;
+  return lhs < rhs;
+}
+
 QString font_as_stylesheet (QFont const& font)
 {
   QString font_weight;
@@ -51,6 +78,30 @@ QString application_style_sheet (QString const& base_style_sheet,
       style_sheet += '\n';
     }
   return style_sheet + "* {" + font_as_stylesheet (font) + '}';
+}
+
+QString main_window_style_sheet (QString const& base_style_sheet,
+                                QString const& dark_style_sheet,
+                                bool dark, QFont const& font)
+{
+  QFont prominentFont {font};
+  if (font.pointSizeF () > 0.) prominentFont.setPointSizeF (font.pointSizeF () * 1.6);
+  else if (font.pixelSize () > 0) prominentFont.setPixelSize (qRound (font.pixelSize () * 1.6));
+  auto styleSheet = application_style_sheet (
+    base_style_sheet, dark_style_sheet, dark, font)
+    + "\nQLabel#labDialFreq, QLabel#labUTC {" + font_as_stylesheet (prominentFont) + '}';
+#ifdef Q_OS_MAC
+  if (!dark)
+    {
+      styleSheet += "\nQPushButton[wsjtxCompact=\"true\"] {"
+        "border: 1px solid palette(mid); border-radius: 4px; padding: 3px 6px; "
+        "background-color: palette(button); color: palette(button-text);}"
+        "\nQPushButton[wsjtxCompact=\"true\"]:focus {border-color: palette(highlight);}"
+        "\nQPushButton[wsjtxCompact=\"true\"]:pressed {background-color: palette(midlight);}"
+        "\nQPushButton[wsjtxCompact=\"true\"]:disabled {color: palette(mid);}";
+    }
+#endif
+  return styleSheet;
 }
 
 void update_dynamic_property (QWidget * widget, char const * property, QVariant const& value)

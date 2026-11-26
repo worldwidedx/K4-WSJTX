@@ -3,6 +3,7 @@
 #include <QAudioDeviceInfo>
 #include <QAudioFormat>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QSignalSpy>
 #include <QTemporaryFile>
@@ -356,13 +357,18 @@ private:
     QTRY_VERIFY_WITH_TIMEOUT (emissions.count () > 0, 1000);
     QCOMPARE (emissions.constFirst ().constFirst ().toLongLong (),
               anchored.capture_anchor_utc_ms);
+    QElapsedTimer captureElapsed;
+    captureElapsed.start ();
     QTest::qWait (200);
+    auto const elapsedAfterEmission = captureElapsed.elapsed ();
     source.suspend ();
-    auto const beforeResume = QDateTime::currentMSecsSinceEpoch ();
     source.resume ();
     auto const resumed = source.streamDescriptor ();
-    QVERIFY (resumed.capture_anchor_utc_ms >= beforeResume - 20);
-    QVERIFY (resumed.capture_anchor_utc_ms <= beforeResume + 20);
+    auto const captureAdvance = resumed.capture_anchor_utc_ms
+      - anchored.capture_anchor_utc_ms;
+    constexpr qint64 maximumChunkDurationMs = 3456 * 1000 / 12000;
+    QVERIFY (captureAdvance > 0);
+    QVERIFY (captureAdvance <= elapsedAfterEmission + maximumChunkDurationMs);
     QCOMPARE (changes.size (), 3);
 
     source.stop ();

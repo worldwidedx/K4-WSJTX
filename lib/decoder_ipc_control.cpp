@@ -80,10 +80,9 @@ extern "C" void decoder_ipc_control_initialize (int * generation, int * state,
 }
 
 extern "C" void decoder_ipc_control_shutdown (int * state,
-                                                int * legacy_acknowledgment)
+                                                int *)
 {
   atomicStore (state, DECODER_IPC_SHUTDOWN);
-  atomicStore (legacy_acknowledgment, 1);
 }
 
 extern "C" int decoder_ipc_control_publish (int * generation, int * state,

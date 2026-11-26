@@ -61,8 +61,8 @@ bool JttyPcmFifo::enqueue (qint16 const * samples, qint64 count, qint64 epoch)
 {
   if (!samples || count <= 0) return true;
 
-  qint64 const used = m_used.load (std::memory_order_acquire);
-  if (!jttyPcmEnqueueFits (m_capacity, used, count)) return false;
+  if (!jttyPcmEnqueueFits (
+        m_capacity, m_used.load (std::memory_order_acquire), count)) return false;
 
   qint64 const tail = copyIntoRing (m_buffer, m_capacity,
                                     m_tail.load (std::memory_order_relaxed),
@@ -170,9 +170,12 @@ JttyPcmFifo::DrainState JttyPcmFifo::takeDrainReady () noexcept
 
 qint64 JttyPcmFifo::queuedReal () const noexcept
 {
-  qint64 const used = m_used.load (std::memory_order_acquire);
+  // Read the reset baseline and served count before occupancy: a consumer
+  // applying a reset stores the decremented occupancy before publishing the
+  // new served count, so this order never over-reports the logical queue.
   qint64 const resetTotal = m_resetTotalBaseline.load (std::memory_order_acquire);
   qint64 const served = m_servedReal.load (std::memory_order_acquire);
+  qint64 const used = m_used.load (std::memory_order_acquire);
   qint64 const abortedQueued = resetTotal > served ? resetTotal - served : 0;
   return used > abortedQueued ? used - abortedQueued : 0;
 }

@@ -1,4 +1,5 @@
 subroutine subtract65(dd,npts,f0,dt)
+  use fftw_tsan, only: wsjt_tsan_acquire_fftw, wsjt_tsan_release_fftw
 
 ! Subtract a jt65 signal
 !
@@ -8,16 +9,17 @@ subroutine subtract65(dd,npts,f0,dt)
 ! Subtract         : dd(t)    = dd(t) - 2*REAL{cref*cfilt}
 
   use packjt
+  use jt65_mod, only: jt65_work,ensure_jt65_workspace
+  use FFTW3
+  use, intrinsic :: iso_c_binding
   use timer_module, only: timer
 
   integer correct(63)
   parameter (NMAX=60*12000) !Samples per 60 s
   parameter (NFILT=1600)
   real*4  dd(NMAX), window(-NFILT/2:NFILT/2)
-  complex cref,camp,cfilt,cw
   integer nprc(126)
   real*8 dphi,phi
-  logical first
   data nprc/                                   &
     1,0,0,1,1,0,0,0,1,1,1,1,1,1,0,1,0,1,0,0, &
     0,1,0,1,1,0,0,1,0,0,0,1,1,1,0,0,1,1,1,1, &
@@ -26,10 +28,14 @@ subroutine subtract65(dd,npts,f0,dt)
     1,0,0,0,0,0,0,0,1,1,0,1,0,0,1,0,1,1,0,1, &
     0,1,0,1,0,0,1,1,0,0,1,0,0,1,0,0,0,0,1,1, &
     1,1,1,1,1,1/
-  data first/.true./
   common/chansyms65/correct
-  common/heap1/cref(NMAX),camp(NMAX),cfilt(NMAX),cw(NMAX)
-  save first
+  common/patience/npatience,nthreads
+
+  call ensure_jt65_workspace()
+  if(.not.allocated(jt65_work%cref)) then
+    allocate(jt65_work%cref(NMAX),jt65_work%camp(NMAX),jt65_work%cfilt(NMAX),jt65_work%cw(NMAX))
+  endif
+  associate(cref=>jt65_work%cref,camp=>jt65_work%camp,cfilt=>jt65_work%cfilt,cw=>jt65_work%cw)
 
   pi=4.0*atan(1.0)
 
@@ -44,6 +50,7 @@ subroutine subtract65(dd,npts,f0,dt)
   nsym=126
   ns=4458 
   nref=nsym*ns
+  camp(1:nref)=0.
   nend=nstart+nref-1
   phi=0.0
   iref=1
@@ -74,7 +81,28 @@ subroutine subtract65(dd,npts,f0,dt)
 
   nfft=564480
 
-  if(first) then
+  if(.not.c_associated(jt65_work%subtract_forward).or. &
+       jt65_work%sub_patience/=npatience.or.jt65_work%sub_threads/=nthreads) then
+    nflags=FFTW_ESTIMATE
+    if(npatience.eq.1) nflags=FFTW_ESTIMATE_PATIENT
+    if(npatience.eq.2) nflags=FFTW_MEASURE
+    if(npatience.eq.3) nflags=FFTW_PATIENT
+    if(npatience.eq.4) nflags=FFTW_EXHAUSTIVE
+    !$omp critical(fftw)
+    call wsjt_tsan_acquire_fftw()
+    if(c_associated(jt65_work%subtract_forward)) call fftwf_destroy_plan(jt65_work%subtract_forward)
+    if(c_associated(jt65_work%subtract_inverse)) call fftwf_destroy_plan(jt65_work%subtract_inverse)
+    if(c_associated(jt65_work%window_plan)) call fftwf_destroy_plan(jt65_work%window_plan)
+    call fftwf_plan_with_nthreads(nthreads)
+    ! in==out requests an intentional in-place FFTW transform.
+    jt65_work%subtract_forward=fftwf_plan_dft_1d(nfft,cfilt,cfilt,-1,nflags)
+    jt65_work%subtract_inverse=fftwf_plan_dft_1d(nfft,cfilt,cfilt,1,nflags)
+    jt65_work%window_plan=fftwf_plan_dft_1d(nfft,cw,cw,-1,nflags)
+    call fftwf_plan_with_nthreads(1)
+    call wsjt_tsan_release_fftw()
+    !$omp end critical(fftw)
+    jt65_work%sub_patience=npatience
+    jt65_work%sub_threads=nthreads
 ! Create and normalize the filter
      sum=0.0
      do j=-NFILT/2,NFILT/2
@@ -87,17 +115,16 @@ subroutine subtract65(dd,npts,f0,dt)
         if(j.lt.1) j=j+nfft
         cw(j)=window(i)/sum
      enddo
-     call four2a(cw,nfft,1,-1,1)
-     first=.false.
+     call fftwf_execute_dft(jt65_work%window_plan,cw,cw)
   endif
 
   nz=561708
   cfilt(1:nz)=camp(1:nz)
   cfilt(nz+1:nfft)=0.
-  call four2a(cfilt,nfft,1,-1,1)
+  call fftwf_execute_dft(jt65_work%subtract_forward,cfilt,cfilt)
   fac=1.0/float(nfft)
   cfilt(1:nfft)=fac*cfilt(1:nfft)*cw(1:nfft)
-  call four2a(cfilt,nfft,1,1,1)
+  call fftwf_execute_dft(jt65_work%subtract_inverse,cfilt,cfilt)
   call timer('subtr_2 ',1)
 
 ! Subtract the reconstructed signal
@@ -108,5 +135,6 @@ subroutine subtract65(dd,npts,f0,dt)
   enddo
   call timer('subtr_3 ',1)
 
+  end associate
   return
 end subroutine subtract65 

@@ -56,7 +56,7 @@ void getargs(int argc, char *argv[], int *y, int *m, double *tz,
   /* if not right number of arguments, then print example command line */
 
   if (argc !=5) {
-    fprintf(stderr, usage);
+    fputs(usage, stderr);
     exit(EXIT_FAILURE);
   }
 

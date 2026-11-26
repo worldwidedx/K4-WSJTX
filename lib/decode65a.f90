@@ -9,9 +9,6 @@ subroutine decode65a(dd,npts,newdat,nqd,f0,nflip,mode65,ntrials,     &
 
   parameter (NMAX=60*12000)          !Samples per 60 s
   real*4  dd(NMAX)                   !92 MB: raw data from Linrad timf2
-  complex cx(NMAX/8)                 !Data at 1378.125 sps
-  complex cx1(NMAX/8)                !Data at 1378.125 sps, offset by 355.3 Hz
-  complex c5x(NMAX/32)               !Data at 344.53125 Hz
   complex c5a(512)
   real s2(66,126)
   real a(5)
@@ -22,11 +19,21 @@ subroutine decode65a(dd,npts,newdat,nqd,f0,nflip,mode65,ntrials,     &
   data first/.true./,jjjmin/1000/,jjjmax/-1000/,cr/'(C) 2016, Joe Taylor - K1JT'/
   save
 
+  call ensure_jt65_workspace()
+  if(.not.allocated(jt65_work%cx)) allocate(jt65_work%cx(NMAX/8),jt65_work%cx1(NMAX/8),jt65_work%c5x(NMAX/32))
+  associate(cx=>jt65_work%cx,cx1=>jt65_work%cx1,c5x=>jt65_work%c5x)
+  a=0.
+  qual=0.
+  sync2=0.
+  nhist=0
+  nsmo=0
+  decoded=''
 ! Mix sync tone to baseband, low-pass filter, downsample to 1378.125 Hz
   call timer('filbig  ',0)
   call filbig(dd,npts,f0,newdat,cx,n5,sq0)
   if(mode65.eq.4) call filbig(dd,npts,f0+355.297852,newdat,cx1,n5,sq0)
   call timer('filbig  ',1)
+  if(sq0<=0.) go to 900
 ! NB: cx has sample rate 12000*77125/672000 = 1378.125 Hz
 
 ! Check for a shorthand message
@@ -53,7 +60,7 @@ subroutine decode65a(dd,npts,newdat,nqd,f0,nflip,mode65,ntrials,     &
   dtbest=dtbest+0.003628 !Remove decimation filter and coh. integrator delay
   dt=dtbest              !Return new, improved estimate of dt
   sync2=3.7e-4*ccfbest/sq0                    !Constant is empirical 
-  if(mode65.eq.4) cx=cx1
+  if(mode65.eq.4) cx(:n5)=cx1(:n5)
 
 ! Apply AFC corrections to the time-domain signal
 ! Now we are back to using the 1378.125 Hz sample rate, enough to 
@@ -71,7 +78,7 @@ subroutine decode65a(dd,npts,newdat,nqd,f0,nflip,mode65,ntrials,     &
   do k=1,nsym
      do i=1,nfft
         j=j+1
-        if(j.ge.1 .and. j.le.NMAX/8) then
+        if(j.ge.1 .and. j.le.n5) then
            c5a(i)=cx(j)
         else
            c5a(i)=0.
@@ -150,5 +157,7 @@ subroutine decode65a(dd,npts,newdat,nqd,f0,nflip,mode65,ntrials,     &
 
   call timer('dec65b  ',1)
 
-900 return
+900 continue
+  end associate
+  return
 end subroutine decode65a

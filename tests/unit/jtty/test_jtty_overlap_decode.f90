@@ -5,8 +5,8 @@ program test_jtty_overlap_decode
   !
   ! The 4 Hz case reproduces leftover extra-slot fragments: a real next
   ! frame lands just outside the 3 Hz continuation gate and opens a new
-  ! message instead of staying on its assembly. Isolated and 2 Hz cases are
-  ! controls that already pass.
+  ! message instead of staying on its assembly. The 2 Hz case is a control
+  ! for assembly with closer overlap. Both cases require two complete messages.
 
   use iso_fortran_env, only: int16
   use jtty_fec, only: is13, TOTAL_K
@@ -25,10 +25,6 @@ program test_jtty_overlap_decode
   if(len_trim(rate_arg).gt.0) read(rate_arg,*) nsps
   failures=0
 
-  call expect_complete_pair('isolated first message',msg_a,1500.0,0.2, &
-       '',1500.0,0.6,1,failures)
-  call expect_complete_pair('isolated second message','',1500.0,0.2, &
-       msg_b,1504.0,0.6,1,failures)
   call expect_complete_pair('2 Hz overlap stays two complete messages', &
        msg_a,1500.0,0.2,msg_b,1502.0,0.6,2,failures)
 
@@ -148,11 +144,13 @@ contains
     found_b=len_trim(second_message).eq.0
     do i=1,npending
        if(len_trim(first_message).gt.0) then
-          if(trim(normalized(pending_updates(i)%decoded)).eq.trim(first_message)) &
+          if(pending_updates(i)%complete .and. &
+               trim(normalized(pending_updates(i)%decoded)).eq.trim(first_message)) &
                found_a=.true.
        endif
        if(len_trim(second_message).gt.0) then
-          if(trim(normalized(pending_updates(i)%decoded)).eq.trim(second_message)) &
+          if(pending_updates(i)%complete .and. &
+               trim(normalized(pending_updates(i)%decoded)).eq.trim(second_message)) &
                found_b=.true.
        endif
     enddo

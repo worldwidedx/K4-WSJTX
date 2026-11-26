@@ -1,6 +1,8 @@
 program test_packjt77_grammar_gate
 
-  use packjt77_grammar, only: pack77_gate_messages_match
+  use packjt77_grammar, only: pack77_gate_messages_match, &
+       pack77_exact_free_text_ok,pack77_free_text_alphabet_ok, &
+       pack77_configured_type12_ok,pack77_configured_type4_ok
   implicit none
 
   integer :: ntests
@@ -38,10 +40,55 @@ program test_packjt77_grammar_gate
   call expect_no_match('changed serial', &
        'K1ABC FN42 37', 'K1ABC FN42 38', no_calls, 0)
 
+  call expect_text_and_configured_receive_rules()
+
   write(*,1000) ntests
 1000 format('packjt77 grammar gate tests passed: ',i0)
 
 contains
+
+  subroutine expect_text_and_configured_receive_rules()
+    character(len=13) :: call_1,call_2
+    character(len=37) :: msg
+
+    call expect_rule('empty free text',pack77_exact_free_text_ok(''))
+    call expect_rule('13-character free text',pack77_exact_free_text_ok('ABCDEFGHIJKLM'))
+    call expect_rule('14-character free text rejected',.not.pack77_exact_free_text_ok('ABCDEFGHIJKLMN'))
+    call expect_rule('alphabet independent of length',pack77_free_text_alphabet_ok('ABCDEFGHIJKLMN'))
+    call expect_rule('free text punctuation',pack77_exact_free_text_ok('0123 +-./?'))
+    call expect_rule('lowercase requires normalization',.not.pack77_exact_free_text_ok('abc'))
+    call expect_rule('unsupported free text symbol',.not.pack77_free_text_alphabet_ok('ABC@'))
+
+    call_1='<K1ABC>'
+    call_2='W9XYZ/R'
+    call expect_rule('configured rover collision rejected', &
+         .not.pack77_configured_type12_ok(call_1,call_2,'FN42',0))
+    call expect_rule('configured rover acknowledgement allowed', &
+         pack77_configured_type12_ok(call_1,call_2,'FN42',1))
+    call expect_rule('configured rover RR73 allowed', &
+         pack77_configured_type12_ok(call_1,call_2,'RR73',0))
+
+    call_1='CQ'
+    call_2='PJ4/K1ABC'
+    msg='CQ PJ4/K1ABC'
+    call expect_rule('configured compound CQ allowed', &
+         pack77_configured_type4_ok(call_1,call_2,msg,0,1,0))
+    call_2='12/K1ABC'
+    msg='CQ 12/K1ABC'
+    call expect_rule('configured two-digit prefix rejected', &
+         .not.pack77_configured_type4_ok(call_1,call_2,msg,0,1,0))
+  end subroutine expect_text_and_configured_receive_rules
+
+  subroutine expect_rule(label,ok)
+    character(len=*), intent(in) :: label
+    logical, intent(in) :: ok
+
+    if(.not.ok) then
+       write(*,'(a)') trim(label)//' failed'
+       error stop 1
+    endif
+    ntests=ntests+1
+  end subroutine expect_rule
 
   subroutine expect_match(label,input_msg,decoded_msg,staged_calls,nstaged)
     character(len=*), intent(in) :: label,input_msg,decoded_msg

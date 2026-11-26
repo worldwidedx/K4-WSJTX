@@ -11,10 +11,9 @@
 FileNode::FileNode (QTreeWidgetItem * parent
                     , QNetworkAccessManager * network_manager
                     , QString const& local_file_path
-                    , QUrl const& url
-                    , bool http_only)
+                    , QUrl const& url)
   : QTreeWidgetItem {parent, Type}
-  , remote_file_ {this, network_manager, local_file_path, http_only}
+  , remote_file_ {this, network_manager, local_file_path}
   , block_sync_ {false}
 {
   sync_blocker b {this};

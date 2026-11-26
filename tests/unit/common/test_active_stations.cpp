@@ -6,6 +6,7 @@
 #include <QTemporaryDir>
 
 #include "widgets/activeStations.h"
+#include "lib/qra/q65/q65_limits.h"
 
 class TestActiveStations : public QObject
 {
@@ -14,6 +15,8 @@ class TestActiveStations : public QObject
 private slots:
   void transitions();
   void clickRouting();
+  void fullPileupSelection();
+  void filterToggleRequestsOneRedraw();
 };
 
 void TestActiveStations::transitions()
@@ -79,6 +82,56 @@ void TestActiveStations::clickRouting()
     QCOMPARE(station.count(), mode == Mode::Fox ? 0 : 1);
     if (mode == Mode::Fox) QCOMPARE(hound.at(0).at(0).toString(), QString(" 2. K1ABC FN42"));
     else QCOMPARE(station.at(0).at(0).toInt(), 2);
+  }
+}
+
+void TestActiveStations::fullPileupSelection()
+{
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  QSettings settings(directory.filePath("settings.ini"), QSettings::IniFormat);
+  ActiveStations widget(&settings, QFont{});
+  QSignalSpy station(&widget, SIGNAL(callSandP(int)));
+  QVERIFY(station.isValid());
+  auto editor = widget.findChild<QPlainTextEdit *>("RecentStationsPlainTextEdit");
+  QVERIFY(editor);
+  QString rows;
+  for (int row = 1; row <= Q65_CALLER_CAPACITY; ++row) {
+    rows += QString("%1.  1500  K1ABC  FN42   10    0.0\n").arg(row, 2);
+  }
+  widget.setClickOK(false);
+  widget.displayRecentStations(ActiveStations::DisplayMode::Q65Pileup, rows);
+  auto cursor = editor->textCursor();
+  cursor.movePosition(QTextCursor::Start);
+  for (int row = 1; row < Q65_CALLER_CAPACITY; ++row) {
+    QVERIFY(cursor.movePosition(QTextCursor::NextBlock));
+  }
+  editor->setTextCursor(cursor);
+  station.clear();
+  widget.setClickOK(true);
+  QVERIFY(QMetaObject::invokeMethod(&widget, "on_textEdit_clicked", Qt::DirectConnection));
+  QCOMPARE(station.count(), 1);
+  QCOMPARE(station.at(0).at(0).toInt(), Q65_CALLER_CAPACITY);
+}
+
+void TestActiveStations::filterToggleRequestsOneRedraw()
+{
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  QSettings settings(directory.filePath("settings.ini"), QSettings::IniFormat);
+  ActiveStations widget(&settings, QFont{});
+  widget.setupUi(ActiveStations::DisplayMode::Q65);
+  QSignalSpy redraws(&widget, SIGNAL(activeStationsDisplay()));
+  QVERIFY(redraws.isValid());
+
+  for (auto name : {"cbWantedOnly", "cbReadyOnly"}) {
+    auto box = widget.findChild<QCheckBox *>(name);
+    QVERIFY(box);
+    redraws.clear();
+    box->toggle();
+    QCOMPARE(redraws.count(), 1);
+    box->toggle();
+    QCOMPARE(redraws.count(), 2);
   }
 }
 

@@ -13,6 +13,7 @@ program test_packjt77_schema_decoder
   call expect_type2_tag_decode()
   call expect_invalid_binary_and_tag_fail()
   call expect_type1_grid_boundary()
+  call expect_wspr_dispatch()
   call expect_wspr_selector_padding_and_power_checks()
   call expect_type5_grid_range_check()
   call expect_type5_raw_invalid_serial_rejected()
@@ -120,6 +121,39 @@ contains
 
     ntests=ntests+1
   end subroutine expect_type1_grid_boundary
+
+  subroutine expect_wspr_dispatch()
+    character(len=77) :: c77
+    integer :: selector
+    integer, parameter :: expected(0:7)=[1,2,3,2,1,2,3,2]
+    type(pack77_wspr_type3_fields) :: type3_fields
+    logical :: ok
+
+    c77=repeat('0',77)
+    c77(72:77)='110000'
+    do selector=0,7
+       write(c77(48:50),'(b3.3)') selector
+       call assert_int('WSPR subtype selector',expected(selector), &
+            pack77_wspr_payload_type(c77))
+       call assert_int('WSPR prevalidated subtype selector',expected(selector), &
+            pack77_wspr_payload_type(c77,.true.))
+    enddo
+
+    c77(48:50)='110'
+    call decode_pack77_wspr_type3(c77,type3_fields,ok,.true.)
+    call assert_true('dispatched invalid WSPR selector rejected',.not.ok)
+
+    c77(48:50)='010'
+    c77(1:1)='x'
+    call assert_int('WSPR dispatch rejects nonbinary payload',0, &
+         pack77_wspr_payload_type(c77))
+    c77(1:1)='0'
+    c77(50:50)='x'
+    call assert_int('WSPR dispatch rejects nonbinary selector',0, &
+         pack77_wspr_payload_type(c77))
+
+    ntests=ntests+1
+  end subroutine expect_wspr_dispatch
 
   subroutine expect_wspr_selector_padding_and_power_checks()
     character(len=77) :: c77

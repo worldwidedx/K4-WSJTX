@@ -1,4 +1,4 @@
-subroutine softsym9w(id2,npts,xdt0,f0,width,nsubmode,xdt1,snrdb,i1softsymbols)
+subroutine softsym9w(id2,npts,xdt0,f0,width,nsubmode,xdt1,snrdb,i1softsymbols,valid)
 
   parameter (NFFT=6912,NH=NFFT/2,NQ=NH/2)
   real s(NQ)
@@ -9,18 +9,23 @@ subroutine softsym9w(id2,npts,xdt0,f0,width,nsubmode,xdt1,snrdb,i1softsymbols)
   integer*2 id2(60*12000)
   integer*1 i1SoftSymbolsScrambled(207)
   integer*1 i1softsymbols(207)
+  logical, intent(out) :: valid
   include 'jt9sync.f90'
   equivalence (x,cx)
 
   if(npts.eq.-99) stop                     !Silence compiler warning
+  valid=.false.
+  xdt1=0.
+  snrdb=-99.
+  i1softsymbols=0
   df=12000.0/NFFT
   i0a=max(1.0,(xdt0-1.0)*12000.0)
   i0b=(xdt0+1.0)*12000.0
   k1=max(1,nint((f0-0.5*width)/df))
   k2=min(NQ,nint((f0+0.5*width)/df))
+  if(k1.gt.k2) return
   smax=0.
-  i0pk=1
-  i1softsymbols=0
+  i0pk=0
 
   do i0=i0a,i0b,432
      s=0.
@@ -42,9 +47,8 @@ subroutine softsym9w(id2,npts,xdt0,f0,width,nsubmode,xdt1,snrdb,i1softsymbols)
         if(ssum.lt.0.7*smax) exit
      endif
   end do
+  if(i0pk.le.0) return
   xdt1=(i0pk-1)/12000.0
-
-  if(i0pk.le.0) go to 999
 
   m=0
   do j=1,85
@@ -86,6 +90,7 @@ subroutine softsym9w(id2,npts,xdt0,f0,width,nsubmode,xdt1,snrdb,i1softsymbols)
   enddo
   ave=ss/(69*7)                           !Baseline
   call pctile(s2,9*85,35,xmed)
+  if(ave.le.0. .or. xmed.le.0.) return
   s3=s3/ave
   sig=sig/69.                             !Signal
   snrdb=db(sig/xmed) - 28.0
@@ -121,5 +126,6 @@ subroutine softsym9w(id2,npts,xdt0,f0,width,nsubmode,xdt1,snrdb,i1softsymbols)
 ! Remove interleaving
   call interleave9(i1SoftSymbolsScrambled,-1,i1SoftSymbols)
 
-999  return
+  valid=.true.
+  return
 end subroutine softsym9w

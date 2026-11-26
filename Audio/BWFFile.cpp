@@ -1171,6 +1171,27 @@ bool BWFFile::flush ()
   return success;
 }
 
+bool BWFFile::finalize ()
+{
+  if (!isOpen () || !(openMode () & WriteOnly)) {
+    setErrorString ("Cannot finalize a WAV file that is not open for writing");
+    return false;
+  }
+  auto const samplesSize = size ();
+  bool const success = m_->update_header () && m_->file_.flush ();
+  if (!success) {
+    m_->error_ = FileError::WriteError;
+    setErrorString (m_->file_.error () == FileError::NoError
+                     ? QStringLiteral ("Unable to finalize WAV file header")
+                     : m_->file_.errorString ());
+  }
+  m_->data_size_ = samplesSize;
+  m_->header_dirty_ = false;
+  QIODevice::close ();
+  m_->file_.close ();
+  return success;
+}
+
 int BWFFile::handle () const
 {
   int h {m_->file_.handle ()};

@@ -11,6 +11,8 @@
 #include <QItemSelectionModel>
 #include <QItemSelection>
 #include <QTimer>
+#include <QSet>
+#include <QVector>
 #include "Configuration.hpp"
 #include "SettingsGroup.hpp"
 #include "MessageBox.hpp"
@@ -46,46 +48,55 @@ public:
 #include "moc_AbstractLogWindow.cpp"
 #include "AbstractLogWindow.moc"
 
-namespace
-{
-  bool row_is_higher (QModelIndex const& lhs, QModelIndex const& rhs)
-  {
-    return lhs.row () > rhs.row ();
-  }
-}
-
 void AbstractLogWindow::impl::delete_QSOs ()
 {
   auto selection_model = log_view_->selectionModel ();
   selection_model->select (selection_model->selection (), QItemSelectionModel::SelectCurrent | QItemSelectionModel::Rows);
   auto row_indexes = selection_model->selectedRows ();
+  QSet<qlonglong> record_ids;
+  record_ids.reserve (row_indexes.size ());
+  for (auto const& row_index : row_indexes)
+    {
+      record_ids.insert (row_index.sibling (row_index.row (), 0)
+                         .data (Qt::EditRole).toLongLong ());
+    }
 
-  if (row_indexes.size ()
+  if (record_ids.size ()
       && MessageBox::Yes == MessageBox::query_message (self_
                                                        , tr ("Confirm Delete")
                                                        , tr ("Are you sure you want to delete the %n "
                                                              "selected QSO(s) from the log?", ""
-                                                             , row_indexes.size ())
+                                                             , record_ids.size ())
                                                        , QString {}
                                                        , MessageBox::Yes | MessageBox::No
                                                        , MessageBox::No))
     {
-      // We must work with source model indexes because we don't want row
-      // removes to invalidate model indexes we haven't yet processed. We
-      // achieve that by processing them in descending row order.
-      for (auto& row_index : row_indexes)
+      // Logging can refresh the model and reset its fetched rows during confirmation.
+      auto source_model = model_.sourceModel ();
+      while (source_model->canFetchMore (QModelIndex {}))
         {
-          row_index = model_.mapToSource (row_index);
+          source_model->fetchMore (QModelIndex {});
         }
-
-      // reverse sort by row
-      std::sort (row_indexes.begin (), row_indexes.end (), row_is_higher);
-
-      for (auto index : row_indexes)
+      QVector<int> rows;
+      for (auto row = 0; row < model_.rowCount (); ++row)
         {
-          auto row = model_.mapFromSource(index).row();
-          model_.removeRow(row);
-          self_->log_model_changed();
+          auto const id = model_.index (row, 0).data (Qt::EditRole).toLongLong ();
+          if (record_ids.contains (id))
+            {
+              rows.push_back (row);
+            }
+        }
+      std::sort (rows.begin (), rows.end (), [] (int lhs, int rhs) {
+          return lhs > rhs;
+        });
+      bool removed = false;
+      for (auto row : rows)
+        {
+          removed = model_.removeRow (row) || removed;
+        }
+      if (removed)
+        {
+          self_->log_model_changed ();
         }
     }
 }

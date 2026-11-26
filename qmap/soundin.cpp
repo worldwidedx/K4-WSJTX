@@ -1,4 +1,6 @@
 #include "soundin.h"
+#include "qmap_runtime_config.h"
+#include "Network/LinradPacket.hpp"
 #include <math.h>
 
 #ifdef Q_OS_WIN32
@@ -7,16 +9,15 @@
 #include <sys/socket.h>
 #endif
 
-#define NFFT 32768
 #define FRAMES_PER_BUFFER 1024
 
 extern "C"
 {
   extern struct
   {
-    double d8[60*96000];              //This is "common/datcom/..." in fortran
-    float ss[400*NFFT];
-    float savg[NFFT];                 //Avg spectra at 0,45,90,135 deg pol
+    double d8[qmap_runtime::MAX_NSMAX];   //This is "common/datcom/..." in fortran
+    float ss[400*qmap_runtime::MAX_NFFT];
+    float savg[qmap_runtime::MAX_NFFT];   //Avg spectra at 0,45,90,135 deg pol
     double fcenter;                   //Center freq from Linrad (MHz)
     int nutc;                         //UTC as integer, HHMM
     float fselected;                  //Selected frequency for nagain decodes
@@ -159,26 +160,20 @@ void SoundInThread::inputUDP()
   }
 
   // Set this socket's total buffer space for received UDP packets
-  udpSocket->setSocketOption (QUdpSocket::ReceiveBufferSizeSocketOption, 141600);
+  // (the same time span of data as at 96 kHz, whatever the rate)
+  udpSocket->setSocketOption (QUdpSocket::ReceiveBufferSizeSocketOption,
+                              141600 * (qmap_runtime::activeRateHz() / 96000.0));
 
   bool qe = quitExecution;
-  struct linradBuffer {
-    double cfreq;
-    int msec;
-    float userfreq;
-    int iptr;
-    quint16 iblk;
-    qint8 nrx;
-    char iusb;
-    double d8[174];
-  } b;
+  LinradPacketBuffer<512> b;
+  bool warned_invalid_packet = false;
+  bool warned_unsupported_encoding = false;
 
   int ntr0=99;
   int k=0;
   int nsec;
   int ntr;
   int nhsym0=0;
-  int iz=174;
 
   // Main loop for input of UDP packets over the network:
   while (!qe) {
@@ -188,8 +183,14 @@ void SoundInThread::inputUDP()
 //      msleep(2);                  // Sleep if no packet available
       QObject().thread()->usleep(2000);
     } else {
-      int nBytesRead = udpSocket->readDatagram((char *)&b,1416);
-      if (nBytesRead != 1416) qDebug() << "UDP Read Error:" << nBytesRead;
+      int const iz = b.receive (*udpSocket, false);
+      if (!iz) {
+        if (!warned_invalid_packet) {
+          qWarning() << "Invalid Linrad UDP packet";
+          warned_invalid_packet = true;
+        }
+        continue;
+      }
 
       qint64 ms = QDateTime::currentMSecsSinceEpoch() % 86400000;
       nsec = ms/1000;             // Time according to this computer
@@ -204,20 +205,27 @@ void SoundInThread::inputUDP()
 
       ntr0=ntr;
 
+      // Keep period tracking active while unsupported audio is discarded.
+      if (b.nrx != 1 && b.nrx != -1) {
+        if (!warned_unsupported_encoding) {
+          qWarning() << "Unsupported Linrad encoding" << int (b.nrx)
+                     << "in QMAP; select single-channel Linrad output.";
+          warned_unsupported_encoding = true;
+        }
+        continue;
+      }
+
       if(m_monitoring) {
         m_nrx=b.nrx;
-        if(m_nrx == +1) iz=348;                 //One RF channel, i*2 data
-        if(m_nrx == -1 or m_nrx == +2) iz=174;  //One Rf channel, r*4 data
-                                                // or 2 RF channels, i*2 data
-        if(m_nrx == -2) iz=87;                  // Two RF channels, r*4 data
 
         // If buffer will not overflow, move data into datcom_
-        if ((k+iz) <= 60*96000) {
+        if ((k+iz) <= qmap_runtime::activeNsmax()) {
           int nsam=-1;
+          qmap_set_npairs_active(iz);
           recvpkt_(&nsam, &b.iblk, &b.nrx, &k, b.d8, b.d8, &m_dB);
           datcom_.fcenter=b.cfreq + m_fAdd;
         }
-        m_hsym=(k-2048)/14400;           //14400 = 0.15 * 96000
+        m_hsym=(k-2048)/(qmap_runtime::activeRateHz()*3/20);   //0.15 s * rate = 14400 at 96 kHz
         if(m_hsym != nhsym0) {
           if(!m_dataSinkBusy) {
             m_dataSinkBusy=true;

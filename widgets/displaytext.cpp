@@ -23,6 +23,7 @@
 #include <QResizeEvent>
 
 #include "Configuration.hpp"
+#include "Radio.hpp"
 #include "Decoder/decodedtext.h"
 #include "Network/LotWUsers.hpp"
 #include "models/DecodeHighlightingModel.hpp"
@@ -49,7 +50,6 @@ bool muted = false;
 namespace
 {
   QRegularExpression const message_73_regexp {"^(73|RR73)$"};
-  QRegularExpression const grid_regexp {"\\A(?![Rr]{2}73)[A-Ra-r]{2}[0-9]{2}([A-Xa-x]{2}){0,1}\\z"};
   // Trailing #? matches Q65's "copied last Tx" flag marker (e.g. "q3#"),
   // appended after the usual AP-type/averaging-count qualifier.
   QRegularExpression const ap_regexp {R"((?:\?\s)?(?:a[0-9]|q[0-9][0-9*]?#?)$)"};
@@ -112,11 +112,23 @@ DisplayText::DisplayText(QWidget *parent)
 void DisplayText::set_configuration (Configuration const * configuration, bool high_volume)
 {
   disconnect (vertical_scroll_connection_);
+  disconnect (configuration_connection_);
   m_config = configuration;
   high_volume_ = high_volume;
   sticky_scroll_enabled_ = true;
   following_live_activity_ = true;
   live_scroll_position_ = verticalScrollBar ()->value ();
+  if (configuration)
+    {
+      configuration_connection_ = connect (configuration, &Configuration::decodes_from_top_changed,
+                                            this, [this] (bool enabled) {
+                                              if (high_volume_ && enabled)
+                                                {
+                                                  following_live_activity_ = true;
+                                                }
+                                              updateReturnToLiveButton ();
+                                            });
+    }
   updateReturnToLiveButton ();
 }
 
@@ -143,30 +155,28 @@ bool DisplayText::decodesFromTop () const
   return high_volume_ && m_config && m_config->decodes_from_top ();
 }
 
+bool DisplayText::stickyScrollEnabled () const
+{
+  return sticky_scroll_enabled_ && !decodesFromTop ();
+}
+
 void DisplayText::userScrolledTo (int position)
 {
-  if (sticky_scroll_enabled_)
+  if (stickyScrollEnabled ())
     {
       following_live_activity_ = position == live_scroll_position_;
       updateReturnToLiveButton ();
     }
 }
 
-void DisplayText::scrollRangeChanged (int minimum, int maximum)
+void DisplayText::scrollRangeChanged (int, int maximum)
 {
-  if (sticky_scroll_enabled_)
+  if (stickyScrollEnabled ())
     {
-      if (decodesFromTop ())
+      live_scroll_position_ = maximum;
+      if (following_live_activity_)
         {
-          live_scroll_position_ = qBound (minimum, live_scroll_position_, maximum);
-        }
-      else
-        {
-          live_scroll_position_ = maximum;
-          if (following_live_activity_)
-            {
-              verticalScrollBar ()->setValue (live_scroll_position_);
-            }
+          verticalScrollBar ()->setValue (live_scroll_position_);
         }
     }
   updateReturnToLiveButton ();
@@ -195,7 +205,7 @@ void DisplayText::updateReturnToLiveButton ()
   return_to_live_button_->resize (button_width, button_height);
   return_to_live_button_->move (qMax (margin, viewport ()->width () - button_width - margin)
                                 , qMax (margin, viewport ()->height () - button_height - margin));
-  auto const wanted = sticky_scroll_enabled_
+  auto const wanted = stickyScrollEnabled ()
     && vertical_scroll_bar->maximum () > vertical_scroll_bar->minimum ()
     && !following_live_activity_
     && button_width > 0
@@ -215,7 +225,7 @@ void DisplayText::resizeEvent (QResizeEvent * e)
 
 void DisplayText::setContentFont(QFont const& font)
 {
-  auto const preserve_view = sticky_scroll_enabled_ && !following_live_activity_;
+  auto const preserve_view = stickyScrollEnabled () && !following_live_activity_;
   QTextCursor view_anchor;
   int anchor_offset {0};
   if (preserve_view)
@@ -240,14 +250,14 @@ void DisplayText::setContentFont(QFont const& font)
   cursor.endEditBlock ();
 
   auto * vertical_scroll_bar = verticalScrollBar ();
-  if (!sticky_scroll_enabled_ || following_live_activity_)
+  if (!stickyScrollEnabled () || following_live_activity_)
     {
       if (!decodesFromTop ())
         {
           setTextCursor (cursor);
           ensureCursorVisible ();
         }
-      if (sticky_scroll_enabled_)
+      if (stickyScrollEnabled ())
         {
           live_scroll_position_ = vertical_scroll_bar->value ();
         }
@@ -268,8 +278,20 @@ void DisplayText::captureClick (QMouseEvent const * event)
 {
   auto cursor = cursorForPosition (event->pos ());
   pressed_line_ = cursor.block ().text ();
+  auto const click_position = cursor.position () - cursor.block ().position ();
   cursor.select (QTextCursor::WordUnderCursor);
   pressed_word_ = cursor.selectedText ();
+  auto token_start = click_position;
+  auto token_end = click_position;
+  while (token_start > 0 && !pressed_line_.at (token_start - 1).isSpace ())
+    {
+      --token_start;
+    }
+  while (token_end < pressed_line_.size () && !pressed_line_.at (token_end).isSpace ())
+    {
+      ++token_end;
+    }
+  pressed_token_ = pressed_line_.mid (token_start, token_end - token_start);
   pressed_button_ = event->button ();
   click_state_ = ClickState::Captured;
 }
@@ -298,7 +320,8 @@ void DisplayText::mouseDoubleClickEvent (QMouseEvent * event)
   auto const word = pressed_word_;
   pressed_button_ = Qt::NoButton;
   click_state_ = ClickState::None;
-  Q_EMIT selectCallsign (line, word, event->modifiers ());
+  auto const token = pressed_token_;
+  Q_EMIT selectCallsign (line, word, event->modifiers (), token);
 }
 
 void DisplayText::insertLineSpacer(QString const& line)
@@ -309,41 +332,25 @@ void DisplayText::insertLineSpacer(QString const& line)
 namespace
 {
   using Highlight = DecodeHighlightingModel::Highlight;
-  using highlight_types = std::vector<Highlight>;
+  using highlight_types = DecodeHighlightingModel::HighlightTypes;
   Highlight set_colours (Configuration const * config, QColor * bg, QColor * fg, highlight_types const& types)
   {
-    Highlight result = Highlight::CQ;
     if (config)
       {
-        QListIterator<DecodeHighlightingModel::HighlightInfo> it {config->decode_highlighting ().items ()};
-        // iterate in reverse to honor priorities
-        it.toBack ();
-        while (it.hasPrevious ())
-          {
-            auto const& item = it.previous ();
-            auto const& type = std::find (types.begin (), types.end (), item.type_);
-            if (type != types.end () && item.enabled_)
-              {
-                if (item.background_.style () != Qt::NoBrush)
-                  {
-                    *bg = item.background_.color ();
-                  }
-                if (item.foreground_.style () != Qt::NoBrush)
-                  {
-                    *fg = item.foreground_.color ();
-                  }
-                result = item.type_;
-              }
-          }
+        auto const resolved = DecodeHighlightingModel::resolve_colors (
+          config->decode_highlighting ().items (), types, *bg, *fg);
+        *bg = resolved.background_;
+        *fg = resolved.foreground_;
+        return resolved.type_;
       }
-    return result;            // highest priority enabled highlighting
+    return Highlight::CQ;
   }
 }
 
 void DisplayText::insertText(QString const& text, QColor bg, QColor fg
                              , QString const& call1, QString const& call2, QTextCursor::MoveOperation location)
 {
-  auto const preserve_view = sticky_scroll_enabled_ && !following_live_activity_;
+  auto const preserve_view = stickyScrollEnabled () && !following_live_activity_;
   QTextCursor view_anchor;
   int anchor_offset {0};
   if (preserve_view)
@@ -357,6 +364,7 @@ void DisplayText::insertText(QString const& text, QColor bg, QColor fg
   auto block_format = cursor.blockFormat ();
   auto format = cursor.blockCharFormat ();
   format.setFont (char_font_);
+  format.clearBackground ();
   block_format.clearBackground ();
   if (bg.isValid ())
     {
@@ -428,7 +436,7 @@ void DisplayText::insertText(QString const& text, QColor bg, QColor fg
 
   // position so viewport scrolled to left
   cursor.movePosition (QTextCursor::StartOfLine);
-  if ((!sticky_scroll_enabled_ || following_live_activity_) && !decodesFromTop ())
+  if ((!stickyScrollEnabled () || following_live_activity_) && !decodesFromTop ())
     {
       setTextCursor (cursor);
       ensureCursorVisible ();
@@ -440,17 +448,9 @@ void DisplayText::insertText(QString const& text, QColor bg, QColor fg
       vertical_scroll_bar->setValue (vertical_scroll_bar->value ()
                                      + cursorRect (view_anchor).top () - anchor_offset);
     }
-  if (sticky_scroll_enabled_)
+  if (stickyScrollEnabled ())
     {
-      if (decodesFromTop ())
-        {
-          live_scroll_position_ = qBound (vertical_scroll_bar->minimum (), live_scroll_position_
-                                          , vertical_scroll_bar->maximum ());
-        }
-      else
-        {
-          live_scroll_position_ = vertical_scroll_bar->maximum ();
-        }
+      live_scroll_position_ = vertical_scroll_bar->maximum ();
     }
   updateReturnToLiveButton ();
 }
@@ -474,7 +474,7 @@ void DisplayText::extend_vertical_scrollbar (int min, int max)
 
 void DisplayText::new_period ()
 {
-  auto const preserve_view = sticky_scroll_enabled_ && !following_live_activity_;
+  auto const preserve_view = stickyScrollEnabled () && !following_live_activity_;
   QTextCursor view_anchor;
   int anchor_offset {0};
   if (preserve_view)
@@ -507,14 +507,14 @@ void DisplayText::new_period ()
                                              });
     }
   auto * vertical_scroll_bar = verticalScrollBar ();
-  if (sticky_scroll_enabled_)
+  if (stickyScrollEnabled ())
     {
       live_scroll_position_ = vertical_scroll_bar->maximum ();
     }
-  if (!sticky_scroll_enabled_ || following_live_activity_)
+  if (!stickyScrollEnabled () || following_live_activity_)
     {
       vertical_scroll_bar->setSliderPosition (vertical_scroll_bar->maximum ());
-      if (sticky_scroll_enabled_)
+      if (stickyScrollEnabled ())
         {
           live_scroll_position_ = vertical_scroll_bar->value ();
         }
@@ -527,120 +527,29 @@ void DisplayText::new_period ()
   updateReturnToLiveButton ();
 }
 
-QString DisplayText::appendWorkedB4 (QString message, QString call, QString const& grid,
-                                     QColor * bg, QColor * fg, LogBook const& logBook,
-                                     QString const& currentBand, QString const& currentMode,
+QString DisplayText::appendWorkedB4 (QString message, DecodeClassification const& classification,
+                                     QColor * bg, QColor * fg,
                                      QString extra, QString const& state, bool entityMismatch)
 {
-  QString countryName;
-  bool callB4;
-  bool callB4onBand;
-  bool countryB4;
-  bool countryB4onBand;
-  bool gridB4;
-  bool gridB4onBand;
-  bool continentB4;
-  bool continentB4onBand;
-  bool CQZoneB4;
-  bool CQZoneB4onBand;
-  bool ITUZoneB4;
-  bool ITUZoneB4onBand;
-
-  if(call.length()==2) {
-    int i0=message.indexOf("CQ "+call);
-    call=message.mid(i0+6,-1);
-    i0=call.indexOf(" ");
-    call=call.mid(0,i0);
-  }
-  if(call.length()<3) return message;
-  if(!call.contains(QRegExp("[0-9]|[A-Z]"))) return message;
-
-  auto const& looked_up = logBook.countries ()->lookup (call);
-  logBook.match (call, currentMode, grid, looked_up, callB4, countryB4, gridB4, continentB4, CQZoneB4, ITUZoneB4);
-  logBook.match (call, currentMode, grid, looked_up, callB4onBand, countryB4onBand, gridB4onBand,
-                 continentB4onBand, CQZoneB4onBand, ITUZoneB4onBand, currentBand);
-  if(grid=="") {
-    gridB4=true;
-    gridB4onBand=true;
-  }
-
-  if(callB4onBand) m_points=0;
-
+  auto const entity_view = m_config->include_WAE_entities () ? AD1CCty::EntityView::WAE : AD1CCty::EntityView::DXCC;
+  if (!classification.worked || !classification.entity) return message;
+  auto const& looked_up = *classification.entity;
+  if (classification.workedOnBand && classification.workedOnBand->call) m_points = 0;
   message = message.trimmed ();
-
-  highlight_types types;
-  // no shortcuts here as some types may be disabled
-  if (!countryB4) {
-    types.push_back (Highlight::DXCC);
-    if (m_config->alert_DXCC()) {
-      if (!muted) play_DXCC = true;
-    }
-  }
-  if(!countryB4onBand) {
-    types.push_back (Highlight::DXCCBand);
-    if (m_config->alert_DXCCOB()) {
-       if (!muted) play_DXCCOB = true;
-    }
-  }
-  if(!gridB4) {
-    types.push_back (Highlight::Grid);
-    if (m_config->alert_Grid()) {
-      if (!muted) play_Grid = true;
-    }
-  }
-  if(!gridB4onBand) {
-    types.push_back (Highlight::GridBand);
-    if (m_config->alert_GridOB()) {
-      if (!muted) play_GridOB = true;
-    }
-  }
-  if (!callB4) {
-    types.push_back (Highlight::Call);
-  }
-  if(!callB4onBand) {
-    types.push_back (Highlight::CallBand);
-  }
-  if (!continentB4) {
-    types.push_back (Highlight::Continent);
-    if (m_config->alert_Continent()) {
-      if (!muted) play_Continent = true;
-    }
-  }
-  if(!continentB4onBand) {
-    types.push_back (Highlight::ContinentBand);
-    if (m_config->alert_ContinentOB()) {
-      if (!muted) play_ContinentOB = true;
-    }
-  }
-  if (!CQZoneB4) {
-    types.push_back (Highlight::CQZone);
-    if (m_config->alert_CQZ()) {
-      if (!muted) play_CQZ = true;
-    }
-  }
-  if(!CQZoneB4onBand) {
-    types.push_back (Highlight::CQZoneBand);
-    if (m_config->alert_CQZOB()) {
-      if (!muted) play_CQZOB = true;
-    }
-  }
-  if (!ITUZoneB4) {
-    types.push_back (Highlight::ITUZone);
-    if (m_config->alert_ITUZ()) {
-      if (!muted) play_ITUZ = true;
-    }
-  }
-  if(!ITUZoneB4onBand) {
-    types.push_back (Highlight::ITUZoneBand);
-    if (m_config->alert_ITUZOB()) {
-      if (!muted) play_ITUZOB = true;
-    }
-  }
-  if (m_config && m_config->lotw_users ().user (call))
-    {
-      types.push_back (Highlight::LotW);
-    }
-  types.push_back (Highlight::CQ);
+  auto const& types = classification.highlights;
+  auto alert = [&] (Highlight type, bool enabled, bool& pending) {
+    if (!muted && enabled && std::find (types.begin (), types.end (), type) != types.end ()) pending = true;
+  };
+  alert (Highlight::DXCC, m_config->alert_DXCC (), play_DXCC);
+  alert (Highlight::DXCCBand, m_config->alert_DXCCOB (), play_DXCCOB);
+  alert (Highlight::Grid, m_config->alert_Grid (), play_Grid);
+  alert (Highlight::GridBand, m_config->alert_GridOB (), play_GridOB);
+  alert (Highlight::Continent, m_config->alert_Continent (), play_Continent);
+  alert (Highlight::ContinentBand, m_config->alert_ContinentOB (), play_ContinentOB);
+  alert (Highlight::CQZone, m_config->alert_CQZ (), play_CQZ);
+  alert (Highlight::CQZoneBand, m_config->alert_CQZOB (), play_CQZOB);
+  alert (Highlight::ITUZone, m_config->alert_ITUZ (), play_ITUZ);
+  alert (Highlight::ITUZoneBand, m_config->alert_ITUZOB (), play_ITUZOB);
   auto top_highlight = set_colours (m_config, bg, fg, types);
 
   switch (top_highlight)
@@ -660,7 +569,7 @@ QString DisplayText::appendWorkedB4 (QString message, QString call, QString cons
     default:
       if (m_bPrincipalPrefix)
         {
-          extra += looked_up.primary_prefix;
+          extra += looked_up.identity (entity_view).primary_prefix;
         }
       else if (!state.isEmpty () || entityMismatch)
         {
@@ -680,22 +589,9 @@ QString DisplayText::appendWorkedB4 (QString message, QString call, QString cons
         }
       else
         {
-          auto countryName = looked_up.abbreviated_entity_name;
-
-          // assign WAE entities to the correct DXCC when "Include extra WAE entities" is not selected
-          if (!(m_config->include_WAE_entities())) {
-            countryName.replace ("Bear Is.", "Svalbard");
-            countryName.replace ("Shetland Is.", "Scotland");
-            countryName.replace ("AF Italy", "Italy");
-            countryName.replace ("Sicily", "Italy");
-            countryName.replace ("Vienna Intl Ctr", "Austria");
-            countryName.replace ("AF Turkey", "Turkey");
-            countryName.replace ("EU Turkey", "Turkey");
-          }
-          extra += countryName;
+          extra += looked_up.display_name (entity_view);
         }
     }
-    m_CQPriority=DecodeHighlightingModel::highlight_name(top_highlight);
 
     if(((m_points == 00) or (m_points == -1)) and m_bDisplayPoints) return message;
     return leftJustifyAppendage (message, extra);
@@ -731,8 +627,13 @@ bool DisplayText::displayDecodedText(DecodedText const& decodedText, QString con
                                      bool displayDXCCEntity, LogBook const& logBook,
                                      QString const& currentBand, bool ppfx, bool bCQonly,
                                      bool haveFSpread, float fSpread, bool bDisplayPoints,
-                                     int points, QString distance, bool alertsMuted)
+                                     int points, QString distance, bool alertsMuted,
+                                     DecodeClassification const * classification)
 {
+  auto const ownClassification = classification ? DecodeClassification {}
+    : classifyDecode (decodedText, mode, currentBand, logBook, &m_config->lotw_users ());
+  auto const& facts = classification ? *classification : ownClassification;
+  auto const entity_view = m_config->include_WAE_entities () ? AD1CCty::EntityView::WAE : AD1CCty::EntityView::DXCC;
   m_points=points;
   m_bDisplayPoints=bDisplayPoints;
   m_bPrincipalPrefix=ppfx;
@@ -758,10 +659,8 @@ bool DisplayText::displayDecodedText(DecodedText const& decodedText, QString con
       if (bCQonly) return false;
     }
   auto message = decodedText.string();
-  QString dxCall;
-  QString dxGrid;
-  decodedText.deCallAndGrid (/*out*/ dxCall, dxGrid);
-  if(!dxGrid.contains(grid_regexp)) dxGrid="";
+  auto const& dxCall = facts.sender;
+  auto const& dxGrid = facts.grid;
   message = message.left (message.indexOf (QChar::Nbsp)).trimmed (); // strip appended info
   QString extra;
   QString state;    // NJ0A -- populated only when GridMap() is enabled; drives
@@ -796,8 +695,8 @@ bool DisplayText::displayDecodedText(DecodedText const& decodedText, QString con
   // is actually transmitting from the mainland.
   static QHash<QString, QString> const home_state_for_entity {
     {"KL", "AK"}, {"KH6", "HI"}};
-  auto const& dxRecord = logBook.countries ()->lookup (dxCall);
-  bool const usFamilyEntity = us_family_prefixes.contains (dxRecord.primary_prefix);
+  auto const dxRecord = facts.entity.value_or (AD1CCty::Record {});
+  bool const usFamilyEntity = us_family_prefixes.contains (dxRecord.dxcc.primary_prefix);
 
   // entityMismatch answers "does this call's grid contradict its own DXCC
   // entity" independently of GridMap()/GridMapAll(), so the entity-name
@@ -810,7 +709,7 @@ bool DisplayText::displayDecodedText(DecodedText const& decodedText, QString con
       rawState = logBook.countries ()->findState (dxGrid);
       if (rawState == "**") rawState.clear ();
       entityMismatch = !rawState.isEmpty ()
-        && rawState != home_state_for_entity.value (dxRecord.primary_prefix);
+        && rawState != home_state_for_entity.value (dxRecord.dxcc.primary_prefix);
   }
   if (dxGrid.length() > 0 && usFamilyEntity && m_config->GridMap()) {
       if (CQcall || is_73 || m_config->GridMapAll()) {
@@ -829,7 +728,6 @@ bool DisplayText::displayDecodedText(DecodedText const& decodedText, QString con
       extra += message.mid (ap_pos) + QChar {' '};
       message = message.left (ap_pos).trimmed ();
     }
-  m_CQPriority="";
   if (CQcall || (is_73 && m_config->highlight_73()) || (mode == "FT4" && m_config->highlight_73() && m_config->NCCC_Sprint()
       && (SpecOp::NA_VHF == m_config->special_op_id()) && decodedText.string().contains(" R ")))
     {
@@ -837,15 +735,14 @@ bool DisplayText::displayDecodedText(DecodedText const& decodedText, QString con
         {
           // if enabled add the DXCC entity and B4 status to the end of the
           // preformated text line t1
-          auto currentMode = mode;
-          message = appendWorkedB4 (message, dxCall, dxGrid, &bg, &fg
-                                    , logBook, currentBand, currentMode, extra, state, entityMismatch);
+          message = appendWorkedB4 (message, facts, &bg, &fg, extra, state, entityMismatch);
         }
       else
         {
           message = leftJustifyAppendage (message, extra);
           highlight_types types {Highlight::CQ};
-          if (m_config && m_config->lotw_users ().user (decodedText.CQersCall()))
+          if (std::find (facts.highlights.begin (), facts.highlights.end (), Highlight::LotW)
+              != facts.highlights.end ())
             {
               types.push_back (Highlight::LotW);
             }
@@ -856,28 +753,15 @@ bool DisplayText::displayDecodedText(DecodedText const& decodedText, QString con
     {
       if (m_config->show_country_names())
         {
-          auto const& looked_up = logBook.countries ()->lookup (dxCall);
-          auto countryName = looked_up.abbreviated_entity_name;
-
+          auto const& looked_up = dxRecord;
           if (m_bPrincipalPrefix) {
-              extra += looked_up.primary_prefix;
+              extra += looked_up.identity (entity_view).primary_prefix;
           } else if (!state.isEmpty () || entityMismatch) {
               // Same reasoning as the CQ-line case above: a grid-derived
               // U.S. state overrides the callsign's own DXCC entity name.
               extra += "U.S.A.";
           } else {
-              // assign WAE entities to the correct DXCC when "Include extra WAE entities" is not selected
-              if (!(m_config->include_WAE_entities())) {
-                countryName.replace ("Bear Is.", "Svalbard");
-                countryName.replace ("Shetland Is.", "Scotland");
-                countryName.replace ("AF Italy", "Italy");
-                countryName.replace ("Sicily", "Italy");
-                countryName.replace ("Vienna Intl Ctr", "Austria");
-                countryName.replace ("AF Turkey", "Turkey");
-                countryName.replace ("EU Turkey", "Turkey");
-              }
-
-              extra += countryName;
+              extra += looked_up.display_name (entity_view);
           }
           message = leftJustifyAppendage(message, extra);
         }

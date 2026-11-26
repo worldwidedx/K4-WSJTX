@@ -1,7 +1,8 @@
 subroutine sync65(nfa,nfb,ntol,nqsym,ca,ncand,nrobust,bVHF)
 
+  use jt65_mod, only: jt65_work,ensure_jt65_workspace
+
   parameter (NSZ=3413,NFFT=8192,MAXCAND=300)
-  real ss(552,NSZ)
   real ccfblue(-32:82)             !CCF with pseudorandom sequence
   real ccfred(NSZ)                  !Peak of ccfblue, as function of freq
   logical bVHF
@@ -15,14 +16,18 @@ subroutine sync65(nfa,nfb,ntol,nqsym,ca,ncand,nrobust,bVHF)
   type(candidate) ca(MAXCAND)
 
   common/steve/thresh0
-  common/sync/ss
 
+  call ensure_jt65_workspace()
+  if(.not.allocated(jt65_work%spectra)) allocate(jt65_work%spectra(552,3413))
+  associate(ss=>jt65_work%spectra)
   if(ntol.eq.-99) stop                       !Silence compiler warning
   call setup65
 
   df=12000.0/NFFT                            !df = 12000.0/8192 = 1.465 Hz
   ia=max(2,nint(nfa/df))
   ib=min(NSZ-1,nint(nfb/df))
+  ncand=0
+  if(ib<ia) return
 !  lag1=-11
 !  lag2=59
 !  lag1=-22
@@ -90,5 +95,6 @@ subroutine sync65(nfa,nfb,ntol,nqsym,ca,ncand,nrobust,bVHF)
      if(ncand.eq.MAXCAND) exit
   enddo
 
+  end associate
   return
 end subroutine sync65

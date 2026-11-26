@@ -234,8 +234,8 @@ int unpackgrid( int32_t ngrid, char *grid)
 
 int unpackpfx( int32_t nprefix, char *call)
 {
-    char nc, pfx[4]={'\0'}, tmpcall[7];
-    int i;
+    char pfx[4]={'\0'}, tmpcall[7];
+    int nc, i;
     int32_t n;
     
     if( !format_checked(tmpcall, sizeof tmpcall, "%s", call) ) return 0;
@@ -321,15 +321,20 @@ int floatcomp(const void* elem1, const void* elem2)
     return *(const float*)elem1 > *(const float*)elem2;
 }
 
-int unpk_(signed char *message, char *hashtab, char *loctab, char *call_loc_pow, char *callsign)
+int wsprd_interpret(signed char *message, char *hashtab, char *loctab,
+                    char *call_loc_pow, char *callsign, decoder_wspr_result *result)
 {
-    int n1,n2,n3,ndbm,ihash,nadd,noprint=0;
+    memset(result, 0, sizeof *result);
+    memset(result->call, ' ', sizeof result->call);
+    memset(result->locator, ' ', sizeof result->locator);
+    int n1,n2,n3,ndbm=0,ihash,nadd,noprint=0;
     char grid[WSPRD_GRID4_SIZE],grid6[WSPRD_GRID6_SIZE];
     
     unpack50(message,&n1,&n2);
     if( !unpackcall(n1,callsign) ) return 1;
     if( !unpackgrid(n2, grid) ) return 1;
     int ntype = (n2&127) - 64;
+    if( ntype == 63 ) return 1;
     callsign[WSPRD_CALLSIGN_SIZE - 1]=0;
     grid[4]=0;
 
@@ -350,6 +355,11 @@ int unpk_(signed char *message, char *hashtab, char *loctab, char *call_loc_pow,
         int nu=ntype%10;
         if( nu == 0 || nu == 3 || nu == 7 ) {
             ndbm=ntype;
+            result->message_type=DECODER_WSPR_STANDARD;
+            result->has_call=1;
+            memcpy(result->call,callsign,strlen(callsign));
+            result->has_locator=1;
+            memcpy(result->locator,grid,4);
             if( !format_checked(call_loc_pow, WSPRD_MESSAGE_SIZE, "%s %.4s %2d",
                                 callsign, grid, ndbm) ) return 1;
             ihash=nhash(callsign,strlen(callsign),(uint32_t)146);
@@ -361,12 +371,17 @@ int unpk_(signed char *message, char *hashtab, char *loctab, char *call_loc_pow,
             n3=n2/128+32768*(nadd-1);
             if( !unpackpfx(n3,callsign) ) return 1;
             ndbm=ntype-nadd;
+            result->message_type=DECODER_WSPR_COMPOUND;
+            result->has_call=1;
+            memcpy(result->call,callsign,strlen(callsign));
             if( !format_checked(call_loc_pow, WSPRD_MESSAGE_SIZE, "%s %2d",
                                 callsign, ndbm) ) return 1;
             int nu=ndbm%10;
             if( nu == 0 || nu == 3 || nu == 7 || nu == 10 ) { //make sure power is OK
                 ihash=nhash(callsign,strlen(callsign),(uint32_t)146);
-                if( !store_hash_call(ihash, callsign, hashtab) ) return 1;
+                // A compound call carries no grid: the slot's old one, another
+                // station's after a hash collision, goes with the old call.
+                if( !store_hash_entry(ihash, callsign, "", hashtab, loctab) ) return 1;
             } else noprint=1;
         }
     } else if ( ntype < 0 ) {
@@ -387,7 +402,15 @@ int unpk_(signed char *message, char *hashtab, char *loctab, char *call_loc_pow,
         } 
         
         ihash=(n2-ntype-64)/128;
+        result->message_type=DECODER_WSPR_HASHED;
+        result->has_hash15=1;
+        result->hash15=ihash;
+        result->has_locator=1;
+        memcpy(result->locator,grid6,strlen(grid6));
         if( strncmp(hashtab+ihash*13,"\0",1) != 0 ) {
+            result->has_call=1;
+            result->hash_resolved=1;
+            memcpy(result->call,hashtab+ihash*13,strlen(hashtab+ihash*13));
             if( !format_checked(callsign, WSPRD_CALLSIGN_SIZE, "<%s>",
                                 hashtab+ihash*13) ) return 1;
         } else {
@@ -402,5 +425,13 @@ int unpk_(signed char *message, char *hashtab, char *loctab, char *call_loc_pow,
         // I don't know what to do with these... They show up as "A000AA" grids.
         if( ntype == -64 ) noprint=1;
     }
+    result->has_power=1;
+    result->power_dbm=ndbm;
     return noprint;
+}
+
+int unpk_(signed char *message, char *hashtab, char *loctab, char *call_loc_pow, char *callsign)
+{
+    decoder_wspr_result result;
+    return wsprd_interpret(message,hashtab,loctab,call_loc_pow,callsign,&result);
 }

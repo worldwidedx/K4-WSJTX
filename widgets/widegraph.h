@@ -8,6 +8,7 @@
 #include <QHash>
 #include <QVariant>
 #include "WFPalette.hpp"
+#include "JttySpectrum.hpp"
 
 #define MAX_SCREENSIZE 2048
 
@@ -27,6 +28,8 @@ public:
   ~WideGraph ();
 
   void   dataSink2(float s[], float df3, int ihsym, int ndiskdata, float pdB);
+  void   jttyDataSink (JttySpectrumFrame const& frame);
+  void   jttyReceptionEnded ();
   void   setRxFreq(int n);
   int    rxFreq();
   int    nStartFreq();
@@ -66,13 +69,12 @@ signals:
   void f11f12(int n);
   void setXIT2(int n);
   void setFreq3(int rxFreq, int txFreq);
-  void jttyDecodeAgainAt2(float secondsAgo);
+  void jttyDecodeAgainAtSample (quint64 reception, qint64 endSample);
 
 public slots:
   void wideFreezeDecode(int n);
   void setFreq2(int rxFreq, int txFreq);
   void setDialFreq(double d);
-  void wideJttyDecodeAgainAt(float secondsAgo);
 
 protected:
   void keyPressEvent (QKeyEvent *e) override;
@@ -84,7 +86,7 @@ private slots:
   void on_spec2dComboBox_currentIndexChanged(int);
   void on_fSplitSpinBox_valueChanged(int n);
   void on_fStartSpinBox_valueChanged(int n);
-  void on_paletteComboBox_activated(const QString &palette);
+  void on_paletteComboBox_activated(int index);
   void on_timestampComboBox_currentIndexChanged(int n);
   void on_cbFlatten_toggled(bool b);
   void on_cbRef_toggled(bool b);
@@ -102,6 +104,7 @@ private slots:
 private:
   void readPalette ();
   void replot();
+  void drawJttyAverage ();
 
   QScopedPointer<Ui::WideGraph> ui;
 
@@ -133,7 +136,10 @@ private:
   QString m_mode;
   QString m_waterfallPalette;  
   float   m_swide[MAX_SCREENSIZE];
-  QString m_user_defined;
+  std::array<double, JttySpectrumFrame::BinCount> m_jttySpectrumSum {};
+  JttyWaterfallRow m_jttyAverageRow;
+  JttyWaterfallRow m_jttyLastRow;
+  int m_jttySpectrumCount = 0;
 };
 
 #endif // WIDEGRAPH_H

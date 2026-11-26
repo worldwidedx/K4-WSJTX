@@ -18,9 +18,9 @@ public:
                      AutoRespondPolicy policy);
   bool armCurrentReceivePeriod(bool pendingCq, AutoRespondPolicy policy);
   void disarm();
-  void close();
 
   bool accepts(QDateTime const& decodePeriodStart) const;
+  bool canClaimFirst(QDateTime const& decodePeriodStart) const;
   bool claimFirst(QDateTime const& decodePeriodStart);
   AutoRespondPolicy policy() const;
 

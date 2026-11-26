@@ -1,5 +1,6 @@
 program test_jtty_source_codec
   use jtty_mod
+  use packjt77_grammar, only: pack77_arrl_section_index
   implicit none
   type(jtty_source_atom) :: atom,decoded,atoms(2)
   character(len=34) :: frame,frames(MAX_FRAMES)
@@ -29,6 +30,24 @@ program test_jtty_source_codec
        '0000000110000000000000000001001001','0000000110100000000000000001001001', &
        '0000000111000000000000000001001001','0000000111100000000000000001001001', &
        '0000001000000000000000000001001001','0000001000100000000000000001001001']
+
+  ! Section IDs are transmitted on the wire; preserve their assigned names.
+  character(len=3), parameter :: SECTION_NAMES(86)=[character(len=3) :: &
+       'AB','AK','AL','AR','AZ','BC','CO','CT','DE','EB', &
+       'EMA','ENY','EPA','EWA','GA','GH','IA','ID','IL','IN', &
+       'KS','KY','LA','LAX','NS','MB','MDC','ME','MI','MN', &
+       'MO','MS','MT','NC','ND','NE','NFL','NH','NL','NLI', &
+       'NM','NNJ','NNY','TER','NTX','NV','OH','OK','ONE','ONN', &
+       'ONS','OR','ORG','PAC','PR','QC','RI','SB','SC','SCV', &
+       'SD','SDG','SF','SFL','SJV','SK','SNJ','STX','SV','TN', &
+       'UT','VA','VI','VT','WCF','WI','WMA','WNY','WPA','WTX', &
+       'WV','WWA','WY','DX','PE','NB']
+
+  if(PACK77_NSEC.ne.size(SECTION_NAMES)) error stop 'Section registry size changed'
+  do i=1,size(SECTION_NAMES)
+     if(pack77_arrl_section_index(SECTION_NAMES(i)).ne.i) error stop 'Section wire ID changed'
+     call expect_render(jtty_class_section_atom(1,'A',i),'1A '//trim(SECTION_NAMES(i)))
+  enddo
 
   do i=0,5
      call expect_vector(jtty_call_atom(i,'K1ABC'),CALL_VECTORS(i))

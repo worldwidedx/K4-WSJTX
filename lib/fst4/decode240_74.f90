@@ -1,4 +1,10 @@
-subroutine decode240_74(llr,Keff,maxosd,norder,apmask,message74,cw,ntype,nharderror,dmin)
+module fst4_ldpc_74
+   use fst4_osd_workspace, only: fst4_osd_workspace_type
+   use fastosd240_74_module, only: fastosd240_74_owned
+   private
+   public :: decode240_74_owned
+contains
+subroutine decode240_74_owned(work,llr,Keff,maxosd,norder,apmask,message74,cw,ntype,nharderror,dmin)
 !
 ! A hybrid bp/osd decoder for the (240,74) code.
 !
@@ -7,6 +13,7 @@ subroutine decode240_74(llr,Keff,maxosd,norder,apmask,message74,cw,ntype,nharder
 ! maxosd>1: do bp and then call osd maxosd times with saved bp outputs
 ! norder  : osd decoding depth
 !
+   type(fst4_osd_workspace_type), intent(inout), target :: work
    integer, parameter:: N=240, K=74, M=N-K
    integer*1 cw(N),apmask(N)
    integer*1 nxor(N),hdec(N)
@@ -141,7 +148,7 @@ subroutine decode240_74(llr,Keff,maxosd,norder,apmask,message74,cw,ntype,nharder
    do i=1,nosd
       zn=zsave(:,i)
 !      call osd240_74(zn,Keff,apmask,norder,message74,cw,nharderror,dminosd)
-      call fastosd240_74(zn,Keff,apmask,norder,message74,cw,nharderror,dminosd)
+      call fastosd240_74_owned(work,zn,Keff,apmask,norder,message74,cw,nharderror,dminosd)
       if(nharderror.gt.0) then
          hdec=0
          where(llr .ge. 0) hdec=1
@@ -158,4 +165,15 @@ subroutine decode240_74(llr,Keff,maxosd,norder,apmask,message74,cw,ntype,nharder
    dminosd=0.0
 
    return
-end subroutine decode240_74
+end subroutine decode240_74_owned
+
+end module fst4_ldpc_74
+
+subroutine decode240_74(llr,Keff,maxosd,norder,apmask,message74,cw,ntype,nharderror,dmin)
+   use fst4_ldpc_74, only: decode240_74_owned
+   use fst4_osd_workspace, only: fst4_osd_workspace_type
+   type(fst4_osd_workspace_type), save :: legacy
+   real llr(240),dmin
+   integer*1 apmask(240),message74(74),cw(240)
+   call decode240_74_owned(legacy,llr,Keff,maxosd,norder,apmask,message74,cw,ntype,nharderror,dmin)
+end subroutine

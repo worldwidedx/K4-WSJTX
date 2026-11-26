@@ -4,6 +4,7 @@ program ft8_a8_test
 
   use wavhdr
   use ft8_a7
+  use ft8_decode, only: ft8_a8d
   include 'ft8_params.f90'           !Set various constants
   type(hdr) h                        !Header for .wav file
   character arg*12,fname*120

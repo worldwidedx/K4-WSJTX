@@ -1,6 +1,8 @@
-subroutine spec64(c0,cs,npts,nsps,mode_q65,jpk,s3,LL,NN)
+subroutine spec64(c0,cs,npts,nsps,mode_q65,jpk,s3,LL,NN,plan)
 
   use q65_workspace, only: Q65_MAXFFT
+  use iso_c_binding, only: c_int64_t
+  integer(c_int64_t), intent(in) :: plan
 
   complex c0(0:npts-1)                       !Complex spectrum of dd()
   complex cs(0:Q65_MAXFFT-1)                 !Complex symbol spectrum
@@ -28,7 +30,7 @@ subroutine spec64(c0,cs,npts,nsps,mode_q65,jpk,s3,LL,NN)
      cs(0:nz)=c0(ja:jb)
 !     if(nz.lt.nfft-1) cs(nz+1:)=0.  
      if(nz.lt.nfft-1 .and. nz.ge.0) cs(nz+1:)=0.  !Avoid a potential bounds error with Q65-15 EME
-     call four2a(cs,nsps,1,-1,1)             !c2c FFT to frequency
+     call sfftw_execute(plan)
      do ii=1,LL
         i=ii-65+mode_q65      !mode_q65 = 1 2 4 8 16 for Q65 A B C D E
         if(i.lt.0) i=i+nsps

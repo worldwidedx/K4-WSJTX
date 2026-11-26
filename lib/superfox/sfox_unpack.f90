@@ -1,12 +1,34 @@
-subroutine sfox_unpack(nutc,x,nsnr,f0,dt0,foxcall,notp)
+module sfox_unpack_module
+  use iso_c_binding, only: c_ptr, c_null_ptr
+  use decoder_engine_types, only: superfox_observation, sf_kind_cq, sf_kind_exchange, &
+       sf_kind_free_text, sf_kind_verification
+  use packjt77, only: pack77_state
+  implicit none
+  private
+  public :: sfox_unpack_for_state, superfox_callback, sfox_render_legacy
+  abstract interface
+     subroutine superfox_callback(user_context,record)
+       import superfox_observation, c_ptr
+       type(c_ptr), intent(in) :: user_context
+       type(superfox_observation), intent(in) :: record
+     end subroutine superfox_callback
+  end interface
+contains
+subroutine sfox_unpack_for_state(knowledge,callback,user_context,nutc,x,nsnr,f0,dt0,foxcall,notp)
 
   use packjt77
+  implicit real(a-h,o-z)
+  implicit integer(i-n)
+  type(pack77_state), optional, intent(inout) :: knowledge
+  procedure(superfox_callback) :: callback
+  type(c_ptr), intent(in) :: user_context
+  integer child_index
   parameter (NQU1RKS=203514677)
   integer*1 x(0:49)
   integer*8 n58
   logical success
   character*336 msgbits
-  character*22 msg(10)            !### only msg(1) is used ??? ###
+  character*22 msg(10)
   character*13 foxcall,c13
   character*10 ssignature
   character*4 crpt(5),grid4
@@ -15,6 +37,7 @@ subroutine sfox_unpack(nutc,x,nsnr,f0,dt0,foxcall,notp)
   logical use_otp
   data c/' 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ/'/
 
+  child_index=0
   ncq=0
   if (notp.eq.0) then
      use_otp = .FALSE.
@@ -25,7 +48,11 @@ subroutine sfox_unpack(nutc,x,nsnr,f0,dt0,foxcall,notp)
 1000 format(47b7.7)
   read(msgbits(327:329),'(b3)') i3            !Message type
   read(msgbits(1:28),'(b28)') n28           !Standard Fox call
-  call unpack28(n28,foxcall,success)
+  if(present(knowledge)) then
+     call unpack28_for_state(knowledge,n28,foxcall,success)
+  else
+     call unpack28(n28,foxcall,success)
+  endif
 
   if(i3.eq.1) then
 !     Type i3=1 is documented for a compound-Fox c58 layout, but the
@@ -40,8 +67,7 @@ subroutine sfox_unpack(nutc,x,nsnr,f0,dt0,foxcall,notp)
         if(freeTextMsg(i:i).ne.'.') exit
         freeTextMsg(i:i)=' '
      enddo
-     write(*,1100) nutc,nsnr,dt0,nint(f0),freeTextMsg
-1100 format(i6.6,i4,f5.1,i5,1x,"~",2x,a)
+     call emit(sf_kind_free_text,freeTextMsg)
   else if(i3.eq.3) then                       !CQ FoxCall Grid     
      read(msgbits(1:58),'(b58)') n58          !FoxCall
      do i=11,1,-1
@@ -53,7 +79,7 @@ subroutine sfox_unpack(nutc,x,nsnr,f0,dt0,foxcall,notp)
      read(msgbits(59:73),'(b15)') n15
      call unpackgrid(n15,grid4)
      msg(1)='CQ '//trim(foxcall)//' '//grid4
-     write(*,1100) nutc,nsnr,dt0,nint(f0),trim(msg(1))
+     call emit(sf_kind_cq,trim(msg(1)))
      allz=1
      do i=0,6
         read(msgbits(74+32*i:105+32*i),'(b32)') n32
@@ -66,8 +92,7 @@ subroutine sfox_unpack(nutc,x,nsnr,f0,dt0,foxcall,notp)
         if(freeTextMsg(i:i).ne.'.') exit
         freeTextMsg(i:i)=' '
      enddo
-     if(len(trim(freeTextMsg)).gt.0) write(*,1100) nutc,nsnr,dt0,&
-          nint(f0),freeTextMsg
+     if(len(trim(freeTextMsg)).gt.0) call emit(sf_kind_free_text,freeTextMsg)
      go to 100
   endif
 
@@ -92,7 +117,11 @@ subroutine sfox_unpack(nutc,x,nsnr,f0,dt0,foxcall,notp)
   do i=1,iz
      j=28*i + 1
      read(msgbits(j:j+27),'(b28)') n28
-     call unpack28(n28,c13,success)
+     if(present(knowledge)) then
+        call unpack28_for_state(knowledge,n28,c13,success)
+     else
+        call unpack28(n28,c13,success)
+     endif
      if(n28.eq.0 .or. n28.eq.NQU1RKS) cycle 
      msg(i)=trim(c13)//' '//trim(foxcall)
      if(msg(i)(1:3).eq.'CQ ') then
@@ -106,19 +135,60 @@ subroutine sfox_unpack(nutc,x,nsnr,f0,dt0,foxcall,notp)
         endif
      endif
      if(ncq.le.1 .or. msg(i)(1:3).ne.'CQ ') then
-        write(*,1100) nutc,nsnr,dt0,nint(f0),trim(msg(i))
+        if(msg(i)(1:3).eq.'CQ ') then
+           call emit(sf_kind_cq,trim(msg(i)))
+        else
+           call emit(sf_kind_exchange,trim(msg(i)))
+        endif
      endif
   enddo
 
   if(msgbits(306:306).eq.'1' .and. ncq.lt.1) then
-     write(*,1100) nutc,nsnr,dt0,nint(f0),'CQ '//foxcall
+     call emit(sf_kind_cq,'CQ '//foxcall)
   endif
 
 100 read(msgbits(307:326),'(b20)') notp
   if (use_otp) then
       write(ssignature,'(I6.6)') notp
-      write(*,1100) nutc,nsnr,dt0,nint(f0),'$VERIFY$ '//trim(foxcall)// &
-           ' '//trim(ssignature)
+      call emit(sf_kind_verification,'$VERIFY$ '//trim(foxcall)//' '//trim(ssignature))
    endif
 900 return
+contains
+  subroutine emit(kind,text)
+    integer, intent(in) :: kind
+    character(len=*), intent(in) :: text
+    type(superfox_observation) :: record
+
+    child_index=child_index+1
+    record%symbols=x
+    record%kind=kind
+    record%child_index=child_index
+    record%frequency_hz=f0
+    record%dt_seconds=dt0
+    record%snr_db=nsnr
+    record%message=text
+    write(record%legacy_line,'(i6.6,i4,f5.1,i5,1x,"~",2x,a)') nutc,nsnr,dt0,nint(f0),text
+    record%legacy_line_length=24+len(text)
+    call callback(user_context,record)
+  end subroutine emit
+end subroutine sfox_unpack_for_state
+
+subroutine sfox_render_legacy(user_context,record)
+  type(c_ptr), intent(in) :: user_context
+  type(superfox_observation), intent(in) :: record
+  write(*,'(a)') record%legacy_line(:record%legacy_line_length)
+end subroutine sfox_render_legacy
+end module sfox_unpack_module
+
+subroutine sfox_unpack(nutc,x,nsnr,f0,dt0,foxcall,notp)
+  use iso_c_binding, only: c_null_ptr
+  use sfox_unpack_module, only: sfox_unpack_for_state, sfox_render_legacy
+  implicit none
+  integer nutc,nsnr,notp
+  integer*1 x(0:49)
+  real f0,dt0
+  character*13 foxcall
+
+  call sfox_unpack_for_state(callback=sfox_render_legacy,user_context=c_null_ptr,nutc=nutc,x=x,nsnr=nsnr, &
+       f0=f0,dt0=dt0,foxcall=foxcall,notp=notp)
 end subroutine sfox_unpack

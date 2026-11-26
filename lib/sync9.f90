@@ -17,11 +17,13 @@ subroutine sync9(ss,nzhsym,lag1,lag2,ia,ib,ccfred,red2,ipkbest)
   ipkbest=0
   sbest=0.
   ccfred=0.
+  red2=0.
 
   do i=ia,ib                         !Loop over freq range
      ss1=ss(1:184,i)
      call pctile(ss1,nzhsym,40,xmed)
 
+     if(xmed.le.0.) cycle
      ss1=ss1/xmed - 1.0
      do j=1,nzhsym
         if(ss1(j).gt.3.0) ss1(j)=3.0
@@ -29,27 +31,20 @@ subroutine sync9(ss,nzhsym,lag1,lag2,ia,ib,ccfred,red2,ipkbest)
 
      call pctile(ss1,nzhsym,45,sbase)
      ss1=ss1-sbase
-     sq0=dot_product(ss1(1:nzhsym),ss1(1:nzhsym))
-     rms=sqrt(sq0/(nzhsym-1))
 
      smax=0.
      do lag=lag1,lag2                !DT = 2.5 to 5.0 s
         sum1=0.
-        sq2=sq0
-        nsum=nzhsym
         do j=1,16                    !Sum over 16 sync symbols
            k=ii2(j) + lag
            if(k.ge.1 .and. k.le.nzhsym) then
               sum1=sum1 + ss1(k)
-              sq2=sq2 - ss1(k)*ss1(k)
-              nsum=nsum-1
            endif
         enddo
         if(sum1.gt.smax) then
            smax=sum1
            ipk=i 
         endif
-        rms=sqrt(sq2/(nsum-1))
      enddo
      ccfred(i)=smax                        !Best at this freq, over all lags
      if(smax.gt.sbest) then
@@ -81,10 +76,10 @@ subroutine sync9(ss,nzhsym,lag1,lag2,ia,ib,ccfred,red2,ipkbest)
   enddo
 
   call pctile(sq(ia:ib),ib-ia+1,20,sq0)
+  if(sq0.le.0.) return
   rms=sqrt(sq0)
   savg2(ia:ib)=savg2(ia:ib)/(5.0*rms)
 
-  red2=0.
   do i=ia+11,ib-10
      ref=max(savg2(i-10),savg2(i+10))
      red2(i)=savg2(i)-ref

@@ -168,7 +168,7 @@ private:
   qint64 tx_sample_{0};
   qint64 tx_silence_{0};
   qint64 tx_cw_sample_{0};
-  unsigned tx_cw_symbols_{0};
+  QVector<int> tx_cw_id_;
   double tx_cw_gain_{0.};
   double tx_envelope_{1.};
   bool synchronize_{true};
@@ -179,6 +179,7 @@ private:
   K4RemoteTxGuard tx_guard_;
   K4RemoteTxAudio tx_audio_;
   TxAudioQueue jtty_audio_queue_;
+  TxAudioQueueProgress jtty_last_progress_;
   quint64 tx_generation_{0};
   qint64 last_meter_query_{0};
   bool restore_test_mode_{false};

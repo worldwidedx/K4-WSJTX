@@ -38,15 +38,20 @@ public:
   Q_SLOT void reset (bool report_dropped_frames) override;
 
 private:
+  friend class TestSoundInput;
+
   // used internally
   Q_SLOT void handleStateChanged (QAudio::State);
 
   bool checkStream ();
+  void updateStreamInterruption (QAudio::State, QAudio::Error);
   void publishStreamDescriptor ();
 
   QScopedPointer<QAudioInput> m_stream;
   QPointer<AudioDevice> m_sink;
   qint64 cummulative_lost_usec_;
+  QAudio::Error m_lastStreamError {QAudio::NoError};
+  bool m_interruptionReported {false};
   bool m_destroying {false};
 };
 

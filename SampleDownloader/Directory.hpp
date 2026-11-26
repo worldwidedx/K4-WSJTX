@@ -33,7 +33,7 @@ public:
   QSize sizeHint () const override {return {400, 500};}
 
   bool url_root (QUrl);
-  bool refresh (bool http_only);
+  bool refresh ();
   void abort ();
   void update (QTreeWidgetItem * item);
 
@@ -44,11 +44,10 @@ protected:
 
 private:
   Q_SLOT void authentication (QNetworkReply *, QAuthenticator *);
-  void parse_entries (QJsonArray const& entries, QDir const& dir, QTreeWidgetItem * parent);
+  int parse_entries (QJsonArray const& entries, QDir const& dir, QTreeWidgetItem * parent);
 
   Configuration const * configuration_;
   QNetworkAccessManager * network_manager_;
-  bool http_only_;
   QDir root_dir_;
   QUrl url_root_;
   RemoteFile contents_;

@@ -4,6 +4,7 @@
 #include "pimpl_h.hpp"
 
 #include <QList>
+#include <QMap>
 #include <QSortFilterProxyModel>
 #include <QDateTime>
 #include <QJsonObject>
@@ -70,6 +71,18 @@ public:
   using FrequencyItems = QList<Item>;
   using BandSet = QSet<QString>;
 
+  struct ImportReport
+  {
+    int entries {0};
+    int imported {0};
+    int invalid_frequency {0};
+    QMap<QString, int> unknown_modes;
+    int invalid_region {0};
+    int invalid_item {0};
+
+    int skipped () const { return entries - imported; }
+  };
+
   enum Column {region_column, mode_column, frequency_column, frequency_mhz_column, description_column, start_time_column, end_time_column, source_column, preferred_column, SENTINAL};
 
   // an iterator that meets the requirements of the C++ for range statement
@@ -100,10 +113,11 @@ public:
   // Load and store underlying items
   FrequencyItems frequency_list (FrequencyItems);
   FrequencyItems const& frequency_list () const;
+  static FrequencyItems const& default_items ();
   FrequencyItems frequency_list (QModelIndexList const&) const;
   void frequency_list_merge (FrequencyItems const&);
   void to_json_file(QFile *, QString, QString, FrequencyItems const&);
-  static FrequencyItems from_json_file(QFile *);
+  static FrequencyItems from_json_file(QFile *, ImportReport * = nullptr);
 
   // Iterators for the sorted and filtered items
   //
